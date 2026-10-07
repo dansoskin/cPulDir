@@ -138,6 +138,15 @@ static MotionProfile fresh(float pos, float dt, MotionLimits L)
     return p;
 }
 
+/* Calls a move to rest takes beyond the analytic trapezoid: the done call,
+ * plus the discrete ceiling's tail. Following the ceiling, v' = sqrt(dd^2 +
+ * v^2) - dd sheds a little less than dd per call, about
+ * ln(vmax / (dmax*dt)) / 2 calls over a descent from vmax. */
+static float extra_calls(MotionLimits L, float dt)
+{
+    return 1.0f + 0.5f * logf(L.vmax / (L.dmax * dt));
+}
+
 /* Test 2: against the analytic trapezoid (D8): 0.5 s up, 0.1 s cruise, 0.5 s down. */
 static void test_trapezoid(void)
 {
@@ -145,11 +154,7 @@ static void test_trapezoid(void)
     MotionProfile p = fresh(0.0f, 0.001f, L);
     assert(MotionProfile_setTarget(&p, 9.0f));
     const Run r = run_to_done(&p, 5000);
-    /* 1100 analytic calls, plus the done call, plus the discrete ceiling's
-     * tail: following it, v' = sqrt(dd^2 + v^2) - dd sheds a little less
-     * than dd per call, about ln(vmax / (dmax*dt)) / 2 calls in all. */
-    const float expected = 1100.0f + 1.0f + 0.5f * logf(15.0f / (30.0f * 0.001f));
-    assert(fabsf((float)r.calls - expected) <= 2.0f);
+    assert(fabsf((float)r.calls - (1100.0f + extra_calls(L, 0.001f))) <= 2.0f);
     assert(r.peak == 15.0f);
     assert(p.vel == 0.0f && p.acc == 0.0f);
     assert(p.pos == 9.0f && p.target == 9.0f);
@@ -376,6 +381,66 @@ static void test_halt(void)
     printf("ok halt\n");
 }
 
+/* Test 8: a lowered vmax is followed down at exactly dmax, then held. */
+static void test_lowered_vmax(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 1000.0f));
+    run_until_vel(&p, 15.0f, 10000);
+    g_vmax_relaxed = 1;
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 5, 30, 30, 0 }));
+    const float dv = 30.0f * 0.001f;
+    for (int calls = 0; p.vel != 5.0f; calls++) {
+        assert(calls < 10000);
+        const float v0 = p.vel;
+        step(&p);
+        if (p.vel != 5.0f)
+            assert(fabsf((v0 - p.vel) - dv) <= dv * 1e-4f);
+        else                                 /* the last step only closes the gap */
+            assert(v0 - p.vel > 0.0f && v0 - p.vel <= dv * (1.0f + 1e-4f));
+    }
+    g_vmax_relaxed = 0;
+    for (int i = 0; i < 100; i++) {
+        step(&p);
+        assert(p.vel == 5.0f);
+    }
+    printf("ok lowered_vmax\n");
+}
+
+/* Test 8: a lowered amax applies from the next call. */
+static void test_lowered_amax(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 1000.0f));
+    for (int i = 0; i < 100; i++)
+        step(&p);
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 10, 30, 0 }));
+    for (int calls = 0; p.vel != 15.0f; calls++) {
+        assert(calls < 10000);
+        const float v0 = p.vel;
+        step(&p);
+        assert(p.vel - v0 <= 10.0f * 0.001f * (1.0f + 1e-4f));
+    }
+    printf("ok lowered_amax\n");
+}
+
+/* Test 1: the same move at dt 1 ms and 5 ms differs only by the discretisation. */
+static void test_dt_independence(void)
+{
+    const MotionLimits L = { 15, 30, 30, 0 };
+    MotionProfile fine = fresh(0.0f, 0.001f, L), coarse = fresh(0.0f, 0.005f, L);
+    assert(MotionProfile_setTarget(&fine, 9.0f));
+    assert(MotionProfile_setTarget(&coarse, 9.0f));
+    const Run f = run_to_done(&fine, 10000), c = run_to_done(&coarse, 10000);
+    assert(fine.pos == 9.0f && coarse.pos == 9.0f);
+    /* Each run's known tail grows as dt*ln(1/dt); compare what remains. */
+    const float t_fine = ((float)f.calls - extra_calls(L, 0.001f)) * 0.001f;
+    const float t_coarse = ((float)c.calls - extra_calls(L, 0.005f)) * 0.005f;
+    assert(fabsf(t_fine - t_coarse) <= 0.005f);
+    assert(fabsf(f.peak - c.peak) <= 30.0f * 0.005f);
+    printf("ok dt_independence\n");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);   /* keep the ok lines when an assert aborts */
@@ -389,5 +454,8 @@ int main(void)
     test_endless();
     test_stop();
     test_halt();
+    test_lowered_vmax();
+    test_lowered_amax();
+    test_dt_independence();
     return 0;
 }
