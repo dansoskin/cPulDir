@@ -34,6 +34,7 @@ typedef struct {
     float    taps[MOTION_PROFILE_MAX_TAPS];
     uint16_t n, head;                     /* window length; next slot to overwrite */
     uint16_t drain;                       /* calls since landing, up to n + 1 */
+    uint16_t same;                        /* draining: taps a_0 (newest) to a_same share a sign */
     float    sum, sum_c;                  /* running sum of the ring, its Kahan compensation */
     float    wsum, wsum_c;                /* the ring weighted n-1 (newest) down to 0; pos = p_t - wsum*dt/n */
 } MotionProfile;

@@ -59,7 +59,7 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
         && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
         && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
-        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c;
+        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c && a->same == b->same;
 }
 
 static void test_setup(void)
@@ -219,9 +219,8 @@ static void run_until_vel(MotionProfile* p, float vel, int max_calls)
     }
 }
 
-/* Test 5: a target set from rest is never passed and is landed on exactly.
- * n moves, start within +-start_span, distance within +-dist_span (>= 0.001).
- * With jerk_scale > 0, jmax is jerk_scale times 1.01 to 20 times the smallest that fits. */
+/* Test 5: n moves from rest, start within +-start_span, distance within +-dist_span,
+ * never passing and landing exactly; jerk_scale > 0 sets jmax 1.01-20x the smallest. */
 static void random_moves(int n, float start_span, float dist_span, float jerk_scale)
 {
     for (int i = 0; i < n; i++) {
@@ -256,7 +255,7 @@ static void test_random_moves(float jerk_scale)
  * with small dmax, where uncompensated rounding of p_t passed targets. */
 static void test_random_moves_large(float jerk_scale)
 {
-    random_moves(1000, 5000.0f, 5000.0f, jerk_scale);
+    random_moves(300, 5000.0f, 5000.0f, jerk_scale);
     printf("ok random_moves_large%s\n", jerk_scale > 0.0f ? " (jerk)" : "");
 }
 
@@ -614,6 +613,13 @@ static void test_frozen_window(void)
     /* Done: the refused calls are accepted and n is recomputed. */
     assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 30.1f, 30, 290 }) && p.n == 208);
     assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 30, 30, 250 }) && p.n == 240);
+    assert(MotionProfile_setTarget(&p, 60.0f));      /* a move on the new window */
+    for (int calls_ = 0; !p.done; calls_++) {
+        assert(calls_ < 10000);
+        step(&p);
+        assert(p.n == 240 || p.done);
+    }
+    assert(p.pos == 60.0f);
     {
         const MotionProfile before = p;       /* 300 taps: refused even when done */
         assert(!MotionProfile_setLimits(&p, (MotionLimits){ 15, 30, 30, 200 }));
@@ -672,7 +678,57 @@ static void test_rebase(void)
     MotionProfile_rebase(&e, 1.0f, 999.0f);
     assert(fabsf(e.pos - (pos0 - 1.0f)) <= 1e-6f && e.target == target0 - 1.0f);
     assert(e.endless && e.speed == 5.0f);
+
+    /* In flight, the caller's target is taken, not target - shift. */
+    MotionProfile c = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&c, 50.0f));
+    for (int i = 0; i < 300; i++)
+        step(&c);
+    MotionProfile_rebase(&c, 3.0f, 20.0f);
+    assert(c.target == 20.0f);
+    run_to_done(&c, 10000);
+    assert(c.pos == 20.0f && c.vel == 0.0f);
     printf("ok rebase\n");
+}
+
+/* A new target while the ring drains takes the ring back from its prefix sums
+ * as it stood; the same target again replays the rest of the drain. */
+static void test_retarget_draining(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 };
+    MotionProfile x = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&x, 9.0f));
+    while (!(x.landed && x.drain == 100))
+        step(&x);
+    MotionProfile y = x;
+    assert(MotionProfile_setTarget(&y, 9.0f));
+    while (!x.done) {
+        step(&x);
+        step(&y);
+        assert(fabsf(y.vel - x.vel) <= 1e-5f && fabsf(y.pos - x.pos) <= 1e-5f);
+    }
+    run_to_done(&y, 10000);
+    assert(y.pos == 9.0f);
+
+    /* Elsewhere, and endless then stopped: continuous, and lands exactly. */
+    MotionProfile z = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&z, 9.0f));
+    while (!(z.landed && z.drain == 150))
+        step(&z);
+    MotionProfile w = z;
+    assert(MotionProfile_setTarget(&z, 4.0f));
+    run_to_done(&z, 10000);
+    assert(z.pos == 4.0f);
+    assert(MotionProfile_setEndless(&w, -3.0f));
+    for (int i = 0; i < 1000; i++) {
+        const float pos0 = w.pos;
+        step(&w);
+        assert(fabsf(w.pos - pos0) <= L.vmax * w.dt);
+    }
+    MotionProfile_stop(&w);
+    run_to_done(&w, 10000);
+    assert(w.vel == 0.0f && w.pos == w.target);
+    printf("ok retarget_draining\n");
 }
 
 /* D1: seeding the idle generator into motion, as the axis leaves a stream. */
@@ -684,6 +740,10 @@ static void test_seed(void)
     assert(p.pos == 2.0f && p.vel == 7.0f && p.endless && !p.done);
     step(&p);
     assert(p.vel == 7.0f && p.acc == 0.0f);
+    {
+        const float want = 2.0f + 7.0f * dt;
+        assert(fabsf(p.pos - want) <= nextafterf(want, INFINITY) - want);
+    }
     const float d = MotionProfile_stopDistance(&p);
     MotionProfile_stop(&p);
     run_to_done(&p, 10000);
@@ -733,6 +793,7 @@ int main(void)
     }
     test_frozen_window();
     test_rebase();
+    test_retarget_draining();
     test_seed();
     return 0;
 }

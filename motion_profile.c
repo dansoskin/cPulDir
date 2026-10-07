@@ -5,6 +5,10 @@
 #include <math.h>
 #include "motion_profile.h"
 
+#ifdef __FAST_MATH__
+#error "compensated sums need strict float evaluation"
+#endif
+
 #define DT_MIN 0.00025f    /* 2 kHz plan tick (D14) */
 #define DT_MAX 0.01f
 
@@ -31,6 +35,24 @@ static void clear_ring(MotionProfile* p)
         p->taps[i] = 0.0f;
     p->head = 0;
     p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
+    p->same = 0;
+}
+
+/* Leaving a drain early: prefix sums back to taps in one pass, with the zeros the
+ * drained calls would have pushed. sum and wsum already hold S(t) and T(t). */
+static void from_prefix_sums(MotionProfile* p)
+{
+    const uint16_t n = p->n, j = p->drain;
+    uint16_t i = p->head;                     /* the oldest slot, a_(n-1) */
+    for (uint16_t k = 0; k < n; k++) {
+        const uint16_t m = (uint16_t)(n - 1 - k), next = (uint16_t)(i + 1 == n ? 0 : i + 1);
+        if (k < j)
+            p->taps[i] = 0.0f;                /* already out of the window */
+        else if (m > 0)
+            p->taps[i] -= p->taps[next];      /* S(m) - S(m-1), not yet rewritten */
+        i = next;
+    }
+    p->head = (uint16_t)((p->head + j) % n);
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -71,6 +93,8 @@ bool MotionProfile_setTarget(MotionProfile* p, float target)
 {
     if (!isfinite(target))
         return false;
+    if (p->landed && !p->done && p->drain > 0)
+        from_prefix_sums(p);
     p->target = target;
     p->endless = p->stopping = p->landed = p->done = false;
     p->drain = 0;
@@ -81,6 +105,8 @@ bool MotionProfile_setEndless(MotionProfile* p, float speed)
 {
     if (!isfinite(speed))
         return false;
+    if (p->landed && !p->done && p->drain > 0)
+        from_prefix_sums(p);
     p->speed = speed;
     p->endless = true;
     p->stopping = p->landed = p->done = false;
@@ -226,6 +252,54 @@ static void push(MotionProfile* p, float u)
     }
 }
 
+/* Draining in constant time. On the first drain call the ring, newest tap a_0
+ * first, becomes prefix sums S(t) = a_0 + ... + a_t in one pass; drain call j
+ * then needs S(t) and T(t) = S(0) + ... + S(t-1), with t = n-1-j. */
+static void to_prefix_sums(MotionProfile* p)
+{
+    const uint16_t n = p->n;
+    float s = 0.0f, c = 0.0f, w = 0.0f, wc = 0.0f;
+    float first = 0.0f;                       /* the first nonzero tap, for its sign */
+    uint16_t i = p->head;
+    p->same = (uint16_t)(n - 1);
+    for (uint16_t m = 0; m < n; m++) {
+        i = (uint16_t)((i == 0 ? n : i) - 1); /* a_m, newest first */
+        const float a = p->taps[i];
+        if (first == 0.0f)
+            first = a;
+        else if (a != 0.0f && (a > 0.0f) != (first > 0.0f) && p->same == n - 1)
+            p->same = (uint16_t)(m - 1);
+        kahan_add(&s, &c, a);
+        p->taps[i] = s;
+        if (m + 1 < n)
+            kahan_add(&w, &wc, s);
+    }
+    p->wsum = w;                              /* T(n-1), what this call steps down from */
+    p->wsum_c = 0.0f;
+}
+
+/* Drain call j = drain: S(t) is read, T(t) stepped down from T(t+1). */
+static void drain_step(MotionProfile* p)
+{
+    const uint16_t n = p->n, j = p->drain;
+    if (j == 1)
+        to_prefix_sums(p);
+    if (j >= n) {                             /* empty: exactly at rest */
+        p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
+        return;
+    }
+    const uint16_t t = (uint16_t)(n - 1 - j);
+    const uint16_t i = (uint16_t)(p->head + j >= n ? p->head + j - n : p->head + j);
+    const float s = p->taps[i];
+    p->sum = s;
+    p->sum_c = 0.0f;
+    kahan_add(&p->wsum, &p->wsum_c, -s);
+    /* Taps sharing a sign give T(t) that sign: a residue of the other sign would
+     * turn the output back past the target. T(0) is 0. */
+    if (t == 0 || (t <= p->same && (s == 0.0f || (p->wsum > 0.0f) != (s > 0.0f))))
+        p->wsum = p->wsum_c = 0.0f;
+}
+
 /* The ring has drained: exact rest at the target, where lag is already 0. */
 static void finish(MotionProfile* p)
 {
@@ -245,12 +319,11 @@ void MotionProfile_advance(MotionProfile* p)
     const bool was_landed = p->landed;
     const float u = trapezoid(p);
     const float vel0 = p->vel;
-    push(p, u);
-    /* Draining: exact sums every call, as a running residue could turn the
-     * output back past the target once the ring is nearly empty. */
     if (was_landed) {
         p->drain++;
-        recompute(p);
+        drain_step(p);
+    } else {
+        push(p, u);
     }
     p->vel = p->sum / (float)p->n;
     p->pos = p->p_t - lag(p);
@@ -268,12 +341,18 @@ float MotionProfile_stopDistance(const MotionProfile* p)
 /* D2: shift, never re-sync; the output follows p_t, and the lag stays with it. */
 void MotionProfile_rebase(MotionProfile* p, float shift, float target)
 {
-    kahan_add(&p->p_t, &p->p_c, -shift);
+    if (p->landed) {                      /* at rest on its target: keep them equal */
+        p->target -= shift;
+        p->p_t = p->target;
+        p->p_c = 0.0f;
+    } else {
+        kahan_add(&p->p_t, &p->p_c, -shift);
+        if (p->endless || p->stopping)
+            p->target -= shift;           /* no target of the caller's to take */
+        else
+            p->target = target;
+    }
     p->pos = p->p_t - lag(p);
-    if (p->landed || p->endless || p->stopping)
-        p->target -= shift;               /* no target of the caller's to take */
-    else
-        p->target = target;
 }
 
 bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
@@ -284,7 +363,8 @@ bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
         p->taps[i] = vel;
     p->head = 0;
     recompute(p);
-    /* the trapezoid runs ahead of the output by the full ring's lag */
+    /* The trapezoid runs ahead by the full ring's lag. fl(n*vel)/n and p_t - lag
+     * may each be an ulp off, so the next output is vel and pos + vel*dt to an ulp. */
     p->p_t = pos + lag(p);
     p->p_c = 0.0f;
     p->pos = p->target = pos;
