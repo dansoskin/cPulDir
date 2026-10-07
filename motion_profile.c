@@ -265,19 +265,35 @@ float MotionProfile_stopDistance(const MotionProfile* p)
     return lag(p) + p->v_t * fabsf(p->v_t) / (2.0f * p->lim.dmax);
 }
 
+/* D2: shift, never re-sync; the output follows p_t, and the lag stays with it. */
 void MotionProfile_rebase(MotionProfile* p, float shift, float target)
 {
-    (void)p;
-    (void)shift;
-    (void)target;
+    kahan_add(&p->p_t, &p->p_c, -shift);
+    p->pos = p->p_t - lag(p);
+    if (p->landed || p->endless || p->stopping)
+        p->target -= shift;               /* no target of the caller's to take */
+    else
+        p->target = target;
 }
 
 bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
 {
-    (void)p;
-    (void)pos;
-    (void)vel;
-    return false;
+    if (!p->done || !isfinite(pos) || !isfinite(vel))
+        return false;
+    for (uint16_t i = 0; i < p->n; i++)
+        p->taps[i] = vel;
+    p->head = 0;
+    recompute(p);
+    /* the trapezoid runs ahead of the output by the full ring's lag */
+    p->p_t = pos + lag(p);
+    p->p_c = 0.0f;
+    p->pos = p->target = pos;
+    p->v_t = p->vel = p->speed = vel;
+    p->acc = 0.0f;
+    p->endless = true;
+    p->stopping = p->landed = p->done = false;
+    p->drain = 0;
+    return true;
 }
 
 float MotionProfile_minJerk(float amax, float dmax, float dt)

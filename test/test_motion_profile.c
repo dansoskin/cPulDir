@@ -635,6 +635,78 @@ static void test_frozen_window(void)
     printf("ok frozen_window\n");
 }
 
+/* D1, D2: a profile re-based by whole units every 10 calls follows the same
+ * path as one that is not, a whole number of units lower. */
+static void test_rebase(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 };
+    MotionProfile a = fresh(0.0f, 0.001f, L), b = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&a, 50.0f));
+    assert(MotionProfile_setTarget(&b, 50.0f));
+    int k = 0;
+    for (int calls = 1; !a.done || !b.done; calls++) {
+        assert(calls < 10000);
+        if (!a.done)
+            step(&a);
+        if (!b.done)
+            step(&b);
+        if (calls % 10 == 0) {
+            k++;
+            MotionProfile_rebase(&b, 1.0f, 50.0f - (float)k);
+        }
+        assert(fabsf((b.pos + (float)k) - a.pos) <= 1e-4f);
+    }
+    assert(a.pos == 50.0f && a.vel == 0.0f);
+    assert(b.pos == 50.0f - (float)k && b.target == b.pos && b.vel == 0.0f);
+
+    /* Landed, the target moves with the frame and the argument is ignored. */
+    MotionProfile_rebase(&b, 2.0f, 999.0f);
+    assert(b.pos == 48.0f - (float)k && b.target == b.pos && b.done);
+
+    /* Endless, likewise; the speed is untouched. */
+    MotionProfile e = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setEndless(&e, 5.0f));
+    for (int i = 0; i < 300; i++)
+        step(&e);
+    const float pos0 = e.pos, target0 = e.target;
+    MotionProfile_rebase(&e, 1.0f, 999.0f);
+    assert(fabsf(e.pos - (pos0 - 1.0f)) <= 1e-6f && e.target == target0 - 1.0f);
+    assert(e.endless && e.speed == 5.0f);
+    printf("ok rebase\n");
+}
+
+/* D1: seeding the idle generator into motion, as the axis leaves a stream. */
+static void test_seed(void)
+{
+    const float dt = 0.001f;
+    MotionProfile p = fresh(0.0f, dt, (MotionLimits){ 20, 30, 30, 300 });
+    assert(MotionProfile_seed(&p, 2.0f, 7.0f));
+    assert(p.pos == 2.0f && p.vel == 7.0f && p.endless && !p.done);
+    step(&p);
+    assert(p.vel == 7.0f && p.acc == 0.0f);
+    const float d = MotionProfile_stopDistance(&p);
+    MotionProfile_stop(&p);
+    run_to_done(&p, 10000);
+    assert(fabsf(p.pos - (2.0f + 7.0f * dt + d)) <= 20.0f * dt);
+
+    /* Refused in motion, and for a non-finite pos or vel; nothing changes. */
+    MotionProfile q = fresh(0.0f, dt, (MotionLimits){ 20, 30, 30, 300 });
+    assert(MotionProfile_setTarget(&q, 10.0f));
+    step(&q);
+    {
+        const MotionProfile before = q;
+        assert(!MotionProfile_seed(&q, 0.0f, 1.0f));
+        assert(profiles_equal(&before, &q));
+    }
+    {
+        const MotionProfile before = p;
+        assert(!MotionProfile_seed(&p, NAN, 1.0f));
+        assert(!MotionProfile_seed(&p, 1.0f, INFINITY));
+        assert(profiles_equal(&before, &p));
+    }
+    printf("ok seed\n");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);   /* keep the ok lines when an assert aborts */
@@ -660,5 +732,7 @@ int main(void)
         test_dt_independence(jmax);
     }
     test_frozen_window();
+    test_rebase();
+    test_seed();
     return 0;
 }
