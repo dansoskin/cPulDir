@@ -1,6 +1,6 @@
 # Bench step 4: the STM32 port under load
 
-For the owner. Section 9, step 4 of `puldir-guidelines.md`. Everything here is on a branch of `164-race_firmware`; this repository only supplies the port, which compiles clean for the G473 against the firmware's HAL (`arm-none-eabi-gcc -Wall -Wextra -Werror`, no extra defines needed).
+For the owner. Section 9, step 4 of `puldir-guidelines.md`. Everything here is on a branch of `164-race_firmware`; this repository only supplies the port, which compiles clean for the G473 against the firmware's HAL (`arm-none-eabi-gcc -Wall -Wextra -Werror`, with `-DSTM32G473xx -DUSE_HAL_DRIVER` and nothing else extra).
 
 The bench drives the real library through its console (jog commands) rather than hand-written increments, because the plan tick exists by the time you run this.
 
@@ -9,7 +9,7 @@ The bench drives the real library through its console (jog commands) rather than
 Guidelines 5.3 and 5.9 estimate the pulse tick's cost and jitter. They are estimates. This bench turns them into numbers on real pins, with four axes pulsing and the application's USB, CAN and UART interrupts running:
 
 - pulse width (it is one tick, 20 us at 50 kHz, 5 us at 200 kHz),
-- period jitter, peak to peak, on a PUL pin,
+- period jitter, peak to peak, on the GPIO_OUT1 marker and on a PUL pin at a rate that divides the tick evenly,
 - the pulse handler's duration, typical and worst,
 - CPU load = handler duration x tick rate,
 - overrun count after one minute (`PulDir_overruns()`).
@@ -26,6 +26,8 @@ The `.ioc` has no TIM6 or TIM7. The timer clock is 144 MHz (`RCC.APB1TimFreq_Val
 | TIM6 | pulse tick, 200 kHz | 0 | 719 | 144e6 / 720 = 200 kHz |
 | TIM7 | plan tick | 143 | 999 | 144e6 / (144 x 1000) = 1 kHz |
 
+Phasing: the plan timer's period must be exactly N pulse periods, with N = PULDIR_TICK_HZ / PULDIR_PLAN_HZ (50 for 50 kHz, 200 for 200 kHz), on the same timer clock. The library latches increment sets only at interval boundaries, every N pulse ticks counted from the first one. `port_start` zeroes both counters and starts the pulse timer, then the plan timer, back to back, so the plan tick fires just after each boundary and has the whole interval to publish. With the values above (TIM7 = 144000 clocks, TIM6 = 2880 or 720 clocks) this holds at both rates. If you change one period, change the other.
+
 Both: Activated, no clock-source options (basic timers), counter mode up, auto-reload preload either way, trigger output reset. In NVIC Settings enable "TIM6, DAC1 and DAC3 global interrupt" and "TIM7, DAC2 and DAC4 global interrupt".
 
 Priorities (preemption, sub is always 0). Today USART2, DMA1 channels 1 and 2 and FDCAN1 IT0/IT1 are all at 0, the highest; USB is at 5 (`usb_handler.c`); SysTick is set to 0 in `setup()`.
@@ -39,7 +41,7 @@ Priorities (preemption, sub is always 0). Today USART2, DMA1 channels 1 and 2 an
 | DMA1 channel 2 | 0 | 2 |
 | FDCAN1 IT0, IT1 | 0 | 2 |
 | USB (HP, LP, wake-up) | 5 | 5, unchanged |
-| SysTick | 0 | 0, unchanged (the system tick is the one allowed peer; it is a few hundred ns per ms) |
+| SysTick | 0 | 0 as is (the one allowed peer, a few hundred ns per ms); optionally move `HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0)` in `functions.c` (line 57) to priority 1 so it cannot add to the pulse jitter |
 
 Note that `stm32g4xx_hal_msp.c` also calls `HAL_NVIC_SetPriority(USART2_IRQn / FDCAN1_IT*_IRQn, 0, 0)` and the generated `MX_DMA_Init` sets the DMA ones; CubeMX writes these from the `.ioc`, so change them there, not in the generated files. After regenerating, verify by reading `NVIC->IP[]` or the generated lines.
 
@@ -77,7 +79,7 @@ In `CMakeLists.txt`, in the existing user sections:
     PULDIR_TICK_HZ=50000u        # 200000u for the second run
 ```
 
-(`puldir_group.c` and `puldir_console.c` are built by the time the bench runs; if either is still missing in the repository, leave it out of the list.)
+(`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` is built by the time the bench runs; if it is still missing in the repository, leave it out of the list.)
 
 ### 3.2 `Core/Src/stm32g4xx_it.c`
 
@@ -165,8 +167,9 @@ void bench_setup(void)
         if (i < 3)
             PulDir_attachEnable(&bench[i], ena[i], false);
         (void)PulDir_setConversion(&bench[i], 1.0f);            /* units are pulses */
-        /* pulses/s, pulses/s^2: reach 99000 in about 0.5 s, no jerk limit */
-        (void)PulDir_setDefaults(&bench[i], 99000.0f, 200000.0f, 200000.0f, 0.0f);
+        /* pulses/s, pulses/s^2: just under the tick ceiling (tick/2), no jerk limit */
+        const float v = 0.495f * (float)PULDIR_TICK_HZ;
+        (void)PulDir_setDefaults(&bench[i], v, 2.0f * v, 2.0f * v, 0.0f);
         (void)PulDir_register(&bench[i]);
     }
 
@@ -232,20 +235,23 @@ Do not command the old axes (`@`, `#`, `R`, `K`) during the bench: they share th
 
 ## 4. Procedure
 
-1. Drives disconnected. Scope probes: PUL of axes 1 to 4 (PC12, PE9, PE8, PC6) and `GPIO_OUT1` (PB7, the handler marker). Trigger on the marker for the duration, and on a PUL edge with infinite persistence for the jitter.
+1. Drives disconnected. Scope probes: PUL of axes 1 to 4 (PC12, PE9, PE8, PC6) and `GPIO_OUT1` (PB7, the handler marker). Trigger on the marker for the duration and its edge-to-edge jitter. Note that at 24,000 pulses/s on a 50 kHz tick the PUL period is naturally 40 or 60 us (10 or 15 us at 200 kHz, 99,000/s), and a pulse may be 2 ticks wide, so PUL jitter is only meaningful at a rate that divides the tick evenly (step 3a).
 2. Start USB log streaming (the GUI's usual stream), CAN traffic (the 1 Hz ping or a heavier source), and a stream of UART console lines (for example `p` at 100 Hz). Keep all of it running through every run below.
-3. **50 kHz run** (`PULDIR_TICK_HZ=50000u`, TIM6 period 2879): send `Bs` (record ticks), then `B1,J24000`, `B2,J24000`, `B3,J24000`, `B4,J24000`. Let it run one minute. Measure on the scope: pulse width, period jitter peak to peak (persistence on a rising edge of one PUL, trigger on the previous one), marker width typical and worst. Send `Bs` again: ticks must have advanced by 50,000 per second, and record overruns. Stop with `B1,k` to `B4,k` (or `K`-class halt).
+3. **50 kHz run** (`PULDIR_TICK_HZ=50000u`, TIM6 period 2879): send `Bs` (record ticks), then `B1,J24000`, `B2,J24000`, `B3,J24000`, `B4,J24000`. Let it run one minute. Measure on the scope: pulse width, period jitter peak to peak (persistence on a rising edge of one PUL, trigger on the previous one), marker width typical and worst. Send `Bs` again: ticks must have advanced by 50,000 per second, and record overruns. Stop with `B1,k` to `B4,k` (or `B1,K` to `B4,K` to halt).
+3a. **Jitter run, 50 kHz**: jog axis 1 alone at 12,500 pulses/s (`B1,J12500`, a PUL period of exactly 4 ticks) with the same traffic; measure the PUL period jitter peak to peak. Also measure the marker's period jitter (edge to edge, rising edge to rising edge): that is the pulse tick's own jitter, and it needs no divisibility.
 4. **200 kHz run**: rebuild with `PULDIR_TICK_HZ=200000u`, TIM6 period 719. Jog all four at 99,000 pulses/s (`B1,J99000` ... `B4,J99000`), same traffic, one minute, same measurements.
+4a. **Jitter run, 200 kHz**: jog axis 1 alone at 50,000 pulses/s (a PUL period of exactly 4 ticks), same measurements.
 5. Connect one drive (axis 1). At 50 kHz the pulse is 20 us wide. Check the drive's datasheet minimum pulse width and DIR setup time, then run `B1,J2000`, `B1,k`, and confirm it turns and stops without lost or extra steps (mark the shaft, count revolutions: 2000 pulses per second for ten seconds is 20,000 pulses).
 
 ## 5. Results
 
-CPU load = (typical handler duration) x tick rate. Pass: zero overruns, jitter under 1 us, CPU at most 10 % (50 kHz) or 25 % (200 kHz).
+CPU load = (typical handler duration, from the marker width plus about 24 cycles (170 ns at 144 MHz) of exception entry and exit that the marker does not cover) x tick rate. Pass: zero overruns, jitter under 1 us (from the jitter runs 3a and 4a, not the full-rate runs), CPU at most 10 % (50 kHz) or 25 % (200 kHz).
 
 | measurement | 50 kHz, 4 axes at 24,000/s | 200 kHz, 4 axes at 99,000/s |
 |---|---|---|
 | pulse width (us) | | |
-| period jitter, peak to peak (us) | | |
+| period jitter, one PUL at 12,500/s (50 kHz) or 50,000/s (200 kHz) (us) | | |
+| period jitter, marker (us) | | |
 | pulse handler, typical (us) | | |
 | pulse handler, worst (us) | | |
 | CPU load (typical duration x rate, %) | | |

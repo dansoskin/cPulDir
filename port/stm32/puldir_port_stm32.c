@@ -18,12 +18,17 @@ void PulDir_stm32_bind(TIM_HandleTypeDef* p, IRQn_Type pi, TIM_HandleTypeDef* q,
 
 void port_start(void (*pulse)(bool), void (*plan)(void))
 {
-    if (!bound)
-        return;                         /* nothing to start; the application forgot to bind */
     pulse_fn = pulse;
     plan_fn = plan;
-    HAL_TIM_Base_Start_IT(plan_tim);
+    /* The core latches increment sets every N pulse ticks counted from the first.
+     * The plan tick should fire just after such a boundary so it has the whole
+     * interval to publish. Both timers share a clock and the plan period is N pulse
+     * periods, so zero both counters and start them back to back: the plan timer's
+     * first update then lands just after a boundary and stays there. */
+    __HAL_TIM_SET_COUNTER(pulse_tim, 0);
+    __HAL_TIM_SET_COUNTER(plan_tim, 0);
     HAL_TIM_Base_Start_IT(pulse_tim);
+    HAL_TIM_Base_Start_IT(plan_tim);
 }
 
 /* Not through HAL_TIM_IRQHandler: its flag sweep costs more than the tick at 200 kHz. */
