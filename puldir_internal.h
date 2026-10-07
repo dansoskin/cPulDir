@@ -8,6 +8,14 @@
 
 typedef struct { int32_t inc; int8_t dir; } PulDirInc;   /* D3: dir is +1 or -1 */
 
+/* The pulse tick's state for one slot, read under the lock. */
+typedef struct {
+    uint64_t P;                               /* 32.32 pulse position */
+    int32_t  count;                           /* edges emitted, signed (D18) */
+    int32_t  inc;                             /* live increment */
+    int8_t   dir;                             /* the direction the pin shows */
+} PulDirPulse;
+
 /* event bits */
 enum {
     PULDIR_EV_REFUSED = 1u << 0, PULDIR_EV_LANDED = 1u << 1, PULDIR_EV_STREAM_TIMEOUT = 1u << 2,
@@ -22,10 +30,14 @@ extern uint8_t puldir_naxes;
 void       puldir_pulse_tick(bool overrun);
 void       puldir_pulse_add(PulDir*);         /* PulDir_register: take the next slot, entries at inc 0, dir +1 */
 PulDirInc* puldir_shadow(void);               /* the unpublished set; the plan tick writes it */
-void       puldir_publish(void);              /* one store; latched at the next boundary (D5) */
+/* One store; latched at the next boundary (D5). Every entry with a non-zero
+ * inc must have dir equal to its sign: the plan tick guarantees it. */
+void       puldir_publish(void);
 void       puldir_kill(uint8_t slot);         /* under the lock: zero live and published inc */
 uint32_t   puldir_left(void);                 /* under the lock: ticks left in this interval */
-int32_t    puldir_live_inc(uint8_t slot);     /* under the lock */
+void       puldir_pulse_read(uint8_t slot, PulDirPulse* out);   /* under the lock */
+bool       puldir_pul_high(uint8_t slot);     /* under the lock */
+void       puldir_set_datum(uint8_t slot, int32_t count);       /* under the lock, idle: count, P, edge */
 
 /* plan tick (puldir_plan.c) */
 void puldir_plan_tick(void);

@@ -108,12 +108,7 @@ typedef struct PulDir {
 
     struct PulDirGroup* group;
 
-    /* pulse tick state; read by others only under the lock */
-    uint64_t P;                          /* 32.32 pulse position, unsigned for defined wrap */
-    uint64_t edge;                       /* position of the next edge in the current direction (D3) */
-    volatile int32_t count;              /* edges emitted, signed */
-    volatile int8_t dir_now;             /* +1 or -1 */
-    volatile bool pul_high;
+    /* the pulse tick's state lives in puldir_pulse.c, by slot */
 
     /* events for PulDir_loop */
     volatile uint16_t events;

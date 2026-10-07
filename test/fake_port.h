@@ -9,7 +9,7 @@
 puldir_pin_t fake_pin(uint8_t id);
 bool  fake_level(uint8_t id);                       /* last level written or set */
 void  fake_set_input(uint8_t id, bool level);       /* fault pins, from the test */
-void  fake_mark_motion_pin(uint8_t id);             /* a pulse or direction pin: main context never writes it under its lock */
+void  fake_mark_motion_pin(uint8_t id);             /* a pulse or direction pin: written only from the pulse tick */
 typedef void (*fake_write_fn)(uint32_t tick, uint8_t id, bool level);
 void  fake_on_write(fake_write_fn fn);              /* called for every port_pin_write */
 void  fake_pulse(bool overrun);                     /* one pulse tick */

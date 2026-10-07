@@ -7,6 +7,9 @@
 #include "puldir_internal.h"
 
 #define N PULDIR_TICKS_PER_PLAN
+/* The timing tests build whole-interval moves of up to 10.25 pulses and run
+ * 10,000 ticks as whole intervals: they assume these. */
+typedef char check_n[(N >= 32u && 10000u % N == 0u) ? 1 : -1];
 
 /* ---- the pin-write log ---------------------------------------------------- */
 
@@ -64,12 +67,21 @@ static uint32_t left(void)
     return l;
 }
 
-static int32_t live_inc(uint8_t slot)
+static PulDirPulse st(uint8_t slot)
+{
+    PulDirPulse s;
+    port_lock();
+    puldir_pulse_read(slot, &s);
+    port_unlock();
+    return s;
+}
+
+static bool high(uint8_t slot)
 {
     port_lock();
-    const int32_t inc = puldir_live_inc(slot);
+    const bool h = puldir_pul_high(slot);
     port_unlock();
-    return inc;
+    return h;
 }
 
 /* Write every registered axis's shadow entry, then publish. */
@@ -136,8 +148,7 @@ static void t_setup(void)
     assert(a.catchup_ms == PULDIR_CATCHUP_MS);
     assert(a.log_on);
     assert(a.slot == PULDIR_MAX_AXES);
-    assert(a.dir_now == 1 && a.count == 0 && a.P == 0 && a.edge == PULDIR_ONE);
-    assert(!a.has_pins && !a.pul_high && a.mode == PULDIR_MODE_IDLE && a.events == 0);
+    assert(!a.has_pins && a.mode == PULDIR_MODE_IDLE && a.events == 0);
     assert(a.prof.dt == 1.0f / (float)PULDIR_PLAN_HZ && a.prof.done && a.prof.pos == 0.0f);
     assert(a.prof.lim.vmax == 200.0f && a.prof.lim.amax == 200.0f &&
            a.prof.lim.dmax == 200.0f && a.prof.lim.jmax == 0.0f);
@@ -172,8 +183,21 @@ static void t_setup(void)
     start();
     pulse(3u * N);
     assert(nw == 0);
-    for (uint8_t i = 0; i < PULDIR_MAX_AXES; i++)
-        assert(ax[i].count == 0 && live_inc(i) == 0);
+    for (uint8_t i = 0; i < PULDIR_MAX_AXES; i++) {
+        const PulDirPulse s = st(i);
+        assert(s.P == 0 && s.count == 0 && s.inc == 0 && s.dir == 1 && !high(i));
+    }
+}
+
+static void t_register_after_start(void)
+{
+    setup(1);
+    PulDir b;
+    PulDir_init(&b, "late");
+    PulDir_attachPins(&b, fake_pin(10), fake_pin(11), false, false);
+    assert(!PulDir_register(&b));
+    assert(b.slot == PULDIR_MAX_AXES && puldir_naxes == 1);
+    assert((b.events & PULDIR_EV_REFUSED) && b.refusal == PULDIR_R_BUSY);
 }
 
 /* ---- pulse rate --------------------------------------------------------------- */
@@ -194,7 +218,7 @@ static void t_pulse_rate(void)
         assert(rise[i] - t0 == 3u + 4u * i);  /* the edge to count k is the tick the position reaches k */
         assert(fall[i] == rise[i] + 1u);
     }
-    assert(ax[0].count == 100);
+    assert(st(0).count == 100);
 }
 
 /* ---- test 14: direction setup and hold ------------------------------------------- */
@@ -214,9 +238,9 @@ static uint32_t reverse_at(uint8_t i, uint32_t b)
     const uint8_t pul = (uint8_t)(2u * i), dir = (uint8_t)(2u * i + 1u);
     const size_t from = nw;
     if (i == 0)
-        publish2(-(1 << 30), -1, 0, ax[1].dir_now);
+        publish2(-(1 << 30), -1, 0, st(1).dir);
     else
-        publish2(0, ax[0].dir_now, -(1 << 30), -1);
+        publish2(0, st(0).dir, -(1 << 30), -1);
     pulse(2u * N);
     uint32_t td[4];
     assert(writes(from, dir, false, td, 4) == 1);
@@ -224,7 +248,7 @@ static uint32_t reverse_at(uint8_t i, uint32_t b)
     const size_t r = writes(from, pul, true, rise, 20000);
     assert(r > 0);
     assert(rise[0] - td[0] >= 1u && rise[0] - td[0] < 2u * N);   /* setup: at least one tick */
-    assert(ax[i].dir_now == -1 && !fake_level(dir));
+    assert(st(i).dir == -1 && !fake_level(dir));
     return td[0];
 }
 
@@ -238,7 +262,7 @@ static void t_dir_change(void)
     publish2((int32_t)(four / N), 1, 0, 1);
     to_boundary();
     pulse(N);
-    assert(ax[0].count == 3 && !ax[0].pul_high);
+    assert(st(0).count == 3 && !high(0));
     uint32_t b = PulDir_ticks();
     assert(reverse_at(0, b) == b);
 
@@ -247,7 +271,7 @@ static void t_dir_change(void)
     publish2(0, -1, (int32_t)((four + N - 1u) / N), 1);
     to_boundary();
     pulse(N);
-    assert(ax[1].count == 4 && ax[1].pul_high);
+    assert(st(1).count == 4 && high(1));
     b = PulDir_ticks();
     const size_t from = nw;
     assert(reverse_at(1, b) == b + 1u);
@@ -278,7 +302,7 @@ static void t_polarity(void)
         assert(fake_level(1) == !leg);
     }
     fake_pulse(false);                    /* lowers a pulse raised on the last tick */
-    assert(ax[0].count == ax[1].count);
+    assert(st(0).count == st(1).count);
 
     /* the active-low axis: each pulse is a low level for one tick */
     const size_t r = writes(0, 2, false, rise, 20000);
@@ -297,7 +321,7 @@ static bool tick_and_check(const int32_t* before_set, const int32_t* after_set, 
     fake_pulse(false);
     int changed = 0;
     for (uint8_t i = 0; i < 4; i++) {
-        const int32_t v = live_inc(i);
+        const int32_t v = st(i).inc;
         assert(v == (*latched ? after_set[i] : before_set[i]) || (!*latched && v == after_set[i]));
         changed += !*latched && v == after_set[i];
     }
@@ -361,17 +385,16 @@ static void t_inc_max(void)
 {
     /* axis 0 up and axis 1 down from rest, for 10,000 ticks (whole intervals) */
     setup(2);
-    const uint32_t T = (10000u + N - 1u) / N * N;
-    assert(T == 10000u);                  /* the 4,999-or-5,000 count assumes it */
+    const uint32_t T = 10000u;            /* whole intervals: check_n */
     publish2(PULDIR_INC_MAX, 1, -PULDIR_INC_MAX, -1);
     to_boundary();
     pulse(T);
     publish2(0, 1, 0, -1);
     assert(left() == N);
     pulse(1);                             /* the boundary: lowers a pulse raised on the last tick */
-    check_max_rate(0, ax[0].count);
-    check_max_rate(2, ax[1].count);
-    assert(ax[0].count > 0 && ax[1].count < 0);
+    check_max_rate(0, st(0).count);
+    check_max_rate(2, st(1).count);
+    assert(st(0).count > 0 && st(1).count < 0);
 }
 
 /* ---- D3: hysteretic edges ---------------------------------------------------------------- */
@@ -384,13 +407,13 @@ static size_t interval(int32_t inc, int8_t dir)
     to_boundary();
     size_t edges = 0;
     for (uint32_t i = 0; i < N; i++) {
-        const int32_t c = ax[0].count;
-        const int64_t before = (int64_t)ax[0].P;
+        const int32_t c = st(0).count;
+        const int64_t before = (int64_t)st(0).P;
         fake_pulse(false);
-        const int64_t after = (int64_t)ax[0].P;
-        if (ax[0].count != c) {
-            assert(ax[0].count == c + dir);
-            const int64_t at = (int64_t)ax[0].count << 32;
+        const int64_t after = (int64_t)st(0).P;
+        if (st(0).count != c) {
+            assert(st(0).count == c + dir);
+            const int64_t at = (int64_t)st(0).count << 32;
             assert(dir > 0 ? (before < at && after >= at) : (before > at && after <= at));
             edges++;
         }
@@ -406,13 +429,13 @@ static void t_hysteresis(void)
     const int32_t inc_up = (int32_t)((41 * one / 4) / N);
     assert(inc_up <= PULDIR_INC_MAX);
     assert(interval(inc_up, 1) == 10);
-    assert(ax[0].count == 10 && (int64_t)ax[0].P > 10 * one);
+    assert(st(0).count == 10 && (int64_t)st(0).P > 10 * one);
 
     /* down 1.5: through 10.0 with no edge, one edge at 9.0. The first tick of a
      * reversal writes the direction and does not move. */
     const int32_t inc_down = (int32_t)((3 * one / 2) / (N - 1));
     assert(interval(-inc_down, -1) == 1);
-    assert(ax[0].count == 9 && (int64_t)ax[0].P < 9 * one && (int64_t)ax[0].P > 8 * one);
+    assert(st(0).count == 9 && (int64_t)st(0).P < 9 * one && (int64_t)st(0).P > 8 * one);
 
     /* dither across 9.0 and 9.5, between 8.75 and 9.75, for at least 1,000 ticks: no edges */
     const size_t from = nw;
@@ -420,13 +443,60 @@ static void t_hysteresis(void)
     const uint32_t cycles = (1000u + 2u * N - 1u) / (2u * N);
     for (uint32_t k = 0; k < cycles; k++) {
         assert(interval(inc_d, 1) == 0);
-        assert((int64_t)ax[0].P > 9 * one + one / 2);
+        assert((int64_t)st(0).P > 9 * one + one / 2);
         assert(interval(-inc_d, -1) == 0);
-        assert((int64_t)ax[0].P < 9 * one);
+        assert((int64_t)st(0).P < 9 * one);
     }
-    assert(ax[0].count == 9);
+    assert(st(0).count == 9);
     for (size_t i = from; i < nw; i++)
         assert(wlog[i].id != 0);              /* direction writes only */
+}
+
+/* ---- kill and datum (for halt and setPosition) ------------------------------------------------ */
+
+static void t_kill(void)
+{
+    setup(2);
+    const int32_t q = 1 << 30, q2 = 1 << 29;
+    publish2(q, 1, q, 1);
+    to_boundary();
+    pulse(N / 2u);
+    publish2(q, 1, q2, 1);                /* pending until the next boundary */
+    port_lock();
+    puldir_kill(0);
+    port_unlock();
+    const uint64_t P0 = st(0).P;
+    const size_t from = nw;
+    assert(st(0).inc == 0 && st(1).inc == q);
+    to_boundary();
+    pulse(2u * N);
+    assert(st(0).inc == 0 && st(1).inc == q2);   /* the pending set lost axis 0's inc only */
+    assert(st(0).P == P0);
+    assert(writes(from, 0, true, rise, 20000) == 0);    /* no edge after the kill */
+    assert(writes(from, 2, true, rise, 20000) > 0);
+}
+
+static void t_datum(void)
+{
+    setup(1);
+    const int32_t q = 1 << 30;
+    port_lock();
+    puldir_set_datum(0, -5);
+    port_unlock();
+    PulDirPulse s = st(0);
+    assert(s.count == -5 && s.P == (uint64_t)(int64_t)-5 << 32 && s.dir == 1);
+    assert(interval(q, 1) == N / 4u);     /* first edge at -4.0 */
+    assert(st(0).count == -5 + (int32_t)(N / 4u));
+
+    (void)interval(-q, -1);
+    assert(interval(0, -1) == 0);
+    port_lock();
+    puldir_set_datum(0, 3);
+    port_unlock();
+    s = st(0);
+    assert(s.count == 3 && s.P == (uint64_t)3 << 32 && s.dir == -1);
+    assert(interval(-q, -1) == N / 4u);   /* first edge at 2.0 */
+    assert(st(0).count == 3 - (int32_t)(N / 4u));
 }
 
 /* ---- overrun ------------------------------------------------------------------------------- */
@@ -451,6 +521,9 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "latch", t_latch },
     { "inc_max", t_inc_max },
     { "hysteresis", t_hysteresis },
+    { "register_after_start", t_register_after_start },
+    { "kill", t_kill },
+    { "datum", t_datum },
     { "overrun", t_overrun },
 };
 

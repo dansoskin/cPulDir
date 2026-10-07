@@ -16,7 +16,7 @@ static void (*plan_cb)(void);
 static uint32_t since_start;            /* pulse ticks run since port_start */
 static int tick_depth;                  /* tick callbacks in progress (a pulse tick may preempt the plan tick) */
 static int lock_depth;
-static bool main_locked;                /* the lock was taken outside every tick */
+static bool in_pulse;                   /* inside the pulse tick callback */
 
 puldir_pin_t fake_pin(uint8_t id)
 {
@@ -36,8 +36,7 @@ void port_pin_init_input(puldir_pin_t p, bool pullup) { assert(p.id < FAKE_PINS)
 void port_pin_write(puldir_pin_t p, bool lvl)
 {
     assert(p.id < FAKE_PINS);
-    /* Main context may write only the enable and fault-clear pins (D17). */
-    assert(!(lock_depth > 0 && main_locked && motion[p.id]));
+    assert(!motion[p.id] || in_pulse);  /* pulse and direction pins belong to the pulse tick (D17) */
     level[p.id] = lvl;
     if (on_write)
         on_write(PulDir_ticks(), p.id, lvl);
@@ -66,7 +65,6 @@ void port_lock(void)
 {
     assert(lock_depth == 0);
     lock_depth++;
-    main_locked = tick_depth == 0;
 }
 
 void port_unlock(void)
@@ -79,8 +77,11 @@ void fake_pulse(bool overrun)
 {
     assert(pulse_cb != NULL);
     assert(lock_depth == 0);            /* the lock masks this interrupt */
+    assert(!in_pulse);
     tick_depth++;
+    in_pulse = true;
     pulse_cb(overrun);
+    in_pulse = false;
     tick_depth--;
     since_start++;
 }

@@ -2,6 +2,8 @@
 #include <string.h>
 #include "puldir_internal.h"
 
+static bool started;                    /* PulDir_start has run */
+
 void PulDir_init(PulDir* a, const char* name)
 {
     memset(a, 0, sizeof *a);
@@ -20,8 +22,6 @@ void PulDir_init(PulDir* a, const char* name)
     a->mode = PULDIR_MODE_IDLE;
     a->home_state = PULDIR_HOME_IDLE;
     a->refusal = PULDIR_R_NONE;
-    a->dir_now = 1;
-    a->edge = PULDIR_ONE;               /* D3: (count + dir) << 32 */
     /* The plan interval is a constant inside MotionProfile_init's range and
      * the limits are finite and positive, so neither call can refuse. */
     (void)MotionProfile_init(&a->prof, 0.0f, 1.0f / (float)PULDIR_PLAN_HZ);
@@ -45,8 +45,8 @@ bool PulDir_register(PulDir* a)
     PulDirRefusal why = PULDIR_R_NONE;
     if (!a->has_pins)
         why = PULDIR_R_NO_PIN;
-    else if (a->slot != PULDIR_MAX_AXES)
-        why = PULDIR_R_BUSY;            /* already registered */
+    else if (a->slot != PULDIR_MAX_AXES || started)
+        why = PULDIR_R_BUSY;            /* already registered, or the ticks are running */
     else if (puldir_naxes >= PULDIR_MAX_AXES)
         why = PULDIR_R_FULL;
     if (why != PULDIR_R_NONE) {
@@ -59,5 +59,6 @@ bool PulDir_register(PulDir* a)
 
 void PulDir_start(void)
 {
+    started = true;
     port_start(puldir_pulse_tick, puldir_plan_tick);
 }
