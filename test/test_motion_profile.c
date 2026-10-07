@@ -53,10 +53,9 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
         && a->target == b->target && a->endless == b->endless && a->stopping == b->stopping
         && a->landed == b->landed && a->done == b->done && limits_equal(a->lim, b->lim)
         && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
-        && a->pos_c == b->pos_c
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
         && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
-        && a->sum_c == b->sum_c;
+        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c;
 }
 
 static void test_setup(void)
@@ -160,11 +159,11 @@ static MotionProfile fresh(float pos, float dt, MotionLimits L)
     return p;
 }
 
-/* Calls beyond the analytic trapezoid: the done call, plus the discrete ceiling's
- * tail (v' = sqrt(dd^2 + v^2) - dd sheds under dd), about ln(vmax/(dmax*dt))/2. */
+/* Calls beyond the analytic trapezoid: the drained call and the done call, plus the
+ * discrete ceiling's tail (v' = sqrt(dd^2 + v^2) - dd sheds under dd), about ln(vmax/(dmax*dt))/2. */
 static float extra_calls(MotionLimits L, float dt)
 {
-    return 1.0f + 0.5f * logf(L.vmax / (L.dmax * dt));
+    return 2.0f + 0.5f * logf(L.vmax / (L.dmax * dt));
 }
 
 /* Test 2: against the analytic trapezoid (D8): 0.5 s up, 0.1 s cruise, 0.5 s down. */
@@ -471,12 +470,13 @@ static void test_scurve(void)
         if (p.landed && landed_call < 0)
             landed_call = calls;
         peak = fmaxf(peak, fabsf(p.vel));
+        assert(p.pos <= 9.0f);
         assert(p.acc <= L.amax * (1.0f + 1e-4f) && p.acc >= -L.dmax * (1.0f + 1e-4f));
     }
-    assert(calls - landed_call == 200);
+    assert(calls - landed_call == 201);     /* n calls to drain, one more for acc to reach 0 */
     assert(p.pos == 9.0f && p.vel == 0.0f && p.acc == 0.0f);
     assert(peak <= 15.0f);
-    /* The trapezoid's calls (1100 + tail + the done call), then the window less that done call. */
+    /* The trapezoid's calls (1100 + extra_calls), plus the window's n - 1 calls of motion. */
     assert(fabsf((float)calls - (1100.0f + 200.0f + extra_calls(L, 0.001f) - 1.0f)) <= 2.0f);
     printf("ok scurve\n");
 }

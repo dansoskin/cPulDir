@@ -30,7 +30,7 @@ static void clear_ring(MotionProfile* p)
     for (int i = 0; i < MOTION_PROFILE_MAX_TAPS; i++)
         p->taps[i] = 0.0f;
     p->head = 0;
-    p->sum = p->sum_c = 0.0f;
+    p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -39,7 +39,7 @@ bool MotionProfile_init(MotionProfile* p, float pos, float dt)
         return false;
     p->dt = dt;
     p->pos = p->target = p->p_t = pos;
-    p->p_c = p->pos_c = 0.0f;
+    p->p_c = 0.0f;
     p->vel = p->acc = p->v_t = p->speed = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
@@ -102,7 +102,7 @@ void MotionProfile_halt(MotionProfile* p)
     clear_ring(p);
     p->v_t = p->vel = p->acc = 0.0f;
     p->p_t = p->target = p->pos;
-    p->p_c = p->pos_c = 0.0f;
+    p->p_c = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
     p->drain = 0;
@@ -114,7 +114,7 @@ bool MotionProfile_setPosition(MotionProfile* p, float pos)
     if (!p->done || !isfinite(pos))
         return false;
     p->pos = p->p_t = p->target = pos;
-    p->p_c = p->pos_c = 0.0f;
+    p->p_c = 0.0f;
     return true;
 }
 
@@ -187,13 +187,49 @@ static float trapezoid(MotionProfile* p)
     return p->v_t;
 }
 
-/* The ring has drained: exact rest at the target. */
+/* How far the filtered output trails the trapezoid: dt * sum ((n-1-m)/n) tap_m,
+ * m = 0 newest. Deriving pos from p_t keeps it from drifting off the trapezoid. */
+static float lag(const MotionProfile* p)
+{
+    return p->wsum * (p->dt / (float)p->n);
+}
+
+/* The sums from the ring itself, with head == 0: slot i then has weight i. */
+static void recompute(MotionProfile* p)
+{
+    float s = 0.0f, c = 0.0f, w = 0.0f, wc = 0.0f;
+    for (uint16_t i = 0; i < p->n; i++) {
+        kahan_add(&s, &c, p->taps[i]);
+        kahan_add(&w, &wc, (float)i * p->taps[i]);
+    }
+    p->sum = s;
+    p->wsum = w;
+    p->sum_c = p->wsum_c = 0.0f;
+}
+
+/* Push the trapezoid's velocity into the ring. Compensated: plain running sums
+ * drift by tens of ulps between recomputes, and each recompute would step vel. */
+static void push(MotionProfile* p, float u)
+{
+    kahan_add(&p->sum, &p->sum_c, u);
+    kahan_add(&p->sum, &p->sum_c, -p->taps[p->head]);
+    /* the new tap enters at weight n-1; every other tap loses one */
+    kahan_add(&p->wsum, &p->wsum_c, (float)p->n * u);
+    kahan_add(&p->wsum, &p->wsum_c, -p->sum);
+    p->taps[p->head] = u;
+    if (++p->head == p->n) {              /* recompute: rounding must not walk the sums */
+        p->head = 0;
+        recompute(p);
+    }
+}
+
+/* The ring has drained: exact rest at the target, where lag is already 0. */
 static void finish(MotionProfile* p)
 {
     clear_ring(p);
     p->vel = p->acc = 0.0f;
     p->pos = p->p_t = p->target;
-    p->p_c = p->pos_c = 0.0f;
+    p->p_c = 0.0f;
     p->done = true;
     p->drain = 0;
     p->n = window(p->lim, p->dt);
@@ -206,34 +242,20 @@ void MotionProfile_advance(MotionProfile* p)
     const bool was_landed = p->landed;
     const float u = trapezoid(p);
     const float vel0 = p->vel;
-    /* Compensated: a plain running sum drifts by tens of its ulps between
-     * recomputes, and each recompute would then step vel past the jerk bound. */
-    kahan_add(&p->sum, &p->sum_c, u);
-    kahan_add(&p->sum, &p->sum_c, -p->taps[p->head]);
-    p->taps[p->head] = u;
-    if (++p->head == p->n) {              /* recompute: rounding must not walk the sum */
-        float s = 0.0f, c = 0.0f;
-        for (uint16_t i = 0; i < p->n; i++)
-            kahan_add(&s, &c, p->taps[i]);
-        p->sum = s;
-        p->sum_c = 0.0f;
-        p->head = 0;
-    }
-    if (p->n == 1) {                      /* one tap: the output is the trapezoid itself */
-        p->vel = u;
-        p->pos = p->p_t;
-    } else {                              /* compensated, as p_t is, for large coordinates */
-        p->vel = p->sum / (float)p->n;
-        kahan_add(&p->pos, &p->pos_c, p->vel * p->dt);
-    }
+    push(p, u);
+    if (was_landed && ++p->drain >= p->n)     /* the ring holds only zeros: drop the residue */
+        p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
+    p->vel = p->sum / (float)p->n;
+    p->pos = p->p_t - lag(p);
     p->acc = (p->vel - vel0) / p->dt;
-    if (was_landed && ++p->drain >= p->n)
+    /* Done one call after the drain, so acc comes to 0 within the jerk bound. */
+    if (p->drain > p->n)
         finish(p);
 }
 
 float MotionProfile_stopDistance(const MotionProfile* p)
 {
-    return (p->p_t - p->pos) + p->v_t * fabsf(p->v_t) / (2.0f * p->lim.dmax);
+    return lag(p) + p->v_t * fabsf(p->v_t) / (2.0f * p->lim.dmax);
 }
 
 void MotionProfile_rebase(MotionProfile* p, float shift, float target)
