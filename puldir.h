@@ -93,6 +93,8 @@ typedef struct PulDir {
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
+    bool     arrived;                    /* the final interval is published; settling */
+    int8_t   approach;                   /* the side the final interval came from: +1, -1, 0 */
 
     /* stream */
     float sp_pos, sp_vel;                /* pulses, pulses/s */

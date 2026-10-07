@@ -74,8 +74,9 @@ void PulDir_start(void)
  * will see them, so the plan tick's call cannot refuse; then hand them over
  * (D17). The frozen-window test reads n and done under the same lock as the
  * stores, so the plan tick cannot move the generator in between. */
-static bool apply_limits(PulDir* a, const float lim[4], float conv, const char* call)
+static bool apply_limits(PulDir* a, const float lim[4], const char* call)
 {
+    const float conv = a->conv;
     const float v = lim[0] * conv, acc = lim[1] * conv, dec = lim[2] * conv, j = lim[3] * conv;
     const float ratio = j > 0.0f ? (acc + dec) / (j * DT) : 0.0f;    /* generator's window() */
     PulDirRefusal why = PULDIR_R_NONE;
@@ -92,7 +93,6 @@ static bool apply_limits(PulDir* a, const float lim[4], float conv, const char* 
     } else {
         port_lock();
         if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
-            a->conv = conv;
             for (int k = 0; k < 4; k++)
                 a->lim[k] = lim[k];
             a->req |= REQ_LIMITS;
@@ -113,22 +113,45 @@ static bool set_limit(PulDir* a, int k, float x, const char* call)
     float l[4];
     memcpy(l, a->lim, sizeof l);
     l[k] = x;
-    return apply_limits(a, l, a->conv, call);
+    return apply_limits(a, l, call);
 }
 
+/* Limits and defaults stay fixed in pulses, as in cFlexyStepper: the user-unit
+ * values are rescaled, so the generator's limits are untouched and there is
+ * nothing to check but the argument. */
 bool PulDir_setConversion(PulDir* a, float pulses_per_unit)
 {
-    if (!(isfinite(pulses_per_unit) && pulses_per_unit > 0.0f)) {
-        puldir_refuse(a, "setConversion", PULDIR_R_ARG, 0.0f);
+    const float c = pulses_per_unit;
+    PulDirRefusal why = PULDIR_R_NONE;
+    if (!(isfinite(c) && c > 0.0f)) {
+        why = PULDIR_R_ARG;
+    } else {
+        float lim[4], def[4];
+        for (int k = 0; k < 4; k++) {           /* read in main context, where they are written */
+            lim[k] = a->lim[k] * a->conv / c;
+            def[k] = a->def[k] * a->conv / c;
+        }
+        port_lock();
+        if (a->mode == PULDIR_MODE_IDLE && !a->moving) {
+            a->conv = c;
+            memcpy(a->lim, lim, sizeof lim);
+            memcpy(a->def, def, sizeof def);
+        } else {
+            why = PULDIR_R_NOT_IDLE;
+        }
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "setConversion", why, 0.0f);
         return false;
     }
-    return apply_limits(a, a->lim, pulses_per_unit, "setConversion");   /* limits stay in user units */
+    return true;
 }
 
 bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float jerk)
 {
     const float d[4] = { speed, accel, decel, jerk };
-    if (!apply_limits(a, d, a->conv, "setDefaults"))
+    if (!apply_limits(a, d, "setDefaults"))
         return false;
     memcpy(a->def, d, sizeof d);
     return true;
@@ -136,7 +159,7 @@ bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float 
 
 bool PulDir_restoreDefaults(PulDir* a)
 {
-    return apply_limits(a, a->def, a->conv, "restoreDefaults");
+    return apply_limits(a, a->def, "restoreDefaults");
 }
 
 bool  PulDir_setSpeed(PulDir* a, float x)        { return set_limit(a, 0, x, "setSpeed"); }

@@ -51,7 +51,6 @@ static void publish(PulDir* a, PulDirInc* out, int32_t inc)
 static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, bool pul_high)
 {
     MotionProfile* p = &a->prof;
-    const bool was_done = p->done;
     MotionProfile_advance(p);
     if (p->landed)                              /* at rest in the trapezoid: its target is final */
         a->target = base + (uint64_t)to_fix(p->target);
@@ -59,23 +58,34 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, bo
     int64_t end = to_fix(p->pos);
     a->vel_out = p->vel;
 
-    if (!p->done) {
-        /* D6: hold the end M short of the target on the approach side until the
-         * done interval, which then carries the final edge to its last tick. */
+    if (!a->arrived && p->landed && end == T) {
+        /* Arrival: round away from zero so the target's integer is crossed (5.4
+         * step 5). D6 kept the last interval M short, so this one moves more than
+         * N(N-1) and the final edge falls on its last tick. */
+        a->arrived = true;
+        a->approach = T > pb ? 1 : T < pb ? -1 : 0;
+        a->settle = 2;
+        publish(a, out, div_away(T - pb));
+    } else if (!a->arrived) {
+        /* D6: hold the end M short of the target on the approach side until arrival. */
         const int64_t gap = T - end;
         if (gap < M && gap > -M && T != pb)
             end = T > pb ? T - M : T + M;
         publish(a, out, div_trunc(end - pb));
-    } else if (!was_done) {
-        publish(a, out, div_away(end - pb));    /* 5.4 step 5: cross the target's integer */
-        a->settle = 2;
     } else {
-        /* D19: the done interval runs after publication and its last pulse is
-         * lowered on the first tick after it: two runs, then check the pin. */
-        publish(a, out, 0);
-        if (a->settle > 0)
-            a->settle--;
-        if (a->settle == 0 && !pul_high) {
+        /* Settling (D19): the final interval runs after publication and its last
+         * pulse is lowered on the tick after it. If the final set latched late or
+         * was overwritten, the boundary is still short of the target: steer again. */
+        const bool short_of = (a->approach > 0 && pb < T) || (a->approach < 0 && pb > T);
+        if (short_of) {
+            publish(a, out, div_away(T - pb));
+            a->settle = 2;
+        } else {
+            publish(a, out, 0);
+            if (a->settle > 0)
+                a->settle--;
+        }
+        if (a->settle == 0 && p->done && !pul_high) {
             a->mode = PULDIR_MODE_IDLE;
             a->moving = false;
             a->events |= PULDIR_EV_LANDED;
@@ -102,6 +112,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, bool
     const float trel = to_pulses((int64_t)(a->target - base));
     if (req & REQ_TARGET) {
         (void)MotionProfile_setTarget(&a->prof, trel);   /* trel is finite */
+        a->arrived = false;                     /* so must every request that sets a new target */
         a->settle = 0;
     }
 

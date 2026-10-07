@@ -555,6 +555,7 @@ static void t_overrun(void)
  * and the ticks of axis 0's rising and falling edges. */
 static uint64_t edges[PULDIR_MAX_AXES];
 static int64_t net[PULDIR_MAX_AXES];
+static uint32_t last_rise[PULDIR_MAX_AXES];
 static size_t nrise, nfall;
 
 static void count_write(uint32_t tick, uint8_t id, bool level)
@@ -564,6 +565,7 @@ static void count_write(uint32_t tick, uint8_t id, bool level)
     const uint8_t i = (uint8_t)(id / 2u);
     if (level) {
         edges[i]++;
+        last_rise[i] = tick;
         net[i] += fake_level((uint8_t)(id + 1u)) ? 1 : -1;
         if (i == 0 && nrise < MAX_EDGES)
             rise[nrise++] = tick;
@@ -582,27 +584,32 @@ static void run_until_idle(PulDir* a, uint32_t max_ticks)
 
 /* Tracking (test 11): a plan tick aims its set at origin + prof.pos; when that
  * set's interval ends, the pulse position must be within one increment of it.
- * D6 holds the end up to M short while the profile is within M of the target. */
-typedef struct { bool valid; uint64_t aim; bool near; } Aim;
+ * D6 holds the end up to M short while the profile is within M of the target.
+ * Guideline 5.4's "one increment" holds except on an interval whose set reverses
+ * the direction: the direction write costs a tick, and one more when the latch
+ * tick lowers a pulse, so there P may trail by 2 |inc| + N. */
+typedef struct { bool valid; uint64_t aim; bool near; int8_t dir; bool reversal; } Aim;
 static Aim aim_next, aim_cur;
-static int64_t worst_track;                   /* the largest |P - aim| - |inc| away from the target */
+static int64_t worst_track, worst_rev;        /* the largest |P - aim| - |inc| away from the target */
 
 static void track_run(PulDir* a, uint32_t ticks)
 {
     const uint32_t plan_left = fake_plan_phase == 0u ? N : N - fake_plan_phase;
     for (uint32_t k = 0; k < ticks; k++) {
         if (left() == N) {                    /* this tick latches: the running set has finished */
+            const PulDirPulse s = st(0);
             if (aim_cur.valid) {
-                const PulDirPulse s = st(0);
                 int64_t err = (int64_t)(s.P - aim_cur.aim);
                 if (err < 0)
                     err = -err;
                 const int64_t inc = s.inc < 0 ? -(int64_t)s.inc : s.inc;
-                if (!aim_cur.near && err - inc > worst_track)
-                    worst_track = err - inc;
-                assert(err <= inc + (int64_t)N + (aim_cur.near ? M : 0));
+                int64_t* worst = aim_cur.reversal ? &worst_rev : &worst_track;
+                if (!aim_cur.near && err - inc > *worst)
+                    *worst = err - inc;
+                assert(err <= (aim_cur.reversal ? 2 : 1) * inc + (int64_t)N + (aim_cur.near ? M : 0));
             }
             aim_cur = aim_next;
+            aim_cur.reversal = aim_cur.dir != s.dir;    /* the set about to latch turns the pin */
         }
         fake_pulse(false);
         if (left() == plan_left) {
@@ -615,6 +622,7 @@ static void track_run(PulDir* a, uint32_t ticks)
             aim_next.valid = true;
             aim_next.aim = aim;
             aim_next.near = gap < M;
+            aim_next.dir = being_written[0].dir;          /* the set just published */
         }
     }
 }
@@ -637,16 +645,11 @@ static uint32_t rnd(void)
 }
 static float frand(float lo, float hi) { return lo + (hi - lo) * (float)(rnd() >> 8) * (1.0f / 16777216.0f); }
 
-/* Limits in pulses, set in user units through conv. At rest every call is accepted. */
+/* Limits in pulses, set in user units after the conversion, in the natural order. */
 static void set_limits(PulDir* a, float conv, float v, float acc, float dec, float jerk)
 {
-    assert(PulDir_setJerk(a, 0.0f));
-    assert(PulDir_setSpeed(a, 1.0f));         /* valid at any conv up to 500 */
     assert(PulDir_setConversion(a, conv));
-    assert(PulDir_setSpeed(a, v / conv));
-    assert(PulDir_setAcceleration(a, acc / conv));
-    assert(PulDir_setDeceleration(a, dec / conv));
-    assert(PulDir_setJerk(a, jerk / conv));
+    assert(PulDir_setDefaults(a, v / conv, acc / conv, dec / conv, jerk / conv));
 }
 
 static void t_move_exact(void)
@@ -657,7 +660,11 @@ static void t_move_exact(void)
     const float cap = (float)(PULDIR_TICK_HZ / 2u);
     const float dt = 1.0f / (float)PULDIR_PLAN_HZ;
     int retargets = 0, reversals = 0;
-    for (int move = 0; move < 1000; move++) {
+    static const uint32_t seeds[] = { 0x1234567u, 0x0BADF00Du, 0x2468ACE0u };
+    for (int n = 0; n < 3000; n++) {
+        const int move = n % 1000;
+        if (move == 0)
+            rng = seeds[n / 1000];
         if (move % 250 == 0)
             fake_plan_phase = (uint32_t)move / 250u * (N / 3u);   /* 0, N/3, 2N/3, 3N/3 - 1 */
         if (fake_plan_phase >= N)
@@ -703,11 +710,13 @@ static void t_move_exact(void)
         if (!retarget)
             assert(edges[0] - e0 == (uint64_t)(s.count > c0 ? s.count - c0 : c0 - s.count));
         assert(PulDir_target(a) == (float)final / conv);
+        if (s.count != c0)                    /* D6: the final edge is the arrival interval's last tick */
+            assert((last_rise[0] - PULDIR_TICK_START) % N == N - 1u);
         assert(a->mode == PULDIR_MODE_IDLE && !high(0));
     }
-    assert(reversals > 50);
-    printf("  move_exact: %d retargets, %d reversals, worst |P - aim| - |inc| = %lld units (N = %u)\n",
-           retargets, reversals, (long long)worst_track, (unsigned)N);
+    assert(reversals > 150);
+    printf("  move_exact: %d retargets, %d reversals, worst |P - aim| - |inc| = %lld units, %lld on reversals (N = %u)\n",
+           retargets, reversals, (long long)worst_track, (long long)worst_rev, (unsigned)N);
 }
 
 /* Test 10: the axis's rising edges against a bare generator's integer crossings. */
@@ -753,16 +762,12 @@ static void parity(float jerk)
         const double e = (double)(rise[m - 1] - rise[0]);
         if (m == 1)
             lat = -c;
-        double off = e - c - lat;
-        if (m == dist)                         /* D6: the last edge waits for the done interval */
-            off -= 2.0 * (double)N;
+        const double off = e - c - lat;      /* the last edge too: it goes on arrival */
         if (fabs(off) > worst)
             worst = fabs(off);
         assert(off >= -1.0 && off <= 1.0);
-        if (m < dist) {
-            lo = fmin(lo, e - c);
-            hi = fmax(hi, e - c);
-        }
+        lo = fmin(lo, e - c);
+        hi = fmax(hi, e - c);
     }
     /* every edge lies in one window a tick wide (an edge is the first whole tick
      * at or past its crossing), widened only by float rounding */
@@ -806,6 +811,60 @@ static void t_full_rate(void)
 #endif
 }
 
+/* Settle steering: the plan tick runs twice in the interval where it arrives, so
+ * the final set is overwritten before it latches. The count must still end on
+ * the target: settling steers onto it again. */
+static void t_arrival_twice(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    PulDir* a = &ax[0];
+    assert(PulDir_setDefaults(a, 2000.0f, 20000.0f, 20000.0f, 0.0f));
+    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    for (int k = 0; k < 6; k++) {
+        fake_plan_phase = phases[k % 3];
+        assert(PulDir_setJerk(a, k < 3 ? 0.0f : 2.0e6f));      /* jerk: a 20-tap window */
+        const int32_t c0 = st(0).count, want = c0 + (k % 2 ? -300 : 300);
+        const int64_t n0 = net[0];
+        assert(PulDir_moveTo(a, (float)want));
+        const uint32_t plan_left = fake_plan_phase == 0u ? N : N - fake_plan_phase;
+        bool twice = false;
+        for (uint32_t t = 0; PulDir_isMoving(a); t++) {
+            assert(t < 10u * PULDIR_TICK_HZ);
+            fake_pulse(false);
+            if (left() == plan_left) {
+                fake_plan();
+                if (a->arrived && !twice) {
+                    fake_plan();              /* overwrites the final set, same interval */
+                    twice = true;
+                }
+            }
+        }
+        assert(twice && st(0).count == want && net[0] - n0 == want - c0 && !high(0));
+    }
+}
+
+/* D6: a soft decel through a long jerk window creeps the last few calls to
+ * within M of the target. The final edge must still be the last tick of the
+ * arrival interval, not an early tick of it. */
+static void t_creep(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    PulDir* a = &ax[0];
+    const float jerk = 40.0f / (250.0f / (float)PULDIR_PLAN_HZ);   /* a 250-tap window */
+    assert(PulDir_setDefaults(a, 50.0f, 20.0f, 20.0f, jerk));
+    const int32_t steps[4] = { 3, -1, 2, -4 };
+    for (int k = 0; k < 8; k++) {
+        fake_plan_phase = (uint32_t)k * (N / 8u);
+        const int32_t c0 = st(0).count, want = c0 + steps[k % 4];
+        assert(PulDir_moveTo(a, (float)want));
+        run_until_idle(a, 10u * PULDIR_TICK_HZ);
+        assert(st(0).count == want);
+        assert((last_rise[0] - PULDIR_TICK_START) % N == N - 1u);
+    }
+}
+
 /* Logging and refusals. */
 static char lines[8][96];
 static int nlines;
@@ -817,6 +876,14 @@ static void logger(const char* s)
 
 static void t_refusals(void)
 {
+    /* the natural setup order: the conversion first, then limits in user units */
+    PulDir b;
+    PulDir_init(&b, "b");
+    assert(PulDir_setConversion(&b, 280.0f));
+    assert(PulDir_setDefaults(&b, 15.0f, 30.0f, 30.0f, 0.0f));
+    assert(PulDir_speed(&b) == 15.0f && PulDir_acceleration(&b) == 30.0f);
+    assert(PulDir_deceleration(&b) == 30.0f && PulDir_jerk(&b) == 0.0f && b.def[0] == 15.0f);
+
     setup(1);
     PulDir* a = &ax[0];
     PulDir_attachLogger(logger);
@@ -827,12 +894,15 @@ static void t_refusals(void)
     PulDir_loop(a);
     assert(nlines == 1 && strstr(lines[0], "moveTo refused") && strncmp(lines[0], "[a0] ", 5) == 0);
 
+    /* setConversion checks only its argument; limits and defaults stay fixed in pulses */
     assert(!PulDir_setConversion(a, 0.0f) && !PulDir_setConversion(a, -2.0f));
     assert(!PulDir_setConversion(a, INFINITY) && !PulDir_setConversion(a, NAN));
     assert(a->conv == 1.0f && a->refusal == PULDIR_R_ARG);
-    assert(!PulDir_setConversion(a, 1000.0f));   /* 200 units/s would be 200,000 pulses/s */
-    assert(a->conv == 1.0f && a->refusal == PULDIR_R_RATE);
-    assert(PulDir_setSpeed(a, 100.0f) && PulDir_setConversion(a, 2.0f));
+    assert(PulDir_setConversion(a, 1000.0f));     /* 200 pulses/s stays 200 pulses/s */
+    assert(PulDir_speed(a) == 0.2f && PulDir_jerk(a) == 0.0f && a->def[1] == 0.2f);
+    assert(PulDir_setConversion(a, 2.0f));
+    assert(PulDir_speed(a) == 100.0f && PulDir_acceleration(a) == 100.0f && a->def[2] == 100.0f);
+    assert(PulDir_setAcceleration(a, 200.0f) && PulDir_setDeceleration(a, 200.0f));
 
     /* every limit: refused on bad input, unchanged */
     assert(!PulDir_setSpeed(a, 0.0f) && !PulDir_setSpeed(a, NAN) && PulDir_speed(a) == 100.0f);
@@ -855,7 +925,7 @@ static void t_refusals(void)
     assert(nlines == 1 && strstr(lines[0], "setJerk refused: jerk below "));
     assert(PulDir_setJerk(a, jmin * 2.0f));
     assert(!PulDir_setDefaults(a, 100.0f, 200.0f, 200.0f, jmin * 0.5f));
-    assert(a->def[0] == 200.0f && a->def[3] == 0.0f);
+    assert(a->def[0] == 100.0f && a->def[1] == 100.0f && a->def[3] == 0.0f);
     assert(PulDir_setDefaults(a, 100.0f, 200.0f, 300.0f, 0.0f));
     assert(a->def[2] == 300.0f && PulDir_deceleration(a) == 300.0f && PulDir_jerk(a) == 0.0f);
 
@@ -870,6 +940,10 @@ static void t_refusals(void)
     /* a landing, with the position formatted from integers */
     assert(PulDir_moveTo(a, -12.25f));     /* conv 2: -24.5 pulses rounds to -25 (away from zero) */
     assert(PulDir_target(a) == -12.5f);
+    assert(!PulDir_setConversion(a, 3.0f) && a->refusal == PULDIR_R_NOT_IDLE && a->conv == 2.0f);
+    PulDir_loop(a);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] setConversion refused: not idle") == 0);
+    nlines = 0;
     run_until_idle(a, 10u * PULDIR_TICK_HZ);
     PulDir_loop(a);
     assert(nlines == 1 && strcmp(lines[0], "[a0] landed at -12.5000") == 0);
@@ -900,6 +974,8 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "move_exact", t_move_exact },
     { "parity", t_parity },
     { "full_rate", t_full_rate },
+    { "arrival_twice", t_arrival_twice },
+    { "creep", t_creep },
     { "refusals", t_refusals },
 };
 
