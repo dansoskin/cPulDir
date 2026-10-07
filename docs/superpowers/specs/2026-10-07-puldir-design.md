@@ -28,7 +28,10 @@ section 9 of the guidelines. Two things are deliberately later specs:
 The generator is an acceleration-limited online planner (the trapezoid) whose
 velocity passes through a moving average of `n = ceil((amax + dmax) / (jmax · dt))`
 taps before it is integrated. The caller sees only the filtered output.
-Section 5.2 of the guidelines has the full rule.
+Section 5.2 of the guidelines has the full rule. The running sum is
+recomputed from the ring every `n` calls, when `head` wraps, so float
+rounding cannot walk the average off during an endless jog; the cost
+amortises to one addition per call.
 
 Why it holds the limits:
 
@@ -52,7 +55,8 @@ What it costs, accepted:
 - `4 · MOTION_PROFILE_MAX_TAPS` bytes per profile, 1 KB at the default of
   256; under 8 KB on the first machine;
 - `dt` must be known when the limits are set, which is decision 2;
-- a jerk change changes `n`, which is decision 3.
+- the window must stay valid while a profile is in flight, which is
+  decision 3.
 
 Rejected: the online S-curve planner of the original 5.2, which decided
 accelerate/decelerate each tick from a stopping distance that includes the
@@ -76,14 +80,26 @@ Every caller uses a fixed interval anyway: the axis and the group use the
 plan interval, a bare caller its own tick. Test 1, dt independence, becomes
 two profiles initialised at different `dt`.
 
-### 3. `setJerk` is not live
+### 3. The jerk window is frozen while a profile is in flight
 
-`MotionProfile_setLimits` with a `jmax` that changes `n` is refused unless
-`done`; `PulDir_setJerk` is refused unless the axis is idle. Resizing a ring
-that holds a ramp in flight is a jerk violation whichever way it is done,
-and nothing on the first machine changes jerk mid-move. Speed, acceleration
-and deceleration remain live. An `n` above `MOTION_PROFILE_MAX_TAPS` is
-refused too, and the log line states the smallest jerk that fits.
+While a profile is not `done`, `n` does not change, and `setLimits` is
+accepted only if the current window still bounds the new jerk:
+`(amax + dmax) / (jmax · dt) ≤ n`, with `jmax = 0` always accepted. When the
+profile is done, `n` is recomputed. So speed is always live; lowering accel
+or decel and raising jerk are live; raising accel or decel beyond the
+window's rounding slack, lowering jerk, and switching jerk on are refused
+until the profile is idle. With jerk off the window is one tap and nothing
+is refused except switching jerk on, so the gimbal's live speed, accel and
+decel commands are unaffected. `PulDir_restoreDefaults` applies all four
+limits or none under the same rule and returns whether it did, and
+`streamEnd` restores the defaults on the idle generator before seeding it
+from the stream velocity. An `n` above `MOTION_PROFILE_MAX_TAPS` is refused
+too, and the log line states the smallest jerk that fits.
+
+The first version of this decision kept accel and decel live; the review
+found that raising either with the window frozen breaks the jerk bound,
+because the window is sized from `amax + dmax`. Resizing a ring that holds a
+ramp is a jerk violation whichever way it is done, hence the freeze.
 
 ### 4. The trapezoid's decel rule is a velocity ceiling
 
@@ -151,7 +167,9 @@ The filtered output has no landing exception: every call satisfies the
 velocity, acceleration and jerk bounds, and tests 4 and 9 demand it
 everywhere. Test 4 also checks that `jmax = 0` reproduces the trapezoid bit
 for bit and that `done` arrives exactly `n` calls after the trapezoid lands.
-Test 24 covers the refusals of decision 3.
+Test 24 covers the frozen window of decision 3, accepted and refused cases
+both, and test 7 checks that the running sum does not drift over ten
+million calls.
 
 ### 9. Documents live here
 
@@ -162,6 +180,14 @@ Test 24 covers the refusals of decision 3.
 - `docs/superpowers/plans/`: the implementation plan.
 - `README.md`: the generator alone, adding an axis, the port contract, the
   numbers. Written as part of the plan.
+
+## Revised after review
+
+A review the same day found three things, fixed here and in the guidelines:
+raising accel or decel live broke the jerk bound (decision 3); the "limits
+during motion" row of section 2.2 still mentioned the landing exception that
+decision 8 removed; the running sum drifted during an endless jog
+(decision 1).
 
 ## Still assumed, to confirm on the bench
 

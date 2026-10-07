@@ -80,12 +80,12 @@ otherwise.
 | topic | decision |
 |---|---|
 | where jerk lives | in the profile generator, once, as a moving-average filter on the trapezoid's velocity (5.2). The axis has jerk because it uses the generator. In stream mode the axis's own ramps are not applied, so a streamed motion is only as smooth as the generator that produced the stream |
-| limits during motion | the generator never exceeds its limits except in the one documented landing call (5.2). A lowered speed limit is ramped down to, not clamped to. A target inside the stopping distance is reached by passing it, stopping under the limits and returning |
+| limits during motion | the generator never exceeds its limits, the landing call included (5.2). A lowered speed limit is ramped down to, not clamped to. A target inside the stopping distance is reached by passing it, stopping under the limits and returning |
 | homing | keep the current phase machine, run from the plan tick (5.8); a failed or timed-out run **halts** the axis, which today's library does not |
 | jog | "run at this speed until told otherwise", speed changeable live; it must **not** reset the position counter, which today's does |
 | enable / release | a motion command enables the drive and waits `enable_ms` before the first pulse; with auto-release on, the drive is disabled `release_ms` after the last pulse; `PulDir_enable(false)` during motion halts first |
 | halt vs stop | `halt` zeroes velocity this tick and discards the plan; `stop` plans a stop at decel and jerk from the current state. Both leave target = where the axis ended |
-| live retarget / override | `moveTo`, `moveBy`, `jog`, `setSpeed`, `setAcceleration`, `setDeceleration` all take effect on the move in progress. `setJerk` is the one exception: it changes the filter length, so it is refused unless the axis is idle (5.2) |
+| live retarget / override | `moveTo`, `moveBy`, `jog` and `setSpeed` always take effect on the move in progress. With jerk off, so do `setAcceleration` and `setDeceleration`, and only switching jerk on waits for idle. With jerk on, the filter window is frozen while the axis moves and a limit change is accepted only if the window still bounds the new jerk (5.2): lowering accel or decel and raising jerk are live; raising accel or decel beyond the window's slack, or lowering jerk, is refused unless the axis is idle |
 | stream loss | velocity feedforward keeps an axis moving after the stream dies, so a stream **timeout** stops the axis at decel and the caller must `streamBegin` again |
 | datum | `setPosition` is refused unless idle; it is the only way to move the datum, and it clears `isHomed` |
 | fault pin | sampled and debounced in the plan tick (2 ms), halt on latch, clear pulse 10 ms timed in the plan tick; nothing blocks |
@@ -297,7 +297,7 @@ typedef struct {
 } MotionProfile;
 
 void  MotionProfile_init(MotionProfile*, float pos, float dt);
-bool  MotionProfile_setLimits(MotionProfile*, MotionLimits);         /* refused if not finite or < 0, or vmax/amax/dmax == 0; a changed jmax refused unless done */
+bool  MotionProfile_setLimits(MotionProfile*, MotionLimits);         /* refused if not finite or < 0, or vmax/amax/dmax == 0; in flight, only if the window still bounds the jerk */
 bool  MotionProfile_setTarget(MotionProfile*, float target);         /* live; any finite target */
 bool  MotionProfile_setEndless(MotionProfile*, float speed);         /* live; sign = direction */
 void  MotionProfile_stop(MotionProfile*);                            /* plan a stop at dmax, jmax */
@@ -347,6 +347,11 @@ acc  = (vel − vel_previous) / dt
 pos += vel · dt
 ```
 
+`sum` is a running sum, new tap in and oldest out, recomputed from the ring
+every `n` calls, when `head` wraps: an endless jog never lands, and without
+the recompute float rounding would walk the average off over hours. The cost
+amortises to one addition per call.
+
 The filtered acceleration is `(v_t(t) − v_t(t − n·dt)) / (n·dt)`, so it stays
 within `[−dmax, +amax]`. The filtered jerk is at most
 `(amax + dmax) / (n·dt) ≤ jmax`, including the acceleration flip of a
@@ -375,8 +380,14 @@ Rules for the generator:
 - `dt` is fixed at `init`, from 1 ms to 10 ms, because the filter length
   depends on it; results must not depend on it beyond the discretisation
   (test 1);
-- a `jmax` that changes `n` is refused unless `done`: jerk is the one limit
-  that is not live. An `n` above `MOTION_PROFILE_MAX_TAPS` is refused, and
+- **the window is frozen in flight.** While not `done`, `n` does not change,
+  and `setLimits` is accepted only if the current window still bounds the
+  new jerk: `(amax + dmax) / (jmax · dt) ≤ n`, with `jmax = 0` always
+  accepted. Lowering `amax` or `dmax` and raising `jmax` therefore stay live;
+  raising `amax` or `dmax` beyond the window's rounding slack, or lowering
+  `jmax`, is refused until `done`, when `n` is recomputed from the limits.
+  With `jmax = 0` the window is one tap and nothing is refused except
+  switching jerk on. An `n` above `MOTION_PROFILE_MAX_TAPS` is refused, and
   the caller's log line states the smallest jerk that fits,
   `(amax + dmax) / (MOTION_PROFILE_MAX_TAPS · dt)`;
 - unit-agnostic: the caller decides what a unit is. The axis feeds it
@@ -573,17 +584,20 @@ Contract:
   untested passthrough; tune it under test 12, do not trust it.
 - **No floor on `v_cmd`**, no logging per setpoint.
 - Between `streamBegin` and the first setpoint the axis keeps the velocity
-  it had, and the stream timeout runs from `streamBegin`.
+  it had: `streamBegin` takes it as the initial `v_cmd`, halts the generator,
+  which stays idle for the stream's duration, and starts the stream timeout.
 - The library does not smooth a first setpoint that disagrees with the
   axis's position and velocity; the caller sends a first setpoint consistent
   with where the axis is. What the library promises is that `streamBegin`
   itself changes nothing.
 - **Timeout**: if no setpoint arrives for `STREAM_TIMEOUT_MS` (default 100),
-  mode → STOPPING at the axis's decel, starting from `(P, v_cmd, acc = 0)`,
-  the `streamTimedOut` flag is set, and `PulDir_loop` logs it once. Setpoints
-  arriving afterwards are dropped; the caller must `streamBegin` again.
-- `streamEnd` goes to STOPPING the same way, then `restoreDefaults` as
-  today.
+  mode → STOPPING at the axis's decel, starting from `(P, v_cmd, acc = 0)`:
+  the idle generator is seeded with `p_t = pos = P`, `v_t = vel = v_cmd` and
+  every tap equal to `v_cmd`, then stopped. The `streamTimedOut` flag is set,
+  and `PulDir_loop` logs it once. Setpoints arriving afterwards are dropped;
+  the caller must `streamBegin` again.
+- `streamEnd` restores the defaults on the generator first, while it is
+  still idle, then goes to STOPPING the same way.
 - The position error `p_hold − P` is readable, for telemetry.
 
 ### 5.7 Groups
@@ -770,14 +784,14 @@ void  PulDir_attachFault(PulDir*, puldir_pin_t, bool inverted);
 void  PulDir_attachFaultClear(PulDir*, puldir_pin_t, bool inverted);
 void  PulDir_setConversion(PulDir*, float pulses_per_unit);
 void  PulDir_setDefaults(PulDir*, float speed, float accel, float decel, float jerk);
-void  PulDir_restoreDefaults(PulDir*);
+bool  PulDir_restoreDefaults(PulDir*);               /* all four or none */
 void  PulDir_setDelays(PulDir*, uint32_t enable_ms, uint32_t release_ms);
 void  PulDir_setAutoRelease(PulDir*, bool);
 void  PulDir_setHoming(PulDir*, int direction, float speed, float adjust,
                      const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms);
 void  PulDir_register(PulDir*);                     /* joins the ticks; static table of PULDIR_MAX_AXES (default 8) */
 
-/* limits, live; setJerk only when idle */
+/* limits; 2.2 says which are live */
 bool  PulDir_setSpeed(PulDir*, float);              float PulDir_speed(PulDir*);
 bool  PulDir_setAcceleration(PulDir*, float);       float PulDir_acceleration(PulDir*);
 bool  PulDir_setDeceleration(PulDir*, float);       float PulDir_deceleration(PulDir*);
@@ -830,9 +844,10 @@ bool  PulDirGroup_faulted(PulDirGroup*);
 `PulDir_setSpeed`, `setAcceleration`, `setDeceleration` and `setJerk` write
 through to the axis's `MotionProfile` limits in pulses; they are the only
 place the conversion is applied to a limit. Setting one never changes
-another (today's `setAcceleration` resets deceleration). `PulDir_setJerk` is
-refused unless the axis is idle, for the reason in 5.2; the other three are
-live.
+another (today's `setAcceleration` resets deceleration). Which of them are
+live while the axis moves is the rule of 5.2, summarised in 2.2: with jerk
+off, all but switching jerk on. `PulDir_restoreDefaults` applies all four or
+none, under the same rule, and returns whether it did.
 
 The public position getter returns a float32, which carries about seven
 significant digits: at one million units the resolution is 0.06 units. The
@@ -852,7 +867,7 @@ This table is the migration plan for the firmware that uses the old library.
 | `connectToPins` | `PulDir_attachPins` | gains both polarities |
 | `connectEnablePin` / `connectFaultPin` / `connectFaultClearPin` | `PulDir_attachEnable` / `PulDir_attachFault` / `PulDir_attachFaultClear` | |
 | `setConversion` | `PulDir_setConversion` | |
-| `setDefaults` / `restoreDefaults` | `PulDir_setDefaults` / `PulDir_restoreDefaults` | gains jerk |
+| `setDefaults` / `restoreDefaults` | `PulDir_setDefaults` / `PulDir_restoreDefaults` | gains jerk; restore is all-or-nothing and returns `bool` |
 | `setSpeed` / `getTargetSpeed` | `PulDir_setSpeed` / `PulDir_speed` | |
 | `setAcceleration` / `getAcceleration` | `PulDir_setAcceleration` / `PulDir_acceleration` | no longer resets decel |
 | `setDeceleration` / `getDeceleration` | `PulDir_setDeceleration` / `PulDir_deceleration` | |
@@ -932,7 +947,8 @@ Generator:
    during the acceleration ramp with `acc` non-zero. `halt` zeroes `vel` and
    `acc` on that call.
 7. **Endless.** Set speed, change it, reverse it, stop. `pos` is continuous
-   throughout.
+   throughout. With jerk set, ten million calls at one constant speed leave
+   `vel` within `n` ulp of that speed: the running sum does not drift.
 8. **Lowered limits mid-move.** `vmax` lowered while cruising: velocity
    comes down at `dmax` (and `jmax`), never steps. `amax` lowered while
    accelerating: `acc` comes inside the new bound at `jmax`.
@@ -997,10 +1013,14 @@ Axis:
 23. **Full rate.** The whole axis suite built with `TICK_HZ = 200000`: a
     move at 99,990 pulses/s shows 5 µs pulses at a 10 µs period, and the
     cap test refuses 100,000.
-24. **Jerk refusals.** `MotionProfile_setLimits` with a changed `jmax` is
-    refused unless `done`, and a `jmax` needing more than
-    `MOTION_PROFILE_MAX_TAPS` taps is refused; `PulDir_setJerk` on a moving
-    axis is refused, changes nothing, and `PulDir_loop` logs the smallest
+24. **The frozen window.** In flight with jerk set: lowering `amax` or
+    `dmax` and raising `jmax` are accepted and the jerk bound holds through
+    the change; raising `amax` or `dmax` beyond the window's slack, lowering
+    `jmax`, and switching jerk on from off are refused and change nothing;
+    once `done`, the same calls are accepted and `n` is recomputed. A `jmax`
+    needing more than `MOTION_PROFILE_MAX_TAPS` taps is refused. On the axis,
+    `PulDir_setJerk` and `PulDir_restoreDefaults` follow the same rule,
+    `restoreDefaults` all-or-nothing, and `PulDir_loop` logs the smallest
     jerk that fits.
 
 Bench tests on real drives come after, as separate steps; the host suite is
