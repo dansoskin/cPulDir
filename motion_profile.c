@@ -194,13 +194,16 @@ static float lag(const MotionProfile* p)
     return p->wsum * (p->dt / (float)p->n);
 }
 
-/* The sums from the ring itself, with head == 0: slot i then has weight i. */
+/* The sums from the ring itself: the oldest tap, at head, has weight 0. */
 static void recompute(MotionProfile* p)
 {
     float s = 0.0f, c = 0.0f, w = 0.0f, wc = 0.0f;
-    for (uint16_t i = 0; i < p->n; i++) {
+    uint16_t i = p->head;
+    for (uint16_t k = 0; k < p->n; k++) {
         kahan_add(&s, &c, p->taps[i]);
-        kahan_add(&w, &wc, (float)i * p->taps[i]);
+        kahan_add(&w, &wc, (float)k * p->taps[i]);
+        if (++i == p->n)
+            i = 0;
     }
     p->sum = s;
     p->wsum = w;
@@ -243,8 +246,12 @@ void MotionProfile_advance(MotionProfile* p)
     const float u = trapezoid(p);
     const float vel0 = p->vel;
     push(p, u);
-    if (was_landed && ++p->drain >= p->n)     /* the ring holds only zeros: drop the residue */
-        p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
+    /* Draining: exact sums every call, as a running residue could turn the
+     * output back past the target once the ring is nearly empty. */
+    if (was_landed) {
+        p->drain++;
+        recompute(p);
+    }
     p->vel = p->sum / (float)p->n;
     p->pos = p->p_t - lag(p);
     p->acc = (p->vel - vel0) / p->dt;

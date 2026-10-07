@@ -10,6 +10,7 @@
 /* After every advance: velocity, acceleration and (with jerk) jerk bounds.
  * The tolerance absorbs float rounding, not design slack. */
 static int g_vmax_relaxed;   /* set by tests that lower vmax or retarget infeasibly */
+static float g_amax_carried; /* a lowered amax the jerk ring still carries; 0 when none */
 
 static void check_step(const MotionProfile* p, float vel0, float acc0)
 {
@@ -17,16 +18,19 @@ static void check_step(const MotionProfile* p, float vel0, float acc0)
     const MotionLimits L = p->lim;
     const float dv = p->vel - vel0;
     const bool speeding_up = fabsf(p->vel) > fabsf(vel0);
-    float bound = speeding_up ? L.amax : L.dmax;
+    float bound = speeding_up ? fmaxf(L.amax, g_amax_carried) : L.dmax;
 
     /* A zero crossing in one call is a shrink then a growth. */
     if ((p->vel > 0.0f && vel0 < 0.0f) || (p->vel < 0.0f && vel0 > 0.0f))
         bound = fmaxf(L.amax, L.dmax);
     /* The new velocity is rounded to its own ulp: at |v| = 32 that alone is 1.9e-6. */
     const float ulp = fmaxf(fabsf(p->vel), fabsf(vel0)) * FLT_EPSILON;
+    /* Through the filter, vel = sum/n adds the sum's rounding (an ulp of n*v, over n)
+     * and the division's to both vel and vel0: about three ulps in all. */
+    const float vel_ulps = p->n > 1 ? 3.0f : 1.0f;
     if (!g_vmax_relaxed)
         assert(fabsf(p->vel) <= L.vmax * (1.0f + tol));
-    assert(fabsf(dv) <= bound * p->dt * (1.0f + tol) + 1e-6f + ulp);
+    assert(fabsf(dv) <= bound * p->dt * (1.0f + tol) + 1e-6f + vel_ulps * ulp);
     /* acc is a difference of velocities over dt, so each carries about two
      * velocity ulps over dt, and the ring's taps reach vmax even when vel is small. */
     const float tap_ulp = fmaxf(ulp, L.vmax * FLT_EPSILON);
@@ -216,17 +220,22 @@ static void run_until_vel(MotionProfile* p, float vel, int max_calls)
 }
 
 /* Test 5: a target set from rest is never passed and is landed on exactly.
- * n moves, start within +-start_span, distance within +-dist_span (>= 0.001). */
-static void random_moves(int n, float start_span, float dist_span)
+ * n moves, start within +-start_span, distance within +-dist_span (>= 0.001).
+ * With jerk_scale > 0, jmax is jerk_scale times 1.01 to 20 times the smallest that fits. */
+static void random_moves(int n, float start_span, float dist_span, float jerk_scale)
 {
     for (int i = 0; i < n; i++) {
-        const MotionLimits L = { frand(1, 50), frand(1, 200), frand(1, 200), 0 };
-        const float start = frand(-start_span, start_span);
+        MotionLimits L = { frand(1, 50), frand(1, 200), frand(1, 200), 0 };
+        if (jerk_scale > 0.0f)
+            L.jmax = jerk_scale * MotionProfile_minJerk(L.amax, L.dmax, 0.001f) * frand(1.01f, 20);
+        float start = frand(-start_span, start_span);
         float d = frand(-dist_span, dist_span);
         if (fabsf(d) < 0.001f)
             d = copysignf(0.001f, d);
+        if (i % 10 == 0)                 /* target 0, where an ulp of pos is finest */
+            start = -d;
         MotionProfile p = fresh(start, 0.001f, L);
-        assert(MotionProfile_setTarget(&p, start + d));
+        assert(MotionProfile_setTarget(&p, i % 10 == 0 ? 0.0f : start + d));
         const float sense = p.target - p.pos;
         for (int calls = 0; !p.done; calls++) {
             assert(calls < 10000000);    /* 5000 units at vmax 1, plus ramps */
@@ -237,26 +246,26 @@ static void random_moves(int n, float start_span, float dist_span)
     }
 }
 
-static void test_random_moves(void)
+static void test_random_moves(float jerk_scale)
 {
-    random_moves(1000, 100.0f, 200.0f);
-    printf("ok random_moves\n");
+    random_moves(1000, 100.0f, 200.0f, jerk_scale);
+    printf("ok random_moves%s\n", jerk_scale > 0.0f ? " (jerk)" : "");
 }
 
 /* Large coordinates, as a virtual master axis in degrees: thousands of units
  * with small dmax, where uncompensated rounding of p_t passed targets. */
-static void test_random_moves_large(void)
+static void test_random_moves_large(float jerk_scale)
 {
-    random_moves(1000, 5000.0f, 5000.0f);
-    printf("ok random_moves_large\n");
+    random_moves(1000, 5000.0f, 5000.0f, jerk_scale);
+    printf("ok random_moves_large%s\n", jerk_scale > 0.0f ? " (jerk)" : "");
 }
 
 static int sign(float v) { return (v > 0.0f) - (v < 0.0f); }
 
 /* Test 5: a target behind the axis costs exactly one reversal. */
-static void test_retarget_behind(void)
+static void test_retarget_behind(float jmax)
 {
-    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, jmax });
     assert(MotionProfile_setTarget(&p, 100.0f));
     run_until_vel(&p, 15.0f, 10000);
     assert(MotionProfile_setTarget(&p, p.pos - 5.0f));
@@ -272,7 +281,7 @@ static void test_retarget_behind(void)
     }
     assert(changes == 1);
     assert(p.pos == p.target);
-    printf("ok retarget_behind\n");
+    printf("ok retarget_behind%s\n", jmax > 0.0f ? " (jerk)" : "");
 }
 
 /* Test 5: a raised vmax applies at once, at amax. */
@@ -295,22 +304,32 @@ static void test_speed_raise(void)
     printf("ok speed_raise\n");
 }
 
-/* Test 9: a target inside the stopping distance is passed, then reached. */
-static void test_infeasible(void)
+/* Test 9: a target inside the stopping distance is passed, then reached:
+ * one reversal, forward to back, and the return does not pass it. */
+static void test_infeasible(float jmax)
 {
-    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, jmax });
     assert(MotionProfile_setTarget(&p, 100.0f));
     run_until_vel(&p, 15.0f, 10000);
     assert(MotionProfile_setTarget(&p, p.pos + 1.0f));
     float furthest = -INFINITY;
+    int last = 1, changes = 0;
     for (int calls = 0; !p.done; calls++) {
         assert(calls < 10000);
         step(&p);
         furthest = fmaxf(furthest, p.pos - p.target);
+        const int s = sign(p.vel);
+        if (s != 0 && s != last) {
+            changes++;
+            last = s;
+        }
+        if (last < 0)
+            assert(p.pos >= p.target);
     }
+    assert(changes == 1 && last < 0);
     assert(furthest >= 2.7f);            /* stopping distance 3.75, target 1 ahead */
     assert(p.pos == p.target);
-    printf("ok infeasible\n");
+    printf("ok infeasible%s\n", jmax > 0.0f ? " (jerk)" : "");
 }
 
 /* n calls; asserts the position never jumps more than vmax*dt in one call.
@@ -368,10 +387,10 @@ static void stop_where_predicted(MotionProfile* p)
     assert(p->target == p->pos && p->vel == 0.0f);
 }
 
-/* Test 6: stop at cruise and halfway up the ramp. */
-static void test_stop(void)
+/* Test 6: stop at cruise and halfway up the ramp, where acc is not zero. */
+static void test_stop(float jmax)
 {
-    const MotionLimits L = { 15, 30, 30, 0 };
+    const MotionLimits L = { 15, 30, 30, jmax };
     MotionProfile p = fresh(0.0f, 0.001f, L);
     assert(MotionProfile_setTarget(&p, 1000.0f));
     run_until_vel(&p, 15.0f, 10000);
@@ -383,13 +402,14 @@ static void test_stop(void)
         assert(calls < 10000);
         step(&q);
     }
+    assert(q.acc != 0.0f);
     stop_where_predicted(&q);
 
     /* stop on a done profile is a no-op */
     const MotionProfile before = q;
     MotionProfile_stop(&q);
     assert(profiles_equal(&before, &q));
-    printf("ok stop\n");
+    printf("ok stop%s\n", jmax > 0.0f ? " (jerk)" : "");
 }
 
 /* Test 6: halt is immediate and final. */
@@ -406,19 +426,23 @@ static void test_halt(void)
     printf("ok halt\n");
 }
 
-/* Test 8: a lowered vmax is followed down at exactly dmax, then held. */
-static void test_lowered_vmax(void)
+/* Test 8: a lowered vmax is followed down at exactly dmax (with jerk, smoothly
+ * under the jerk bound the checker asserts), then held. */
+static void test_lowered_vmax(float jmax)
 {
-    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, jmax });
     assert(MotionProfile_setTarget(&p, 1000.0f));
     run_until_vel(&p, 15.0f, 10000);
     g_vmax_relaxed = 1;
-    assert(MotionProfile_setLimits(&p, (MotionLimits){ 5, 30, 30, 0 }));
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 5, 30, 30, jmax }));
     const float dv = 30.0f * 0.001f;
     for (int calls = 0; p.vel != 5.0f; calls++) {
         assert(calls < 10000);
         const float v0 = p.vel;
         step(&p);
+        assert(p.vel <= v0);
+        if (jmax > 0.0f)
+            continue;
         if (p.vel != 5.0f)
             assert(fabsf((v0 - p.vel) - dv) <= dv * 1e-4f);
         else                                 /* the last step only closes the gap */
@@ -429,18 +453,28 @@ static void test_lowered_vmax(void)
         step(&p);
         assert(p.vel == 5.0f);
     }
-    printf("ok lowered_vmax\n");
+    printf("ok lowered_vmax%s\n", jmax > 0.0f ? " (jerk)" : "");
 }
 
-/* Test 8: a lowered amax applies from the next call. */
-static void test_lowered_amax(void)
+/* Test 8: a lowered amax applies from the next call. With jerk the ring still
+ * carries the old ramp, so acc comes inside the new bound within one window. */
+static void test_lowered_amax(float jmax)
 {
-    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, jmax });
     assert(MotionProfile_setTarget(&p, 1000.0f));
     for (int i = 0; i < 100; i++)
         step(&p);
-    assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 10, 30, 0 }));
-    {
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 10, 30, jmax }));
+    if (jmax > 0.0f) {
+        g_amax_carried = 30.0f;
+        int calls = 0;     /* the checker's acc rounding: two velocity ulps over dt */
+        for (; p.acc > 10.0f * (1.0f + 1e-4f) + 2.0f * 15.0f * FLT_EPSILON / p.dt; calls++) {
+            assert(calls <= p.n);
+            step(&p);
+        }
+        assert(calls > 0);                   /* it was outside the new bound */
+        g_amax_carried = 0.0f;
+    } else {
         const float v0 = p.vel;
         step(&p);
         assert(fabsf((p.vel - v0) - 10.0f * 0.001f) <= 10.0f * 0.001f * 1e-4f);
@@ -449,9 +483,9 @@ static void test_lowered_amax(void)
         assert(calls < 10000);
         const float v0 = p.vel;
         step(&p);
-        assert(p.vel - v0 <= 10.0f * 0.001f * (1.0f + 1e-4f));
+        assert(p.vel - v0 <= 10.0f * 0.001f * (1.0f + 1e-4f) + 1e-6f + p.vel * FLT_EPSILON);
     }
-    printf("ok lowered_amax\n");
+    printf("ok lowered_amax%s\n", jmax > 0.0f ? " (jerk)" : "");
 }
 
 /* Test 4: with jerk, the move is the trapezoid's plus the window, and lands exactly. */
@@ -512,31 +546,13 @@ static void test_sum_drift(void)
     printf("ok sum_drift\n");
 }
 
-/* Test 6 with jerk: stop at cruise and halfway up the ramp, where acc is not zero. */
-static void test_stop_jerk(void)
-{
-    const MotionLimits L = { 15, 30, 30, 300 };
-    MotionProfile p = fresh(0.0f, 0.001f, L);
-    assert(MotionProfile_setTarget(&p, 1000.0f));
-    run_until_vel(&p, 15.0f, 10000);
-    stop_where_predicted(&p);
-
-    MotionProfile q = fresh(0.0f, 0.001f, L);
-    assert(MotionProfile_setTarget(&q, 1000.0f));
-    for (int calls = 0; q.vel < 7.5f; calls++) {
-        assert(calls < 10000);
-        step(&q);
-    }
-    assert(q.acc != 0.0f);
-    stop_where_predicted(&q);
-    printf("ok stop_jerk\n");
-}
-
 /* Test 1: the same move at dt 1 ms and 5 ms differs only by the discretisation. */
-static void test_dt_independence(void)
+static void test_dt_independence(float jmax)
 {
-    const MotionLimits L = { 15, 30, 30, 0 };
+    const MotionLimits L = { 15, 30, 30, jmax };
     MotionProfile fine = fresh(0.0f, 0.001f, L), coarse = fresh(0.0f, 0.005f, L);
+    /* The window adds n - 1 calls of motion: the done call is in extra_calls. */
+    const float windows = fabsf((float)(fine.n - 1) * 0.001f - (float)(coarse.n - 1) * 0.005f);
     assert(MotionProfile_setTarget(&fine, 9.0f));
     assert(MotionProfile_setTarget(&coarse, 9.0f));
     const Run f = run_to_done(&fine, 10000), c = run_to_done(&coarse, 10000);
@@ -544,9 +560,79 @@ static void test_dt_independence(void)
     /* Each run's known tail grows as dt*ln(1/dt); compare what remains. */
     const float t_fine = ((float)f.calls - extra_calls(L, 0.001f)) * 0.001f;
     const float t_coarse = ((float)c.calls - extra_calls(L, 0.005f)) * 0.005f;
-    assert(fabsf(t_fine - t_coarse) <= 0.005f);
+    assert(fabsf(t_fine - t_coarse) <= 0.005f + windows);
     assert(fabsf(f.peak - c.peak) <= 30.0f * 0.005f);
-    printf("ok dt_independence\n");
+    printf("ok dt_independence%s\n", jmax > 0.0f ? " (jerk)" : "");
+}
+
+/* Test 24: in flight the window is frozen; limits are accepted only while it
+ * still bounds the jerk. */
+static void test_frozen_window(void)
+{
+    const float dt = 0.001f;
+    MotionProfile p = fresh(0.0f, dt, (MotionLimits){ 15, 30, 30, 290 });
+    assert(p.n == 207);                       /* ceil(60 / 0.29) */
+    assert(MotionProfile_setTarget(&p, 100.0f));
+    for (int i = 0; i < 800; i++)             /* to cruise: 500 calls of ramp, 207 of window */
+        step(&p);
+
+    const struct { MotionLimits L; bool ok; } calls[] = {
+        { { 15, 20, 30, 290 }, true },        /* lower amax */
+        { { 15, 30, 20, 290 }, true },        /* lower dmax */
+        { { 15, 30, 30, 600 }, true },        /* raise jmax */
+        { { 15, 30.02f, 30, 290 }, true },    /* inside the slack: 206.97 taps */
+        { { 15, 30.1f, 30, 290 }, false },    /* beyond it: 207.2 */
+        { { 15, 30, 30, 250 }, false },       /* lower jmax: 240 */
+        { { 15, 30, 30, 0 }, true },          /* jerk off; the window stays */
+    };
+    for (unsigned i = 0; i < sizeof calls / sizeof calls[0]; i++) {
+        const MotionProfile before = p;
+        assert(MotionProfile_setLimits(&p, calls[i].L) == calls[i].ok);
+        if (calls[i].ok)
+            assert(limits_equal(p.lim, calls[i].L) && p.n == 207);
+        else
+            assert(profiles_equal(&before, &p));
+        for (int k = 0; k < 50; k++) {
+            step(&p);
+            assert(p.n == 207);
+        }
+    }
+
+    /* Run to done. The window still bounds the jerk with jmax now 0. */
+    const float jerk = (30.0f + 30.0f) / (207.0f * dt);
+    for (int calls_ = 0; !p.done; calls_++) {
+        assert(calls_ < 10000);
+        const float a0 = p.acc;
+        step(&p);
+        if (!p.done) {
+            assert(p.n == 207);
+            assert(fabsf(p.acc - a0) <= jerk * dt * (1.0f + 1e-4f) + 4.0f * 15.0f * FLT_EPSILON / dt);
+        }
+    }
+    assert(p.pos == 100.0f && p.n == 1);
+
+    /* Done: the refused calls are accepted and n is recomputed. */
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 30.1f, 30, 290 }) && p.n == 208);
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 30, 30, 250 }) && p.n == 240);
+    {
+        const MotionProfile before = p;       /* 300 taps: refused even when done */
+        assert(!MotionProfile_setLimits(&p, (MotionLimits){ 15, 30, 30, 200 }));
+        assert(profiles_equal(&before, &p));
+    }
+
+    /* Switching jerk on is refused in flight and accepted once done. */
+    MotionProfile q = fresh(0.0f, dt, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&q, 5.0f));
+    for (int i = 0; i < 100; i++)
+        step(&q);
+    {
+        const MotionProfile before = q;
+        assert(!MotionProfile_setLimits(&q, (MotionLimits){ 15, 30, 30, 300 }));
+        assert(profiles_equal(&before, &q));
+    }
+    run_to_done(&q, 10000);
+    assert(MotionProfile_setLimits(&q, (MotionLimits){ 15, 30, 30, 300 }) && q.n == 200);
+    printf("ok frozen_window\n");
 }
 
 int main(void)
@@ -555,20 +641,24 @@ int main(void)
     test_setup();
     test_trapezoid();
     test_asymmetric();
-    test_random_moves();
-    test_random_moves_large();
-    test_retarget_behind();
     test_speed_raise();
-    test_infeasible();
     test_endless();
-    test_stop();
     test_halt();
-    test_lowered_vmax();
-    test_lowered_amax();
-    test_dt_independence();
     test_trapezoid_bit_for_bit();
     test_scurve();
-    test_stop_jerk();
     test_sum_drift();
+    /* Each with the trapezoid alone, then through the jerk filter. */
+    for (int j = 0; j < 2; j++) {
+        const float jmax = j ? 300.0f : 0.0f;
+        test_random_moves((float)j);
+        test_random_moves_large((float)j);
+        test_retarget_behind(jmax);
+        test_infeasible(jmax);
+        test_stop(jmax);
+        test_lowered_vmax(jmax);
+        test_lowered_amax(jmax);
+        test_dt_independence(jmax);
+    }
+    test_frozen_window();
     return 0;
 }
