@@ -129,7 +129,7 @@ static float toward(float v, float vc, float up, float down)
     /* Never shed less than down to rounding: the ceiling's margin, dd^2/2v,
      * is below an ulp of v on long ramps, so a short shed is never recovered. */
     float m = fmaxf(fabsf(v) - down, floor_);
-    if (m > floor_ && fabsf(v) - m < down)       /* exact: Sterbenz */
+    if (m > floor_ && fabsf(v) - m < down)       /* exact on long ramps (Sterbenz) */
         m = nextafterf(m, 0.0f);
     return copysignf(m, v);
 }
@@ -150,7 +150,7 @@ static float trapezoid(MotionProfile* p)
         const bool fits = fabsf(u) <= fabsf(v) ? fabsf(v) - fabsf(u) <= dd
                                                : fabsf(u) - fabsf(v) <= L.amax * dt;
         if (fabsf(rem) <= dd * dt && same && fits) {
-            p->p_t = p->target;           /* the one place p_t is assigned */
+            p->p_t = p->target;           /* assigned rather than integrated */
             p->p_c = 0.0f;
             p->v_t = 0.0f;
             p->landed = true;
@@ -167,9 +167,8 @@ static float trapezoid(MotionProfile* p)
         vc = copysignf(fminf(L.vmax, sqrtf(dd * dd + 2.0f * L.dmax * fabsf(rem)) - dd), rem);
 
     p->v_t = toward(p->v_t, vc, L.amax * dt, dd);
-    /* Kahan sum: the ceiling can correct only dmax*dt^2/2 of position error
-     * per call, less than one call's rounding of p_t at large coordinates.
-     * Needs strict float evaluation: never build with -ffast-math. */
+    /* Kahan sum: plain rounding of p_t misses the dmax*dt^2 landing window at
+     * large coordinates. Needs strict float evaluation: never -ffast-math. */
     const float y = p->v_t * dt - p->p_c;
     const float t = p->p_t + y;
     p->p_c = (t - p->p_t) - y;

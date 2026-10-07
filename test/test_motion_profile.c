@@ -1,6 +1,5 @@
-/* Generator tests (guidelines section 8, tests 1-9). One executable; each
- * test prints "ok <name>". Every advance goes through step(), which checks
- * the limits of 5.2, so every test checks them for free. */
+/* Generator tests (guidelines section 8, tests 1-9), each printing "ok <name>".
+ * Every advance goes through step(), which checks the limits of 5.2. */
 #include <assert.h>
 #include <float.h>
 #include <math.h>
@@ -44,6 +43,17 @@ static bool limits_equal(MotionLimits a, MotionLimits b)
     return memcmp(&a, &b, sizeof a) == 0;
 }
 
+/* Field by field: a whole-struct memcmp would compare indeterminate padding. */
+static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
+{
+    return a->dt == b->dt && a->pos == b->pos && a->vel == b->vel && a->acc == b->acc
+        && a->target == b->target && a->endless == b->endless && a->stopping == b->stopping
+        && a->landed == b->landed && a->done == b->done && limits_equal(a->lim, b->lim)
+        && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
+        && memcmp(a->taps, b->taps, sizeof a->taps) == 0
+        && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum;
+}
+
 static void test_setup(void)
 {
     MotionProfile p;
@@ -63,7 +73,7 @@ static void test_setup(void)
         assert(!MotionProfile_init(&q, 0.0f, NAN));
         assert(!MotionProfile_init(&q, NAN, 0.001f));
         assert(!MotionProfile_init(&q, INFINITY, 0.001f));
-        assert(memcmp(&q, &p, sizeof q) == 0);
+        assert(profiles_equal(&q, &p));
     }
 
     /* setLimits refusals change nothing */
@@ -97,6 +107,13 @@ static void test_setup(void)
     assert(p.pos == 5.0f && p.target == 5.0f && p.p_t == 5.0f);
     assert(!MotionProfile_setPosition(&p, NAN));
     assert(p.pos == 5.0f);
+
+    {
+        const MotionProfile before = p;
+        assert(!MotionProfile_setTarget(&p, NAN));
+        assert(!MotionProfile_setTarget(&p, INFINITY));
+        assert(profiles_equal(&before, &p));
+    }
 
     {
         MotionProfile q;
@@ -138,10 +155,8 @@ static MotionProfile fresh(float pos, float dt, MotionLimits L)
     return p;
 }
 
-/* Calls a move to rest takes beyond the analytic trapezoid: the done call,
- * plus the discrete ceiling's tail. Following the ceiling, v' = sqrt(dd^2 +
- * v^2) - dd sheds a little less than dd per call, about
- * ln(vmax / (dmax*dt)) / 2 calls over a descent from vmax. */
+/* Calls beyond the analytic trapezoid: the done call, plus the discrete ceiling's
+ * tail (v' = sqrt(dd^2 + v^2) - dd sheds under dd), about ln(vmax/(dmax*dt))/2. */
 static float extra_calls(MotionLimits L, float dt)
 {
     return 1.0f + 0.5f * logf(L.vmax / (L.dmax * dt));
@@ -196,9 +211,8 @@ static void run_until_vel(MotionProfile* p, float vel, int max_calls)
     }
 }
 
-/* Test 5: a target set from rest is reachable, so it is never passed, and
- * the landing is exact. n moves from rest, start within +-start_span,
- * distance within +-dist_span (at least 0.001). */
+/* Test 5: a target set from rest is never passed and is landed on exactly.
+ * n moves, start within +-start_span, distance within +-dist_span (>= 0.001). */
 static void random_moves(int n, float start_span, float dist_span)
 {
     for (int i = 0; i < n; i++) {
@@ -336,7 +350,7 @@ static void test_endless(void)
     const MotionProfile before = p;
     assert(!MotionProfile_setEndless(&p, NAN));
     assert(!MotionProfile_setEndless(&p, INFINITY));
-    assert(memcmp(&before, &p, sizeof p) == 0);
+    assert(profiles_equal(&before, &p));
     printf("ok endless\n");
 }
 
@@ -370,7 +384,7 @@ static void test_stop(void)
     /* stop on a done profile is a no-op */
     const MotionProfile before = q;
     MotionProfile_stop(&q);
-    assert(memcmp(&before, &q, sizeof q) == 0);
+    assert(profiles_equal(&before, &q));
     printf("ok stop\n");
 }
 
@@ -384,7 +398,7 @@ static void test_halt(void)
     assert(p.vel == 0.0f && p.acc == 0.0f && p.done && p.target == p.pos);
     const MotionProfile before = p;
     MotionProfile_advance(&p);
-    assert(memcmp(&before, &p, sizeof p) == 0);
+    assert(profiles_equal(&before, &p));
     printf("ok halt\n");
 }
 
@@ -422,6 +436,11 @@ static void test_lowered_amax(void)
     for (int i = 0; i < 100; i++)
         step(&p);
     assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 10, 30, 0 }));
+    {
+        const float v0 = p.vel;
+        step(&p);
+        assert(fabsf((p.vel - v0) - 10.0f * 0.001f) <= 10.0f * 0.001f * 1e-4f);
+    }
     for (int calls = 0; p.vel != 15.0f; calls++) {
         assert(calls < 10000);
         const float v0 = p.vel;
