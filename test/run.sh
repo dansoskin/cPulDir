@@ -9,3 +9,15 @@ CFLAGS="-std=c99 -O1 -Wall -Wextra -Werror -Wdouble-promotion -Wshadow -I."
 gcc $CFLAGS -o "$OUT/test_motion_profile" test/test_motion_profile.c motion_profile.c -lm
 "$OUT/test_motion_profile"
 echo "generator: all ok"
+
+LIB="motion_profile.c puldir.c puldir_pulse.c puldir_plan.c puldir_loop.c"
+build_axis() {   # $1 = output name, rest = extra flags
+    local out="$1"; shift
+    gcc $CFLAGS -Itest "$@" -o "$OUT/$out" test/test_puldir.c test/fake_port.c $LIB -lm
+    local cases
+    cases=$("$OUT/$out" list | tr -d '\r')   # one process per case (D9); a failing list stops the script
+    [ -n "$cases" ]
+    for c in $cases; do "$OUT/$out" "$c"; done
+}
+build_axis test_puldir
+echo "axis: all ok"

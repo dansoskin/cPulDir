@@ -20,6 +20,7 @@ extern uint8_t puldir_naxes;
 
 /* pulse tick (puldir_pulse.c) */
 void       puldir_pulse_tick(bool overrun);
+void       puldir_pulse_add(PulDir*);         /* PulDir_register: take the next slot, entries at inc 0, dir +1 */
 PulDirInc* puldir_shadow(void);               /* the unpublished set; the plan tick writes it */
 void       puldir_publish(void);              /* one store; latched at the next boundary (D5) */
 void       puldir_kill(uint8_t slot);         /* under the lock: zero live and published inc */
