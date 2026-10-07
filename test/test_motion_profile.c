@@ -27,8 +27,11 @@ static void check_step(const MotionProfile* p, float vel0, float acc0)
     if (!g_vmax_relaxed)
         assert(fabsf(p->vel) <= L.vmax * (1.0f + tol));
     assert(fabsf(dv) <= bound * p->dt * (1.0f + tol) + 1e-6f + ulp);
+    /* acc is a difference of velocities over dt, so each carries about two
+     * velocity ulps over dt, and the ring's taps reach vmax even when vel is small. */
+    const float tap_ulp = fmaxf(ulp, L.vmax * FLT_EPSILON);
     if (L.jmax > 0.0f)
-        assert(fabsf(p->acc - acc0) <= L.jmax * p->dt * (1.0f + tol) + 1e-3f);
+        assert(fabsf(p->acc - acc0) <= L.jmax * p->dt * (1.0f + tol) + 4.0f * tap_ulp / p->dt);
 }
 
 static void step(MotionProfile* p)
@@ -50,8 +53,10 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
         && a->target == b->target && a->endless == b->endless && a->stopping == b->stopping
         && a->landed == b->landed && a->done == b->done && limits_equal(a->lim, b->lim)
         && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
+        && a->pos_c == b->pos_c
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
-        && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum;
+        && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
+        && a->sum_c == b->sum_c;
 }
 
 static void test_setup(void)
@@ -450,6 +455,83 @@ static void test_lowered_amax(void)
     printf("ok lowered_amax\n");
 }
 
+/* Test 4: with jerk, the move is the trapezoid's plus the window, and lands exactly. */
+static void test_scurve(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(p.n == 200);
+    assert(MotionProfile_setTarget(&p, 9.0f));
+    int calls = 0, landed_call = -1;
+    float peak = 0.0f;
+    while (!p.done) {
+        step(&p);
+        calls++;
+        assert(calls < 5000);
+        if (p.landed && landed_call < 0)
+            landed_call = calls;
+        peak = fmaxf(peak, fabsf(p.vel));
+        assert(p.acc <= L.amax * (1.0f + 1e-4f) && p.acc >= -L.dmax * (1.0f + 1e-4f));
+    }
+    assert(calls - landed_call == 200);
+    assert(p.pos == 9.0f && p.vel == 0.0f && p.acc == 0.0f);
+    assert(peak <= 15.0f);
+    /* The trapezoid's calls (1100 + tail + the done call), then the window less that done call. */
+    assert(fabsf((float)calls - (1100.0f + 200.0f + extra_calls(L, 0.001f) - 1.0f)) <= 2.0f);
+    printf("ok scurve\n");
+}
+
+/* Test 4: with jmax = 0 the output is the trapezoid itself, bit for bit. */
+static void test_trapezoid_bit_for_bit(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 9.0f));
+    for (int calls = 0; !p.done; calls++) {
+        assert(calls < 5000);
+        const bool was_landed = p.landed;
+        const float rem = p.target - p.p_t;
+        step(&p);
+        assert(p.pos == p.p_t);
+        if (p.landed && !was_landed)
+            assert(p.vel == rem / p.dt);      /* the landing call's velocity */
+        else
+            assert(p.vel == p.v_t);
+    }
+    printf("ok trapezoid_bit_for_bit\n");
+}
+
+/* Test 7: the running sum does not drift over ten million calls. */
+static void test_sum_drift(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 20, 30, 30, 300 });
+    assert(MotionProfile_setEndless(&p, 12.345f));
+    for (long i = 0; i < 10000000L; i++)
+        step(&p);
+    const float ulp = nextafterf(12.345f, 20.0f) - 12.345f;
+    assert(fabsf(p.vel - 12.345f) <= 200.0f * ulp);
+    printf("ok sum_drift\n");
+}
+
+/* Test 6 with jerk: stop at cruise and halfway up the ramp, where acc is not zero. */
+static void test_stop_jerk(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&p, 1000.0f));
+    run_until_vel(&p, 15.0f, 10000);
+    stop_where_predicted(&p);
+
+    MotionProfile q = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&q, 1000.0f));
+    for (int calls = 0; q.vel < 7.5f; calls++) {
+        assert(calls < 10000);
+        step(&q);
+    }
+    assert(q.acc != 0.0f);
+    stop_where_predicted(&q);
+    printf("ok stop_jerk\n");
+}
+
 /* Test 1: the same move at dt 1 ms and 5 ms differs only by the discretisation. */
 static void test_dt_independence(void)
 {
@@ -484,5 +566,9 @@ int main(void)
     test_lowered_vmax();
     test_lowered_amax();
     test_dt_independence();
+    test_trapezoid_bit_for_bit();
+    test_scurve();
+    test_stop_jerk();
+    test_sum_drift();
     return 0;
 }

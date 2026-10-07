@@ -30,7 +30,7 @@ static void clear_ring(MotionProfile* p)
     for (int i = 0; i < MOTION_PROFILE_MAX_TAPS; i++)
         p->taps[i] = 0.0f;
     p->head = 0;
-    p->sum = 0.0f;
+    p->sum = p->sum_c = 0.0f;
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -39,7 +39,7 @@ bool MotionProfile_init(MotionProfile* p, float pos, float dt)
         return false;
     p->dt = dt;
     p->pos = p->target = p->p_t = pos;
-    p->p_c = 0.0f;
+    p->p_c = p->pos_c = 0.0f;
     p->vel = p->acc = p->v_t = p->speed = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
@@ -102,7 +102,7 @@ void MotionProfile_halt(MotionProfile* p)
     clear_ring(p);
     p->v_t = p->vel = p->acc = 0.0f;
     p->p_t = p->target = p->pos;
-    p->p_c = 0.0f;
+    p->p_c = p->pos_c = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
     p->drain = 0;
@@ -114,8 +114,17 @@ bool MotionProfile_setPosition(MotionProfile* p, float pos)
     if (!p->done || !isfinite(pos))
         return false;
     p->pos = p->p_t = p->target = pos;
-    p->p_c = 0.0f;
+    p->p_c = p->pos_c = 0.0f;
     return true;
+}
+
+/* *s += x with compensation *c. Needs strict float evaluation: never -ffast-math. */
+static void kahan_add(float* s, float* c, float x)
+{
+    const float y = x - *c;
+    const float t = *s + y;
+    *c = (t - *s) - y;
+    *s = t;
 }
 
 /* Move v toward vc by at most up when |v| grows and down when it shrinks.
@@ -167,12 +176,8 @@ static float trapezoid(MotionProfile* p)
         vc = copysignf(fminf(L.vmax, sqrtf(dd * dd + 2.0f * L.dmax * fabsf(rem)) - dd), rem);
 
     p->v_t = toward(p->v_t, vc, L.amax * dt, dd);
-    /* Kahan sum: plain rounding of p_t misses the dmax*dt^2 landing window at
-     * large coordinates. Needs strict float evaluation: never -ffast-math. */
-    const float y = p->v_t * dt - p->p_c;
-    const float t = p->p_t + y;
-    p->p_c = (t - p->p_t) - y;
-    p->p_t = t;
+    /* Plain rounding of p_t misses the dmax*dt^2 landing window at large coordinates. */
+    kahan_add(&p->p_t, &p->p_c, p->v_t * dt);
     if (p->stopping && p->v_t == 0.0f) {
         p->target = p->p_t;
         p->p_c = 0.0f;
@@ -188,7 +193,7 @@ static void finish(MotionProfile* p)
     clear_ring(p);
     p->vel = p->acc = 0.0f;
     p->pos = p->p_t = p->target;
-    p->p_c = 0.0f;
+    p->p_c = p->pos_c = 0.0f;
     p->done = true;
     p->drain = 0;
     p->n = window(p->lim, p->dt);
@@ -201,8 +206,26 @@ void MotionProfile_advance(MotionProfile* p)
     const bool was_landed = p->landed;
     const float u = trapezoid(p);
     const float vel0 = p->vel;
-    p->vel = u;
-    p->pos = p->p_t;    /* Task 6: the filtered pos += vel*dt needs a Kahan sum too when n > 1 */
+    /* Compensated: a plain running sum drifts by tens of its ulps between
+     * recomputes, and each recompute would then step vel past the jerk bound. */
+    kahan_add(&p->sum, &p->sum_c, u);
+    kahan_add(&p->sum, &p->sum_c, -p->taps[p->head]);
+    p->taps[p->head] = u;
+    if (++p->head == p->n) {              /* recompute: rounding must not walk the sum */
+        float s = 0.0f, c = 0.0f;
+        for (uint16_t i = 0; i < p->n; i++)
+            kahan_add(&s, &c, p->taps[i]);
+        p->sum = s;
+        p->sum_c = 0.0f;
+        p->head = 0;
+    }
+    if (p->n == 1) {                      /* one tap: the output is the trapezoid itself */
+        p->vel = u;
+        p->pos = p->p_t;
+    } else {                              /* compensated, as p_t is, for large coordinates */
+        p->vel = p->sum / (float)p->n;
+        kahan_add(&p->pos, &p->pos_c, p->vel * p->dt);
+    }
     p->acc = (p->vel - vel0) / p->dt;
     if (was_landed && ++p->drain >= p->n)
         finish(p);

@@ -30,11 +30,12 @@ typedef struct {
     MotionLimits lim;
     /* private */
     float    p_t, p_c, v_t;               /* the trapezoid's own position, its Kahan compensation, velocity */
+    float    pos_c;                       /* Kahan compensation of the filtered pos */
     float    speed;                       /* endless speed, signed */
     float    taps[MOTION_PROFILE_MAX_TAPS];
     uint16_t n, head;                     /* window length; next slot to overwrite */
     uint16_t drain;                       /* calls since landing, up to n */
-    float    sum;
+    float    sum, sum_c;                  /* running sum of the ring, its Kahan compensation */
 } MotionProfile;
 
 bool  MotionProfile_init(MotionProfile*, float pos, float dt);
