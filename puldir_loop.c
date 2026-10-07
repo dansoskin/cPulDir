@@ -1,11 +1,19 @@
 /* Events and the log: PulDir_loop turns an axis's event bits into log lines. */
+#include <math.h>
 #include "puldir_internal.h"
+
+#define LINE 96u
 
 static void (*logger)(const char*);
 
 void PulDir_attachLogger(void (*fn)(const char*))
 {
     logger = fn;
+}
+
+void PulDir_setLogging(PulDir* a, bool on)
+{
+    a->log_on = on;
 }
 
 /* Main context. The event bits are shared with the plan tick, so they are
@@ -18,4 +26,110 @@ void puldir_refuse(PulDir* a, const char* call, PulDirRefusal why, float value)
     a->refused_value = value;
     a->events |= PULDIR_EV_REFUSED;
     port_unlock();
+}
+
+/* ---- lines, without printf: no double ever reaches a formatter ------------- */
+
+static size_t put(char* b, size_t at, const char* s)
+{
+    while (*s != '\0' && at < LINE - 1u)
+        b[at++] = *s++;
+    b[at] = '\0';
+    return at;
+}
+
+static size_t put_uint(char* b, size_t at, uint64_t v, int min_digits)
+{
+    char d[21];
+    int k = 0;
+    do {
+        d[k++] = (char)('0' + (int)(v % 10u));
+        v /= 10u;
+    } while (v != 0u || k < min_digits);
+    char s[2] = { 0, 0 };
+    while (k > 0) {
+        s[0] = d[--k];
+        at = put(b, at, s);
+    }
+    return at;
+}
+
+/* A signed decimal with four places, from integer arithmetic. */
+static size_t put_num(char* b, size_t at, float v)
+{
+    if (isnan(v))
+        return put(b, at, "nan");
+    if (v < 0.0f) {
+        at = put(b, at, "-");
+        v = -v;
+    }
+    if (!(v < 1.0e14f))                         /* also inf: past what four places can show */
+        return put(b, at, "1e14+");
+    const uint64_t q = (uint64_t)(v * 10000.0f + 0.5f);
+    at = put_uint(b, at, q / 10000u, 1);
+    at = put(b, at, ".");
+    return put_uint(b, at, q % 10000u, 4);
+}
+
+static const char* reason(PulDirRefusal why)
+{
+    switch (why) {
+    case PULDIR_R_FAULT:      return "drive fault latched";
+    case PULDIR_R_MODE:       return "not accepted in this mode";
+    case PULDIR_R_ARG:        return "bad argument";
+    case PULDIR_R_RATE:       return "speed at or above the rate cap ";
+    case PULDIR_R_WINDOW:     return "the jerk window is frozen while moving";
+    case PULDIR_R_NOT_IDLE:   return "not idle";
+    case PULDIR_R_NO_PIN:     return "no pin attached";
+    case PULDIR_R_NO_HOMING:  return "homing not configured";
+    case PULDIR_R_DROPPED:    return "dropped";
+    case PULDIR_R_BUSY:       return "busy";
+    case PULDIR_R_FULL:       return "axis table full";
+    default:                  return "refused";
+    }
+}
+
+static size_t head(char* b, const PulDir* a)
+{
+    size_t at = put(b, 0, "[");
+    at = put(b, at, a->name);
+    return put(b, at, "] ");
+}
+
+void PulDir_loop(PulDir* a)
+{
+    port_lock();
+    const uint16_t ev = a->events;
+    a->events = 0;
+    const PulDirRefusal why = a->refusal;
+    const char* call = a->refused_call;
+    const float value = a->refused_value;
+    port_unlock();
+    if (!a->log_on || logger == NULL || ev == 0u)
+        return;
+
+    char b[LINE];
+    if (ev & PULDIR_EV_REFUSED) {
+        size_t at = head(b, a);
+        at = put(b, at, call != NULL ? call : "call");
+        at = put(b, at, " refused: ");
+        if (why == PULDIR_R_TAPS) {
+            at = put(b, at, "jerk below ");
+            at = put_num(b, at, value);
+            at = put(b, at, " needs more than ");
+            at = put_uint(b, at, MOTION_PROFILE_MAX_TAPS, 1);
+            (void)put(b, at, " taps");
+        } else {
+            at = put(b, at, reason(why));
+            if (why == PULDIR_R_RATE)
+                (void)put_num(b, at, value);
+        }
+        logger(b);
+    }
+    if (ev & PULDIR_EV_LANDED) {
+        size_t at = head(b, a);
+        at = put(b, at, "landed at ");
+        (void)put_num(b, at, PulDir_position(a));
+        logger(b);
+    }
 }

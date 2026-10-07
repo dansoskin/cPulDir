@@ -92,6 +92,7 @@ typedef struct PulDir {
     uint32_t enabled_at;                 /* tick of the enable edge */
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
+    int8_t   dir_out;                    /* the last published direction, +1 or -1 */
 
     /* stream */
     float sp_pos, sp_vel;                /* pulses, pulses/s */

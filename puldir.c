@@ -1,6 +1,10 @@
 /* Main context: setup, commands, getters. */
+#include <math.h>
 #include <string.h>
 #include "puldir_internal.h"
+
+#define DT (1.0f / (float)PULDIR_PLAN_HZ)      /* the profile's dt, the same expression as init's */
+#define PULSES_MAX 2147483648.0f                /* whole-pulse targets lie in [-2^31, 2^31) */
 
 static bool started;                    /* PulDir_start has run */
 
@@ -19,6 +23,7 @@ void PulDir_init(PulDir* a, const char* name)
     a->catchup_ms = PULDIR_CATCHUP_MS;
     a->log_on = true;
     a->slot = PULDIR_MAX_AXES;
+    a->dir_out = 1;                     /* the pulse tick's entries start at +1 */
     a->mode = PULDIR_MODE_IDLE;
     a->home_state = PULDIR_HOME_IDLE;
     a->refusal = PULDIR_R_NONE;
@@ -61,4 +66,183 @@ void PulDir_start(void)
 {
     started = true;
     port_start(puldir_pulse_tick, puldir_plan_tick);
+}
+
+/* ---- limits ---------------------------------------------------------------- */
+
+/* Validate four limits (user units) at conv exactly as MotionProfile_setLimits
+ * will see them, so the plan tick's call cannot refuse; then hand them over
+ * (D17). The frozen-window test reads n and done under the same lock as the
+ * stores, so the plan tick cannot move the generator in between. */
+static bool apply_limits(PulDir* a, const float lim[4], float conv, const char* call)
+{
+    const float v = lim[0] * conv, acc = lim[1] * conv, dec = lim[2] * conv, j = lim[3] * conv;
+    const float ratio = j > 0.0f ? (acc + dec) / (j * DT) : 0.0f;    /* generator's window() */
+    PulDirRefusal why = PULDIR_R_NONE;
+    float value = 0.0f;
+    if (!(isfinite(v) && isfinite(acc) && isfinite(dec) && isfinite(j))
+        || !(v > 0.0f && acc > 0.0f && dec > 0.0f && j >= 0.0f)) {
+        why = PULDIR_R_ARG;
+    } else if (!(lim[0] < (float)(PULDIR_TICK_HZ / 2u) / conv)) {
+        why = PULDIR_R_RATE;
+        value = (float)(PULDIR_TICK_HZ / 2u) / conv;
+    } else if (j > 0.0f && !(ceilf(ratio) <= (float)MOTION_PROFILE_MAX_TAPS)) {
+        why = PULDIR_R_TAPS;
+        value = MotionProfile_minJerk(acc, dec, DT) / conv;
+    } else {
+        port_lock();
+        if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
+            a->conv = conv;
+            for (int k = 0; k < 4; k++)
+                a->lim[k] = lim[k];
+            a->req |= REQ_LIMITS;
+        } else {
+            why = PULDIR_R_WINDOW;          /* the window is frozen in flight (5.2) */
+        }
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, call, why, value);
+        return false;
+    }
+    return true;
+}
+
+static bool set_limit(PulDir* a, int k, float x, const char* call)
+{
+    float l[4];
+    memcpy(l, a->lim, sizeof l);
+    l[k] = x;
+    return apply_limits(a, l, a->conv, call);
+}
+
+bool PulDir_setConversion(PulDir* a, float pulses_per_unit)
+{
+    if (!(isfinite(pulses_per_unit) && pulses_per_unit > 0.0f)) {
+        puldir_refuse(a, "setConversion", PULDIR_R_ARG, 0.0f);
+        return false;
+    }
+    return apply_limits(a, a->lim, pulses_per_unit, "setConversion");   /* limits stay in user units */
+}
+
+bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float jerk)
+{
+    const float d[4] = { speed, accel, decel, jerk };
+    if (!apply_limits(a, d, a->conv, "setDefaults"))
+        return false;
+    memcpy(a->def, d, sizeof d);
+    return true;
+}
+
+bool PulDir_restoreDefaults(PulDir* a)
+{
+    return apply_limits(a, a->def, a->conv, "restoreDefaults");
+}
+
+bool  PulDir_setSpeed(PulDir* a, float x)        { return set_limit(a, 0, x, "setSpeed"); }
+bool  PulDir_setAcceleration(PulDir* a, float x) { return set_limit(a, 1, x, "setAcceleration"); }
+bool  PulDir_setDeceleration(PulDir* a, float x) { return set_limit(a, 2, x, "setDeceleration"); }
+bool  PulDir_setJerk(PulDir* a, float x)         { return set_limit(a, 3, x, "setJerk"); }
+float PulDir_speed(PulDir* a)                    { return a->lim[0]; }
+float PulDir_acceleration(PulDir* a)             { return a->lim[1]; }
+float PulDir_deceleration(PulDir* a)             { return a->lim[2]; }
+float PulDir_jerk(PulDir* a)                     { return a->lim[3]; }
+
+/* ---- motion ---------------------------------------------------------------- */
+
+static bool motion_refused(PulDir* a, const char* call)
+{
+    const PulDirMode m = a->mode;
+    PulDirRefusal why = PULDIR_R_NONE;
+    if (a->fault)
+        why = PULDIR_R_FAULT;
+    else if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
+        why = PULDIR_R_MODE;
+    if (why == PULDIR_R_NONE)
+        return false;
+    puldir_refuse(a, call, why, 0.0f);
+    return true;
+}
+
+/* Under the lock: what the caller may read back at once is set here (D17). */
+static void take_target(PulDir* a, uint64_t target)
+{
+    a->target = target;
+    a->req |= REQ_TARGET;
+    a->mode = PULDIR_MODE_PROFILE;
+    a->moving = true;
+}
+
+/* Targets are whole pulses (D4). */
+bool PulDir_moveTo(PulDir* a, float position)
+{
+    if (motion_refused(a, "moveTo"))
+        return false;
+    const float x = roundf(position * a->conv);
+    if (!(x >= -PULSES_MAX && x < PULSES_MAX)) {
+        puldir_refuse(a, "moveTo", PULDIR_R_ARG, 0.0f);
+        return false;
+    }
+    port_lock();
+    take_target(a, (uint64_t)(int64_t)x << 32);
+    port_unlock();
+    return true;
+}
+
+bool PulDir_moveBy(PulDir* a, float distance)
+{
+    if (motion_refused(a, "moveBy"))
+        return false;
+    const float dx = roundf(distance * a->conv);
+    bool ok = dx >= -2.0f * PULSES_MAX && dx <= 2.0f * PULSES_MAX;   /* finite, and the sum fits */
+    if (ok) {
+        port_lock();
+        const int64_t whole = (int32_t)(uint32_t)((a->target + (PULDIR_ONE >> 1)) >> 32);
+        const int64_t t = whole + (int64_t)dx;
+        ok = t >= INT32_MIN && t <= INT32_MAX;
+        if (ok)
+            take_target(a, (uint64_t)t << 32);
+        port_unlock();
+    }
+    if (!ok)
+        puldir_refuse(a, "moveBy", PULDIR_R_ARG, 0.0f);
+    return ok;
+}
+
+/* ---- state ----------------------------------------------------------------- */
+
+static int32_t emitted(const PulDir* a)
+{
+    if (a->slot >= PULDIR_MAX_AXES)
+        return 0;
+    PulDirPulse s;
+    port_lock();
+    puldir_pulse_read(a->slot, &s);
+    port_unlock();
+    return s.count;
+}
+
+/* D18: the pulses the drive has been told, not the profile. */
+float PulDir_position(PulDir* a) { return (float)emitted(a) / a->conv; }
+float PulDir_velocity(PulDir* a) { return a->vel_out / a->conv; }
+
+float PulDir_target(PulDir* a)
+{
+    port_lock();
+    const uint64_t t = a->target;
+    port_unlock();
+    const int32_t whole = (int32_t)(uint32_t)(t >> 32);
+    return ((float)whole + (float)(uint32_t)t * (1.0f / 4294967296.0f)) / a->conv;
+}
+
+bool       PulDir_isMoving(PulDir* a) { return a->moving; }
+PulDirMode PulDir_mode(PulDir* a)     { return a->mode; }
+
+PulDirStatus PulDir_status(PulDir* a)
+{
+    if (a->fault)
+        return PULDIR_FAULT;
+    if (a->moving)
+        return PULDIR_MOVING;
+    return (a->enabled || !a->has_ena) ? PULDIR_ENABLED : PULDIR_IDLE;
 }

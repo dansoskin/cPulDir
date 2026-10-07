@@ -11,6 +11,7 @@ uint32_t fake_preempt;
 static bool level[FAKE_PINS];
 static bool motion[FAKE_PINS];
 static fake_write_fn on_write;
+static fake_plan_fn on_plan;
 static void (*pulse_cb)(bool overrun);
 static void (*plan_cb)(void);
 static uint32_t since_start;            /* pulse ticks run since port_start */
@@ -29,6 +30,7 @@ bool fake_level(uint8_t id)                  { assert(id < FAKE_PINS); return le
 void fake_set_input(uint8_t id, bool lvl)    { assert(id < FAKE_PINS); level[id] = lvl; }
 void fake_mark_motion_pin(uint8_t id)        { assert(id < FAKE_PINS); motion[id] = true; }
 void fake_on_write(fake_write_fn fn)         { on_write = fn; }
+void fake_on_plan(fake_plan_fn fn)           { on_plan = fn; }
 
 void port_pin_init_output(puldir_pin_t p, bool lvl) { assert(p.id < FAKE_PINS); level[p.id] = lvl; }
 void port_pin_init_input(puldir_pin_t p, bool pullup) { assert(p.id < FAKE_PINS); (void)pullup; }
@@ -91,9 +93,13 @@ void fake_plan(void)
     assert(plan_cb != NULL);
     assert(lock_depth == 0);
     assert(tick_depth == 0);            /* the plan tick never preempts the pulse tick */
+    if (on_plan)
+        on_plan(false);
     tick_depth++;
     plan_cb();
     tick_depth--;
+    if (on_plan)
+        on_plan(true);
 }
 
 void fake_run(uint32_t ticks)

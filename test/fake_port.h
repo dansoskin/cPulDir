@@ -14,6 +14,8 @@ typedef void (*fake_write_fn)(uint32_t tick, uint8_t id, bool level);
 void  fake_on_write(fake_write_fn fn);              /* called for every port_pin_write */
 void  fake_pulse(bool overrun);                     /* one pulse tick */
 void  fake_plan(void);                              /* one plan tick */
+typedef void (*fake_plan_fn)(bool after);
+void  fake_on_plan(fake_plan_fn fn);                /* called before and after every plan tick */
 /* n pulse ticks; a plan tick runs fake_plan_phase ticks after every interval boundary */
 void  fake_run(uint32_t ticks);
 extern uint32_t fake_plan_phase;                    /* default PULDIR_TICKS_PER_PLAN / 2 */

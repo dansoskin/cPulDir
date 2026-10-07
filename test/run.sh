@@ -20,4 +20,5 @@ build_axis() {   # $1 = output name, rest = extra flags
     for c in $cases; do "$OUT/$out" "$c"; done
 }
 build_axis test_puldir
+build_axis test_puldir_200k -DPULDIR_TICK_HZ=200000u
 echo "axis: all ok"
