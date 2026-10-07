@@ -68,9 +68,12 @@ bool MotionProfile_setLimits(MotionProfile* p, MotionLimits L)
 
 bool MotionProfile_setTarget(MotionProfile* p, float target)
 {
-    (void)p;
-    (void)target;
-    return false;
+    if (!isfinite(target))
+        return false;
+    p->target = target;
+    p->endless = p->stopping = p->landed = p->done = false;
+    p->drain = 0;
+    return true;
 }
 
 bool MotionProfile_setEndless(MotionProfile* p, float speed)
@@ -104,9 +107,81 @@ bool MotionProfile_setPosition(MotionProfile* p, float pos)
     return true;
 }
 
+/* Move v toward vc by at most up when |v| grows and down when it shrinks.
+ * Never crosses zero in one call: it lands on zero and reverses next call. */
+static float toward(float v, float vc, float up, float down)
+{
+    const bool same_dir = (v > 0.0f) == (vc > 0.0f);
+    if (vc != 0.0f && (v == 0.0f || (same_dir && fabsf(vc) > fabsf(v))))
+        return copysignf(fminf(fabsf(v) + up, fabsf(vc)), vc);
+    const float floor_ = (same_dir && v != 0.0f) ? fabsf(vc) : 0.0f;
+    return copysignf(fmaxf(fabsf(v) - down, floor_), v);
+}
+
+/* One step of the trapezoid. Returns the velocity used over this step. */
+static float trapezoid(MotionProfile* p)
+{
+    const MotionLimits L = p->lim;
+    const float dt = p->dt, dd = L.dmax * dt;
+    if (p->landed)
+        return 0.0f;
+
+    const float rem = p->target - p->p_t;
+    if (!p->endless && !p->stopping) {
+        /* Landing: the rest of the way in one step, within the step rule (D13). */
+        const float u = rem / dt, v = p->v_t;
+        const bool same = v == 0.0f || rem == 0.0f || (u > 0.0f) == (v > 0.0f);
+        const bool fits = fabsf(u) <= fabsf(v) ? fabsf(v) - fabsf(u) <= dd
+                                               : fabsf(u) - fabsf(v) <= L.amax * dt;
+        if (fabsf(rem) <= dd * dt && same && fits) {
+            p->p_t = p->target;           /* the one place p_t is assigned */
+            p->v_t = 0.0f;
+            p->landed = true;
+            return u;
+        }
+    }
+
+    float vc;
+    if (p->stopping)
+        vc = 0.0f;
+    else if (p->endless)
+        vc = copysignf(fminf(fabsf(p->speed), L.vmax), p->speed);
+    else /* the discrete ceiling: do not simplify to sqrtf(2*dmax*|rem|) */
+        vc = copysignf(fminf(L.vmax, sqrtf(dd * dd + 2.0f * L.dmax * fabsf(rem)) - dd), rem);
+
+    p->v_t = toward(p->v_t, vc, L.amax * dt, dd);
+    p->p_t += p->v_t * dt;
+    if (p->stopping && p->v_t == 0.0f) {
+        p->target = p->p_t;
+        p->stopping = false;
+        p->landed = true;
+    }
+    return p->v_t;
+}
+
+/* The ring has drained: exact rest at the target. */
+static void finish(MotionProfile* p)
+{
+    clear_ring(p);
+    p->vel = p->acc = 0.0f;
+    p->pos = p->p_t = p->target;
+    p->done = true;
+    p->drain = 0;
+    p->n = window(p->lim, p->dt);
+}
+
 void MotionProfile_advance(MotionProfile* p)
 {
-    (void)p;
+    if (p->done)
+        return;
+    const bool was_landed = p->landed;
+    const float u = trapezoid(p);
+    const float vel0 = p->vel;
+    p->vel = u;
+    p->pos = p->p_t;
+    p->acc = (p->vel - vel0) / p->dt;
+    if (was_landed && ++p->drain >= p->n)
+        finish(p);
 }
 
 float MotionProfile_stopDistance(const MotionProfile* p)

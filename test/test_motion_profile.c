@@ -110,8 +110,73 @@ static void test_setup(void)
     printf("ok setup\n");
 }
 
+typedef struct { int calls; float peak; int accel_calls, decel_calls; } Run;
+
+static Run run_to_done(MotionProfile* p, int max_calls)
+{
+    Run r = {0, 0.0f, 0, 0};
+    while (!p->done) {
+        const float v0 = fabsf(p->vel);
+        step(p);
+        r.calls++;
+        if (fabsf(p->vel) > r.peak) r.peak = fabsf(p->vel);
+        if (fabsf(p->vel) > v0) r.accel_calls++;
+        if (fabsf(p->vel) < v0) r.decel_calls++;
+        assert(r.calls < max_calls);
+    }
+    return r;
+}
+
+static MotionProfile fresh(float pos, float dt, MotionLimits L)
+{
+    MotionProfile p;
+    assert(MotionProfile_init(&p, pos, dt));
+    assert(MotionProfile_setLimits(&p, L));
+    return p;
+}
+
+/* Test 2: against the analytic trapezoid (D8): 0.5 s up, 0.1 s cruise, 0.5 s down. */
+static void test_trapezoid(void)
+{
+    const MotionLimits L = { 15, 30, 30, 0 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&p, 9.0f));
+    const Run r = run_to_done(&p, 5000);
+    /* 1100 analytic calls, plus the done call, plus the discrete ceiling's
+     * tail: following it, v' = sqrt(dd^2 + v^2) - dd sheds a little less
+     * than dd per call, about ln(vmax / (dmax*dt)) / 2 calls in all. */
+    const float expected = 1100.0f + 1.0f + 0.5f * logf(15.0f / (30.0f * 0.001f));
+    assert(fabsf((float)r.calls - expected) <= 2.0f);
+    assert(r.peak == 15.0f);
+    assert(p.vel == 0.0f && p.acc == 0.0f);
+    assert(p.pos == 9.0f && p.target == 9.0f);
+
+    /* The negative move mirrors it exactly. */
+    MotionProfile q = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&q, -9.0f));
+    const Run s = run_to_done(&q, 5000);
+    assert(s.calls == r.calls && s.peak == r.peak);
+    assert(q.pos == -9.0f && q.vel == 0.0f);
+
+    printf("ok trapezoid\n");
+}
+
+/* Test 3: up ramp 0.75 s, down ramp 0.1667 s. */
+static void test_asymmetric(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 20, 90, 0 });
+    assert(MotionProfile_setTarget(&p, 30.0f));
+    const Run r = run_to_done(&p, 10000);
+    const float ratio = (float)r.accel_calls / (float)r.decel_calls;
+    assert(fabsf(ratio - 4.5f) <= 4.5f * 0.02f);
+    assert(p.pos == 30.0f);
+    printf("ok asymmetric\n");
+}
+
 int main(void)
 {
     test_setup();
+    test_trapezoid();
+    test_asymmetric();
     return 0;
 }
