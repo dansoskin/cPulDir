@@ -39,6 +39,7 @@ bool MotionProfile_init(MotionProfile* p, float pos, float dt)
         return false;
     p->dt = dt;
     p->pos = p->target = p->p_t = pos;
+    p->p_c = 0.0f;
     p->vel = p->acc = p->v_t = p->speed = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
@@ -101,6 +102,7 @@ void MotionProfile_halt(MotionProfile* p)
     clear_ring(p);
     p->v_t = p->vel = p->acc = 0.0f;
     p->p_t = p->target = p->pos;
+    p->p_c = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
     p->drain = 0;
@@ -112,6 +114,7 @@ bool MotionProfile_setPosition(MotionProfile* p, float pos)
     if (!p->done || !isfinite(pos))
         return false;
     p->pos = p->p_t = p->target = pos;
+    p->p_c = 0.0f;
     return true;
 }
 
@@ -123,7 +126,12 @@ static float toward(float v, float vc, float up, float down)
     if (vc != 0.0f && (v == 0.0f || (same_dir && fabsf(vc) > fabsf(v))))
         return copysignf(fminf(fabsf(v) + up, fabsf(vc)), vc);
     const float floor_ = (same_dir && v != 0.0f) ? fabsf(vc) : 0.0f;
-    return copysignf(fmaxf(fabsf(v) - down, floor_), v);
+    /* Never shed less than down to rounding: the ceiling's margin, dd^2/2v,
+     * is below an ulp of v on long ramps, so a short shed is never recovered. */
+    float m = fmaxf(fabsf(v) - down, floor_);
+    if (m > floor_ && fabsf(v) - m < down)       /* exact: Sterbenz */
+        m = nextafterf(m, 0.0f);
+    return copysignf(m, v);
 }
 
 /* One step of the trapezoid. Returns the velocity used over this step. */
@@ -143,6 +151,7 @@ static float trapezoid(MotionProfile* p)
                                                : fabsf(u) - fabsf(v) <= L.amax * dt;
         if (fabsf(rem) <= dd * dt && same && fits) {
             p->p_t = p->target;           /* the one place p_t is assigned */
+            p->p_c = 0.0f;
             p->v_t = 0.0f;
             p->landed = true;
             return u;
@@ -158,9 +167,16 @@ static float trapezoid(MotionProfile* p)
         vc = copysignf(fminf(L.vmax, sqrtf(dd * dd + 2.0f * L.dmax * fabsf(rem)) - dd), rem);
 
     p->v_t = toward(p->v_t, vc, L.amax * dt, dd);
-    p->p_t += p->v_t * dt;
+    /* Kahan sum: the ceiling can correct only dmax*dt^2/2 of position error
+     * per call, less than one call's rounding of p_t at large coordinates.
+     * Needs strict float evaluation: never build with -ffast-math. */
+    const float y = p->v_t * dt - p->p_c;
+    const float t = p->p_t + y;
+    p->p_c = (t - p->p_t) - y;
+    p->p_t = t;
     if (p->stopping && p->v_t == 0.0f) {
         p->target = p->p_t;
+        p->p_c = 0.0f;
         p->stopping = false;
         p->landed = true;
     }
@@ -173,6 +189,7 @@ static void finish(MotionProfile* p)
     clear_ring(p);
     p->vel = p->acc = 0.0f;
     p->pos = p->p_t = p->target;
+    p->p_c = 0.0f;
     p->done = true;
     p->drain = 0;
     p->n = window(p->lim, p->dt);
@@ -186,7 +203,7 @@ void MotionProfile_advance(MotionProfile* p)
     const float u = trapezoid(p);
     const float vel0 = p->vel;
     p->vel = u;
-    p->pos = p->p_t;
+    p->pos = p->p_t;    /* Task 6: the filtered pos += vel*dt needs a Kahan sum too when n > 1 */
     p->acc = (p->vel - vel0) / p->dt;
     if (was_landed && ++p->drain >= p->n)
         finish(p);

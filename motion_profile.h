@@ -29,7 +29,7 @@ typedef struct {
     bool  done;                           /* at target with vel == 0.0f exactly */
     MotionLimits lim;
     /* private */
-    float    p_t, v_t;                    /* the trapezoid's own position and velocity */
+    float    p_t, p_c, v_t;               /* the trapezoid's own position, its Kahan compensation, velocity */
     float    speed;                       /* endless speed, signed */
     float    taps[MOTION_PROFILE_MAX_TAPS];
     uint16_t n, head;                     /* window length; next slot to overwrite */

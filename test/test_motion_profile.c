@@ -196,34 +196,41 @@ static void run_until_vel(MotionProfile* p, float vel, int max_calls)
     }
 }
 
-/* Test 5: a target set from rest is reachable, so it is never passed.
- * Moves stay inside the float envelope of 5.2's precision rule: coordinates
- * within 2^24 of the generator's finest step, dmax*dt^2. Past it, rounding of
- * p_t per call exceeds the dmax*dt^2/2 the discrete ceiling can correct, and
- * a long slow descent drifts past its target (seen at 2.7e7 steps). */
-static void test_random_moves(void)
+/* Test 5: a target set from rest is reachable, so it is never passed, and
+ * the landing is exact. n moves from rest, start within +-start_span,
+ * distance within +-dist_span (at least 0.001). */
+static void random_moves(int n, float start_span, float dist_span)
 {
-    for (int i = 0; i < 1000; i++) {
+    for (int i = 0; i < n; i++) {
         const MotionLimits L = { frand(1, 50), frand(1, 200), frand(1, 200), 0 };
-        const float start = frand(-100, 100);
-        float d = frand(-200, 200);
+        const float start = frand(-start_span, start_span);
+        float d = frand(-dist_span, dist_span);
         if (fabsf(d) < 0.001f)
             d = copysignf(0.001f, d);
-        if (fmaxf(fabsf(start), fabsf(start + d)) > 16777216.0f * L.dmax * 1e-6f) {
-            i--;                             /* outside the envelope: draw again */
-            continue;
-        }
         MotionProfile p = fresh(start, 0.001f, L);
         assert(MotionProfile_setTarget(&p, start + d));
         const float sense = p.target - p.pos;
         for (int calls = 0; !p.done; calls++) {
-            assert(calls < 1000000);
+            assert(calls < 10000000);    /* 5000 units at vmax 1, plus ramps */
             step(&p);
             assert((p.target - p.pos) * sense >= 0.0f);
         }
         assert(p.pos == p.target && p.vel == 0.0f);
     }
+}
+
+static void test_random_moves(void)
+{
+    random_moves(1000, 100.0f, 200.0f);
     printf("ok random_moves\n");
+}
+
+/* Large coordinates, as a virtual master axis in degrees: thousands of units
+ * with small dmax, where uncompensated rounding of p_t passed targets. */
+static void test_random_moves_large(void)
+{
+    random_moves(1000, 5000.0f, 5000.0f);
+    printf("ok random_moves_large\n");
 }
 
 static int sign(float v) { return (v > 0.0f) - (v < 0.0f); }
@@ -448,6 +455,7 @@ int main(void)
     test_trapezoid();
     test_asymmetric();
     test_random_moves();
+    test_random_moves_large();
     test_retarget_behind();
     test_speed_raise();
     test_infeasible();
