@@ -2,6 +2,7 @@
  * test prints "ok <name>". Every advance goes through step(), which checks
  * the limits of 5.2, so every test checks them for free. */
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,9 +23,11 @@ static void check_step(const MotionProfile* p, float vel0, float acc0)
     /* A zero crossing in one call is a shrink then a growth. */
     if ((p->vel > 0.0f && vel0 < 0.0f) || (p->vel < 0.0f && vel0 > 0.0f))
         bound = fmaxf(L.amax, L.dmax);
+    /* The new velocity is rounded to its own ulp: at |v| = 32 that alone is 1.9e-6. */
+    const float ulp = fmaxf(fabsf(p->vel), fabsf(vel0)) * FLT_EPSILON;
     if (!g_vmax_relaxed)
         assert(fabsf(p->vel) <= L.vmax * (1.0f + tol));
-    assert(fabsf(dv) <= bound * p->dt * (1.0f + tol) + 1e-6f);
+    assert(fabsf(dv) <= bound * p->dt * (1.0f + tol) + 1e-6f + ulp);
     if (L.jmax > 0.0f)
         assert(fabsf(p->acc - acc0) <= L.jmax * p->dt * (1.0f + tol) + 1e-3f);
 }
@@ -173,10 +176,122 @@ static void test_asymmetric(void)
     printf("ok asymmetric\n");
 }
 
+static uint32_t lcg = 12345u;
+static float frand(float lo, float hi)
+{
+    lcg = lcg * 1664525u + 1013904223u;
+    return lo + (hi - lo) * (float)(lcg >> 8) / 16777216.0f;
+}
+
+static void run_until_vel(MotionProfile* p, float vel, int max_calls)
+{
+    for (int i = 0; p->vel != vel; i++) {
+        assert(i < max_calls);
+        step(p);
+    }
+}
+
+/* Test 5: a target set from rest is reachable, so it is never passed.
+ * Moves stay inside the float envelope of 5.2's precision rule: coordinates
+ * within 2^24 of the generator's finest step, dmax*dt^2. Past it, rounding of
+ * p_t per call exceeds the dmax*dt^2/2 the discrete ceiling can correct, and
+ * a long slow descent drifts past its target (seen at 2.7e7 steps). */
+static void test_random_moves(void)
+{
+    for (int i = 0; i < 1000; i++) {
+        const MotionLimits L = { frand(1, 50), frand(1, 200), frand(1, 200), 0 };
+        const float start = frand(-100, 100);
+        float d = frand(-200, 200);
+        if (fabsf(d) < 0.001f)
+            d = copysignf(0.001f, d);
+        if (fmaxf(fabsf(start), fabsf(start + d)) > 16777216.0f * L.dmax * 1e-6f) {
+            i--;                             /* outside the envelope: draw again */
+            continue;
+        }
+        MotionProfile p = fresh(start, 0.001f, L);
+        assert(MotionProfile_setTarget(&p, start + d));
+        const float sense = p.target - p.pos;
+        for (int calls = 0; !p.done; calls++) {
+            assert(calls < 1000000);
+            step(&p);
+            assert((p.target - p.pos) * sense >= 0.0f);
+        }
+        assert(p.pos == p.target && p.vel == 0.0f);
+    }
+    printf("ok random_moves\n");
+}
+
+static int sign(float v) { return (v > 0.0f) - (v < 0.0f); }
+
+/* Test 5: a target behind the axis costs exactly one reversal. */
+static void test_retarget_behind(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 100.0f));
+    run_until_vel(&p, 15.0f, 10000);
+    assert(MotionProfile_setTarget(&p, p.pos - 5.0f));
+    int last = sign(p.vel), changes = 0;
+    for (int calls = 0; !p.done; calls++) {
+        assert(calls < 10000);
+        step(&p);
+        const int s = sign(p.vel);
+        if (s != 0 && s != last) {
+            changes++;
+            last = s;
+        }
+    }
+    assert(changes == 1);
+    assert(p.pos == p.target);
+    printf("ok retarget_behind\n");
+}
+
+/* Test 5: a raised vmax applies at once, at amax. */
+static void test_speed_raise(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 10, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 1000.0f));
+    run_until_vel(&p, 10.0f, 10000);
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 20, 30, 30, 0 }));
+    const float dv = 30.0f * 0.001f;
+    for (int calls = 0; p.vel != 20.0f; calls++) {
+        assert(calls < 10000);
+        const float v0 = p.vel;
+        step(&p);
+        if (p.vel != 20.0f)
+            assert(fabsf((p.vel - v0) - dv) <= dv * 1e-4f);
+        else                                 /* the last step only closes the gap */
+            assert(p.vel - v0 > 0.0f && p.vel - v0 <= dv * (1.0f + 1e-4f));
+    }
+    printf("ok speed_raise\n");
+}
+
+/* Test 9: a target inside the stopping distance is passed, then reached. */
+static void test_infeasible(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 100.0f));
+    run_until_vel(&p, 15.0f, 10000);
+    assert(MotionProfile_setTarget(&p, p.pos + 1.0f));
+    float furthest = -INFINITY;
+    for (int calls = 0; !p.done; calls++) {
+        assert(calls < 10000);
+        step(&p);
+        furthest = fmaxf(furthest, p.pos - p.target);
+    }
+    assert(furthest >= 2.7f);            /* stopping distance 3.75, target 1 ahead */
+    assert(p.pos == p.target);
+    printf("ok infeasible\n");
+}
+
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);   /* keep the ok lines when an assert aborts */
     test_setup();
     test_trapezoid();
     test_asymmetric();
+    test_random_moves();
+    test_retarget_behind();
+    test_speed_raise();
+    test_infeasible();
     return 0;
 }
