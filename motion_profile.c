@@ -78,14 +78,22 @@ bool MotionProfile_setTarget(MotionProfile* p, float target)
 
 bool MotionProfile_setEndless(MotionProfile* p, float speed)
 {
-    (void)p;
-    (void)speed;
-    return false;
+    if (!isfinite(speed))
+        return false;
+    p->speed = speed;
+    p->endless = true;
+    p->stopping = p->landed = p->done = false;
+    p->drain = 0;
+    return true;
 }
 
 void MotionProfile_stop(MotionProfile* p)
 {
-    (void)p;
+    /* Once landed the trapezoid is at rest and its target is final. */
+    if (p->done || p->landed)
+        return;
+    p->stopping = true;
+    p->endless = false;
 }
 
 void MotionProfile_halt(MotionProfile* p)

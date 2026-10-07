@@ -283,6 +283,99 @@ static void test_infeasible(void)
     printf("ok infeasible\n");
 }
 
+/* n calls; asserts the position never jumps more than vmax*dt in one call.
+ * Returns whether vel equalled want on any call. */
+static bool run_endless(MotionProfile* p, int n, float want)
+{
+    bool reached = false;
+    for (int i = 0; i < n; i++) {
+        const float pos0 = p->pos;
+        step(p);
+        assert(fabsf(p->pos - pos0) <= p->lim.vmax * p->dt * (1.0f + 1e-4f));
+        reached |= p->vel == want;
+    }
+    return reached;
+}
+
+/* Test 7: endless speed changes and a stop, position continuous throughout. */
+static void test_endless(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 20, 30, 60, 0 });
+    assert(MotionProfile_setEndless(&p, 10.0f));
+    assert(!p.done && p.endless);
+    assert(run_endless(&p, 1000, 10.0f));
+    assert(MotionProfile_setEndless(&p, 15.0f));
+    assert(run_endless(&p, 1000, 15.0f));
+    assert(MotionProfile_setEndless(&p, -15.0f));
+    assert(run_endless(&p, 2000, -15.0f));
+    MotionProfile_stop(&p);
+    for (int calls = 0; !p.done; calls++) {
+        assert(calls < 10000);
+        run_endless(&p, 1, 0.0f);
+    }
+    assert(p.vel == 0.0f && p.pos == p.target && !p.endless);
+
+    /* A speed above vmax runs at vmax (D7). */
+    assert(MotionProfile_setEndless(&p, 30.0f));
+    run_endless(&p, 2000, 20.0f);
+    assert(p.vel == 20.0f);
+
+    /* Refusal changes nothing. */
+    const MotionProfile before = p;
+    assert(!MotionProfile_setEndless(&p, NAN));
+    assert(!MotionProfile_setEndless(&p, INFINITY));
+    assert(memcmp(&before, &p, sizeof p) == 0);
+    printf("ok endless\n");
+}
+
+/* Stop from the state p is in; the profile must come to rest stopDistance() ahead. */
+static void stop_where_predicted(MotionProfile* p)
+{
+    const float d = MotionProfile_stopDistance(p), at = p->pos;
+    MotionProfile_stop(p);
+    run_to_done(p, 10000);
+    assert(fabsf(p->pos - (at + d)) <= p->lim.vmax * p->dt);
+    assert(p->target == p->pos && p->vel == 0.0f);
+}
+
+/* Test 6: stop at cruise and halfway up the ramp. */
+static void test_stop(void)
+{
+    const MotionLimits L = { 15, 30, 30, 0 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&p, 1000.0f));
+    run_until_vel(&p, 15.0f, 10000);
+    stop_where_predicted(&p);
+
+    MotionProfile q = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&q, 1000.0f));
+    for (int calls = 0; q.vel < 7.5f; calls++) {
+        assert(calls < 10000);
+        step(&q);
+    }
+    stop_where_predicted(&q);
+
+    /* stop on a done profile is a no-op */
+    const MotionProfile before = q;
+    MotionProfile_stop(&q);
+    assert(memcmp(&before, &q, sizeof q) == 0);
+    printf("ok stop\n");
+}
+
+/* Test 6: halt is immediate and final. */
+static void test_halt(void)
+{
+    MotionProfile p = fresh(0.0f, 0.001f, (MotionLimits){ 15, 30, 30, 0 });
+    assert(MotionProfile_setTarget(&p, 1000.0f));
+    run_until_vel(&p, 15.0f, 10000);
+    MotionProfile_halt(&p);
+    assert(p.vel == 0.0f && p.acc == 0.0f && p.done && p.target == p.pos);
+    const MotionProfile before = p;
+    MotionProfile_advance(&p);
+    assert(memcmp(&before, &p, sizeof p) == 0);
+    printf("ok halt\n");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);   /* keep the ok lines when an assert aborts */
@@ -293,5 +386,8 @@ int main(void)
     test_retarget_behind();
     test_speed_raise();
     test_infeasible();
+    test_endless();
+    test_stop();
+    test_halt();
     return 0;
 }
