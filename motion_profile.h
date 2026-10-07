@@ -31,7 +31,7 @@ typedef struct {
     /* private */
     float    p_t, p_c, v_t;               /* the trapezoid's own position, its Kahan compensation, velocity */
     float    speed;                       /* endless speed, signed */
-    float    taps[MOTION_PROFILE_MAX_TAPS];
+    float    taps[MOTION_PROFILE_MAX_TAPS];   /* velocities; prefix sums while draining */
     uint16_t n, head;                     /* window length; next slot to overwrite */
     uint16_t drain;                       /* calls since landing, up to n + 1 */
     uint16_t same;                        /* draining: taps a_0 (newest) to a_same share a sign */

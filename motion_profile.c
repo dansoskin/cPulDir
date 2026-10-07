@@ -252,9 +252,8 @@ static void push(MotionProfile* p, float u)
     }
 }
 
-/* Draining in constant time. On the first drain call the ring, newest tap a_0
- * first, becomes prefix sums S(t) = a_0 + ... + a_t in one pass; drain call j
- * then needs S(t) and T(t) = S(0) + ... + S(t-1), with t = n-1-j. */
+/* Constant-time drain: the ring (newest tap a_0) becomes prefix sums S(t) once;
+ * drain call j reads S(t) and T(t) = S(0) + ... + S(t-1), t = n-1-j. */
 static void to_prefix_sums(MotionProfile* p)
 {
     const uint16_t n = p->n;
