@@ -7,45 +7,64 @@ static IRQn_Type pulse_irq, plan_irq;
 static void (*pulse_fn)(bool overrun);
 static void (*plan_fn)(void);
 static bool late;                       /* the update flag was set again before the last exit */
-static volatile bool bound;             /* PulDir_stm32_bind has run */
 
-void PulDir_stm32_bind(TIM_HandleTypeDef* p, IRQn_Type pi, TIM_HandleTypeDef* q, IRQn_Type qi)
+void PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn)
 {
-    pulse_tim = p; pulse_irq = pi;
-    plan_tim = q;  plan_irq = qi;
-    bound = true;
+    pulse_tim = htim;
+    pulse_irq = irqn;
 }
 
+void PulDir_stm32_attachPlanTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn)
+{
+    plan_tim = htim;
+    plan_irq = irqn;
+}
+
+/* A period of `counts` 1 us counts, the counter left at its last count so the first update is one count away. */
+static void set_period(TIM_HandleTypeDef* htim, uint32_t counts)
+{
+    __HAL_TIM_SET_AUTORELOAD(htim, counts - 1u);    /* the counter runs 0..ARR: 5 counts is ARR 4 */
+    htim->Instance->EGR = TIM_EGR_UG;               /* a preloaded ARR takes effect now */
+    htim->Instance->SR = ~TIM_SR_UIF;
+    __HAL_TIM_SET_COUNTER(htim, counts - 1u);
+}
+
+/* Both first updates come one count after start, the pulse timer's first: each plan tick (N pulse
+ * periods) then follows a latch tick (1, N+1, ...) by the start skew, under one pulse period. */
 void port_start(void (*pulse)(bool), void (*plan)(void))
 {
     pulse_fn = pulse;
     plan_fn = plan;
-    /* The core latches on pulse ticks 1, N+1, ...: at ARR the pulse timer's first update is
-     * immediate, so each plan tick (period N pulses) lands on a latch tick and runs right after it. */
-    __HAL_TIM_SET_COUNTER(pulse_tim, __HAL_TIM_GET_AUTORELOAD(pulse_tim));
-    __HAL_TIM_SET_COUNTER(plan_tim, 0);
+    set_period(pulse_tim, PULDIR_PULSE_COUNTS);
+    set_period(plan_tim, PULDIR_PLAN_COUNTS);
     HAL_TIM_Base_Start_IT(pulse_tim);
     HAL_TIM_Base_Start_IT(plan_tim);
 }
 
-/* Not through HAL_TIM_IRQHandler: its flag sweep costs more than the tick at 200 kHz. */
+/* Not through HAL_TIM_IRQHandler: its flag sweep costs more than the tick at a 5 us pulse. */
 void PulDir_stm32_pulseIrq(void)
 {
-    pulse_tim->Instance->SR = ~TIM_SR_UIF;          /* rc_w0: clears only UIF */
+    TIM_TypeDef* t = pulse_tim->Instance;
+    if ((t->SR & TIM_SR_UIF) == 0u)
+        return;                                     /* the vector's other source */
+    t->SR = ~TIM_SR_UIF;                            /* rc_w0: clears only UIF */
     pulse_fn(late);
-    late = (pulse_tim->Instance->SR & TIM_SR_UIF) != 0u;
+    late = (t->SR & TIM_SR_UIF) != 0u;
 }
 
 void PulDir_stm32_planIrq(void)
 {
-    plan_tim->Instance->SR = ~TIM_SR_UIF;
+    TIM_TypeDef* t = plan_tim->Instance;
+    if ((t->SR & TIM_SR_UIF) == 0u)
+        return;
+    t->SR = ~TIM_SR_UIF;
     plan_fn();
 }
 
-/* Before bind the IRQ numbers are not known (zero is a real IRQ), so do nothing. */
+/* Until both timers are attached the IRQ numbers are not known (zero is a real IRQ), so do nothing. */
 void port_lock(void)
 {
-    if (!bound)
+    if (pulse_tim == NULL || plan_tim == NULL)
         return;
     NVIC_DisableIRQ(pulse_irq);
     NVIC_DisableIRQ(plan_irq);
@@ -55,7 +74,7 @@ void port_lock(void)
 
 void port_unlock(void)
 {
-    if (!bound)
+    if (pulse_tim == NULL || plan_tim == NULL)
         return;
     NVIC_EnableIRQ(plan_irq);
     NVIC_EnableIRQ(pulse_irq);

@@ -8,28 +8,27 @@ The bench drives the real library through its console (jog commands) rather than
 
 Guidelines 5.3 and 5.9 estimate the pulse tick's cost and jitter. They are estimates. This bench turns them into numbers on real pins, with four axes pulsing and the application's USB, CAN and UART interrupts running:
 
-- pulse width (it is one tick, 20 us at 50 kHz, 5 us at 200 kHz),
+- pulse width (it is one tick, `PULDIR_PULSE_US`: 20 us, a 50 kHz tick, then 5 us, a 200 kHz tick),
 - period jitter, peak to peak, on the GPIO_OUT1 marker and on a PUL pin at a rate that divides the tick evenly,
 - the pulse handler's duration, typical and worst,
 - CPU load = handler duration x tick rate,
 - overrun count after one minute (`PulDir_overruns()`),
 - the plan tick's phase: it must run just after the pulse tick that latches a set.
 
-It runs at `PULDIR_TICK_HZ` = 50,000 and 200,000. If a rate is hopeless, only `PULDIR_TICK_HZ` and the timer period change; nothing else in the library does.
+It runs at `PULDIR_PULSE_US` = 20 and 5. If a pulse length is hopeless, only `PULDIR_PULSE_US` in the build changes; the library writes both timer periods from it, and nothing else changes.
 
 ## 2. CubeMX (on a branch of the firmware)
 
-The `.ioc` has no TIM6 or TIM7. The timer clock is 144 MHz (`RCC.APB1TimFreq_Value=144000000`). The NVIC priority group is 4 (16 preemption levels, no sub-priority).
+The library itself names no timer and no STM32 family: it takes any two timers whose counters run at 1 MHz. This bench uses TIM6 and TIM7 on the G473. The `.ioc` has neither. The timer clock is 144 MHz (`RCC.APB1TimFreq_Value=144000000`). The NVIC priority group is 4 (16 preemption levels, no sub-priority).
 
-| timer | role | prescaler (PSC) | period (ARR) | rate |
-|---|---|---|---|---|
-| TIM6 | pulse tick, 50 kHz | 0 | 2879 | 144e6 / 2880 = 50 kHz |
-| TIM6 | pulse tick, 200 kHz | 0 | 719 | 144e6 / 720 = 200 kHz |
-| TIM7 | plan tick | 143 | 999 | 144e6 / (144 x 1000) = 1 kHz |
+| timer | role | prescaler (PSC) | counter |
+|---|---|---|---|
+| TIM6 | pulse tick | 143 | 144e6 / 144 = 1 MHz |
+| TIM7 | plan tick | 143 | 144e6 / 144 = 1 MHz |
 
-Phasing: the plan timer's period must be exactly N pulse periods, with N = PULDIR_TICK_HZ / PULDIR_PLAN_HZ (50 for 50 kHz, 200 for 200 kHz), on the same timer clock. The library latches increment sets only at interval boundaries, every N pulse ticks counted from the first one. `port_start` presets the pulse counter to its auto-reload value (so its first update, the first latch tick, comes at start), zeroes the plan counter, and starts the pulse timer, then the plan timer, back to back. Each plan update then coincides with a latch tick; the pulse tick has the higher priority and runs first, so the plan tick has the whole interval to publish. With the values above (TIM7 = 144000 clocks, TIM6 = 2880 or 720 clocks) this holds at both rates. If you change one period, change the other.
+Leave the period (ARR) at anything: `port_start` writes it, `PULDIR_PULSE_US` counts for the pulse timer and 1e6 / `PULDIR_PLAN_HZ` counts (1000) for the plan timer, so the plan period is exactly N pulse periods (N = 50 at 20 us, 200 at 5 us). The library latches increment sets only at interval boundaries, every N pulse ticks counted from the first one. `port_start` puts both counters one count before their first update and starts the pulse timer, then the plan timer, back to back. Each plan update then follows a latch tick by the few cycles between the two starts; the pulse tick has the higher priority and runs first, so the plan tick has the whole interval to publish.
 
-Both: Activated, no clock-source options (basic timers), counter mode up, auto-reload preload either way, trigger output reset. In NVIC Settings enable "TIM6, DAC1 and DAC3 global interrupt" and "TIM7, DAC2 and DAC4 global interrupt".
+Both: Activated, no clock-source options (basic timers), counter mode up, auto-reload preload either way, trigger output reset. In NVIC Settings enable "TIM6, DAC1 and DAC3 global interrupt" and "TIM7, DAC2 and DAC4 global interrupt" (the update interrupt).
 
 Priorities (preemption, sub is always 0). Today USART2, DMA1 channels 1 and 2 and FDCAN1 IT0/IT1 are all at 0, the highest; USB is at 5 (`usb_handler.c`); SysTick is set to 0 in `setup()`.
 
@@ -77,7 +76,7 @@ In `CMakeLists.txt`, in the existing user sections:
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/port/stm32
 
 # in target_compile_definitions(... PRIVATE
-    PULDIR_TICK_HZ=50000u        # 200000u for the second run
+    PULDIR_PULSE_US=20u          # 5u for the second run
 ```
 
 (`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` is required too: the plan tick calls into it, so the link fails without it.)
@@ -190,7 +189,8 @@ void bench_setup(void)
         (void)PulDir_register(&bench[i]);
     }
 
-    PulDir_stm32_bind(&htim6, TIM6_DAC_IRQn, &htim7, TIM7_DAC_IRQn);
+    PulDir_stm32_attachPulseTimer(&htim6, TIM6_DAC_IRQn);
+    PulDir_stm32_attachPlanTimer(&htim7, TIM7_DAC_IRQn);
     /* Whether HAL left the update flags set decides the plan tick's phase (step 6). */
     log_data("UIF before start: pulse %lu plan %lu\r\n",
              (unsigned long)((htim6.Instance->SR & TIM_SR_UIF) != 0u),
@@ -255,18 +255,18 @@ void bench_loop(void);
 
 at the top, `bench_setup();` as the last line of `setup()` (after `roulette_setup();`, so the SysTick and USB priorities are already set), and `bench_loop();` at the top of `loop()`.
 
-Do not command the old axes (`@`, `#`, `R`, `K`) during the bench: they share the MOTOR pins. Build with `PULDIR_TICK_HZ=50000u` first.
+Do not command the old axes (`@`, `#`, `R`, `K`) during the bench: they share the MOTOR pins. Build with `PULDIR_PULSE_US=20u` first.
 
 ## 4. Procedure
 
 1. Drives disconnected. Scope probes: PUL of axes 1 to 4 (PC12, PE9, PE8, PC6) and `GPIO_OUT1` (PB7, the handler marker). Trigger on the marker for the duration and its edge-to-edge jitter. The pulse is always one tick wide. It is the spacing between pulses, rising edge to rising edge, that is 2 or 3 ticks at 24,000 pulses/s on a 50 kHz tick (40 or 60 us; 10 or 15 us at 200 kHz, 99,000/s), so PUL jitter is only meaningful at a rate that divides the tick evenly (step 3a).
 2. Start USB log streaming (the GUI's usual stream), CAN traffic (the 1 Hz ping or a heavier source), and a stream of UART console lines (for example `p` at 100 Hz). Keep all of it running through every run below.
-3. **50 kHz run** (`PULDIR_TICK_HZ=50000u`, TIM6 period 2879): send `Bs` (record ticks), then `B1,J24000`, `B2,J24000`, `B3,J24000`, `B4,J24000`. Let it run one minute. Measure on the scope: pulse width, period jitter peak to peak (persistence on a rising edge of one PUL, trigger on the previous one), marker width typical and worst. Send `Bs` again: ticks must have advanced by 50,000 per second, and record overruns. Stop with `B1,k` to `B4,k` (or `B1,K` to `B4,K` to halt).
+3. **50 kHz run** (`PULDIR_PULSE_US=20u`): send `Bs` (record ticks), then `B1,J24000`, `B2,J24000`, `B3,J24000`, `B4,J24000`. Let it run one minute. Measure on the scope: pulse width, period jitter peak to peak (persistence on a rising edge of one PUL, trigger on the previous one), marker width typical and worst. Send `Bs` again: ticks must have advanced by 50,000 per second, and record overruns. Stop with `B1,k` to `B4,k` (or `B1,K` to `B4,K` to halt).
 3a. **Jitter run, 50 kHz**: jog axis 1 alone at 12,500 pulses/s (`B1,J12500`, a PUL period of exactly 4 ticks) with the same traffic; measure the PUL period jitter peak to peak. Also measure the marker's period jitter (edge to edge, rising edge to rising edge): that is the pulse tick's own jitter, and it needs no divisibility.
-4. **200 kHz run**: rebuild with `PULDIR_TICK_HZ=200000u`, TIM6 period 719. Jog all four at 99,000 pulses/s (`B1,J99000` ... `B4,J99000`), same traffic, one minute, same measurements.
+4. **200 kHz run**: rebuild with `PULDIR_PULSE_US=5u`. Jog all four at 99,000 pulses/s (`B1,J99000` ... `B4,J99000`), same traffic, one minute, same measurements.
 4a. **Jitter run, 200 kHz**: jog axis 1 alone at 50,000 pulses/s (a PUL period of exactly 4 ticks), same measurements.
 5. Connect one drive (axis 1). At 50 kHz the pulse is 20 us wide. Check the drive's datasheet minimum pulse width and DIR setup time, then run `B1,J2000`, `B1,k`, and confirm it turns and stops without lost or extra steps (mark the shaft, count revolutions: 2000 pulses per second for ten seconds is 20,000 pulses).
-6. **Phasing**, at both rates. After reset, record the `UIF before start` line. Then send `Bs`: `plan phase a..b` is `PulDir_ticks() % N` on entry to every plan tick so far. It must read `1..1`: the plan tick runs just after the pulse tick that latches a set, and has the whole interval to publish. `0..0` means it runs one tick before the latch and has one tick to publish: a plan tick longer than that misses the latch, its set runs an interval late, and final edges miss their tick. The firmware's HAL sets URS around its UG, so no update flag is left set at start (`UIF before start: pulse 0 plan 0` is expected); `port_start` therefore presets the pulse counter to its auto-reload value so the first latch tick comes at start. If you read `0..0`, that preset is not taking effect: report it before anything is built on the port.
+6. **Phasing**, at both rates. After reset, record the `UIF before start` line. Then send `Bs`: `plan phase a..b` is `PulDir_ticks() % N` on entry to every plan tick so far. It must read `1..1`: the plan tick runs just after the pulse tick that latches a set, and has the whole interval to publish. `0..0` means it runs one tick before the latch and has one tick to publish: a plan tick longer than that misses the latch, its set runs an interval late, and final edges miss their tick. The firmware's HAL sets URS around its UG, so `UIF before start: pulse 0 plan 0` is expected; `port_start` forces its own update and clears the flag either way, then puts both counters one count before their first update. If you read `0..0`, that preset is not taking effect: report it before anything is built on the port.
 
 ## 5. Results
 
@@ -292,4 +292,4 @@ The one-drive check: drive accepted 20 us pulses (yes/no), steps lost over 20,00
 
 If the CPU is over budget, first try making `port_pin_write` `static inline` (defined in `port/stm32/puldir_pin.h`, so the pulse tick inlines its one store) or building with LTO (`-flto`), and measure again.
 
-If 200 kHz overruns or the CPU limit is still exceeded, record the worst handler duration, and lower `PULDIR_TICK_HZ` in the build (and TIM6's period to match: 144e6 / rate - 1). Nothing else in the library changes. If 50 kHz fails, record the same numbers and stop: the design needs rethinking before anything is built on it. In either case, look first at what runs above or at the pulse tick's priority: any interrupt left at preemption 0 (including SysTick) adds its duration to the jitter.
+If 200 kHz overruns or the CPU limit is still exceeded, record the worst handler duration, and raise `PULDIR_PULSE_US` in the build (10u is a 100 kHz tick). Nothing else changes. If 50 kHz fails, record the same numbers and stop: the design needs rethinking before anything is built on it. In either case, look first at what runs above or at the pulse tick's priority: any interrupt left at preemption 0 (including SysTick) adds its duration to the jitter.

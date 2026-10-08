@@ -230,6 +230,13 @@ static void t_register_after_start(void)
     assert((b.events & PULDIR_EV_REFUSED) && b.refusal == PULDIR_R_BUSY);
 }
 
+/* The two timer periods a port writes: the plan period is N pulse periods, one count per microsecond. */
+static void t_timer_counts(void)
+{
+    assert(PULDIR_PLAN_COUNTS / PULDIR_PULSE_COUNTS == PULDIR_TICKS_PER_PLAN);
+    assert(PULDIR_PULSE_COUNTS == 1000000u / PULDIR_TICK_HZ);
+}
+
 /* ---- pulse rate --------------------------------------------------------------- */
 
 static void t_pulse_rate(void)
@@ -801,10 +808,10 @@ static void t_parity(void)
     parity(2.0e6f);                           /* a 100-tap window */
 }
 
-/* Test 23: at 200 kHz, 5 us pulses at a 10 us period. */
+/* Test 23: PULDIR_PULSE_US = 5, pulses 5 us wide at a 10 us period. */
 static void t_full_rate(void)
 {
-#if PULDIR_TICK_HZ == 200000u
+#if PULDIR_PULSE_US == 5u
     setup(1);
     fake_on_write(count_write);
     PulDir* a = &ax[0];
@@ -1804,7 +1811,7 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
     assert(a->mode == PULDIR_MODE_IDLE);
 }
 
-/* The default catch-up: measured 5.5 (50 kHz) and 6.3 (200 kHz) pulses. Not the guideline's 2. */
+/* The default catch-up: measured 5.5 (20 us pulse) and 6.3 (5 us pulse) pulses. Not the guideline's 2. */
 static void t_stream_sine(void)
 {
     stream_sine(200u, 37u, PULDIR_CATCHUP_MS, 7.0);
@@ -3846,7 +3853,7 @@ static void t_rollover(void)
             PulDir_stream(&ax[0], 0.0f, 0.0f);
             t_sp = PulDir_ticks();
         }
-        if (since == wrap - 300u) {           /* 10 ms is 500 ticks at 50 kHz: start late enough */
+        if (since == wrap - 300u) {           /* 10 ms is 500 ticks at a 20 us pulse: start late enough */
             assert(PulDir_clearFault(&ax[2]));
             t_clr = PulDir_ticks();
         }
@@ -4040,6 +4047,7 @@ static void t_console(void)
 
 static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "setup", t_setup },
+    { "timer_counts", t_timer_counts },
     { "pulse_rate", t_pulse_rate },
     { "dir_change", t_dir_change },
     { "polarity", t_polarity },

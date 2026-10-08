@@ -169,7 +169,7 @@ void  PulDir_attachFaultClear(PulDir*, puldir_pin_t, bool inverted);
 bool  PulDir_setConversion(PulDir*, float pulses_per_unit);
 bool  PulDir_setDefaults(PulDir*, float speed, float accel, float decel, float jerk);
 bool  PulDir_restoreDefaults(PulDir*);
-/* D16: refuses a delay past half the tick counter's range (about 3 h at 200 kHz). */
+/* D16: refuses a delay past half the tick counter's range (about 3 h at a 5 us pulse). */
 bool  PulDir_setDelays(PulDir*, uint32_t enable_ms, uint32_t release_ms);
 void  PulDir_setAutoRelease(PulDir*, bool);
 /* D16: refuses bad values, a speed at the tick ceiling and a call while homing. The timeout covers

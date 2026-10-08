@@ -72,17 +72,18 @@ Homing (`PulDir_setHoming`, then `PulDir_homeStart`) runs cFlexyStepper's phases
 
 ## The port
 
-`puldir_port.h` is the contract: `port_pin_init_output`, `port_pin_init_input`, `port_pin_write` (called from the pulse tick, one register write), `port_pin_read`, `port_start(pulse_tick, plan_tick)`, and `port_lock` and `port_unlock`. The lock must mask only the library's two interrupts. `PULDIR_TICK_HZ` and `PULDIR_PLAN_HZ` come from the build. The port cannot check that its timers run at those rates. The scope does.
+`puldir_port.h` is the contract: `port_pin_init_output`, `port_pin_init_input`, `port_pin_write` (called from the pulse tick, one register write), `port_pin_read`, `port_start(pulse_tick, plan_tick)`, and `port_lock` and `port_unlock`. The lock must mask only the library's two interrupts. Every port takes two timers counting at `PULDIR_TIMER_HZ` (1 MHz, 1 us per count) and sets their periods in `port_start`: `PULDIR_PULSE_COUNTS` (= `PULDIR_PULSE_US`) for the pulse timer, `PULDIR_PLAN_COUNTS` (= 1e6 / `PULDIR_PLAN_HZ`) for the plan timer, which is exactly N pulse periods. The port cannot check that the counters run at 1 MHz. The scope does.
 
-### STM32 binding
+### STM32 setup
 
-`port/stm32/puldir_port_stm32.c` includes `main.h` and compiles for any STM32 family. It names no timer. You own two basic timers and hand them over once, before `PulDir_start`:
+`port/stm32/puldir_port_stm32.c` includes `main.h` and compiles for any STM32 family. It names no timer. You own two timers and hand them over once each, before `PulDir_start`. The examples below use TIM6 and TIM7 on a G4:
 
 ```c
-PulDir_stm32_bind(&htim6, TIM6_DAC_IRQn, &htim7, TIM7_DAC_IRQn);   /* pulse timer, plan timer */
+PulDir_stm32_attachPulseTimer(&htim6, TIM6_DAC_IRQn);
+PulDir_stm32_attachPlanTimer(&htim7, TIM7_DAC_IRQn);
 ```
 
-Call the two raw IRQ entries, not `HAL_TIM_IRQHandler`: its flag checks cost more than the tick at 200 kHz. CubeMX already generates `TIM6_DAC_IRQHandler` and `TIM7_DAC_IRQHandler` in `stm32g4xx_it.c`, so do not define them a second time. Either put the call in the generated handler's first user section and return before the HAL call (regeneration keeps only the user sections):
+Call the two raw IRQ entries, not `HAL_TIM_IRQHandler`: its flag checks cost more than the tick at a 5 us pulse. Each entry returns at once if its timer's update flag is clear, so a timer on a shared vector (`TIM1_UP_TIM16_IRQHandler` and the like) works: call the entry, then the other source's handler. CubeMX already generates `TIM6_DAC_IRQHandler` and `TIM7_DAC_IRQHandler` in `stm32g4xx_it.c`, so do not define them a second time. Either put the call in the generated handler's first user section and return before the HAL call (regeneration keeps only the user sections):
 
 ```c
 void TIM6_DAC_IRQHandler(void)
@@ -105,12 +106,12 @@ void TIM6_DAC_IRQHandler(void) { PulDir_stm32_pulseIrq(); }
 void TIM7_DAC_IRQHandler(void) { PulDir_stm32_planIrq(); }
 ```
 
-Timer setup, in CubeMX:
+Timer setup, in CubeMX. This is all you configure:
 
-- Both timers count up, same clock, update interrupt enabled, no output.
-- The pulse timer period is one tick: at a 144 MHz timer clock, 2880 clocks for 50 kHz, 720 for 200 kHz.
-- The plan timer period must be exactly N pulse periods, where N = `PULDIR_TICK_HZ / PULDIR_PLAN_HZ` (50 or 200 here). 144,000 clocks gives 1 kHz. If you change one period, change the other.
-- `port_start` presets the pulse counter to its auto-reload value, so the first latch tick comes at start, zeroes the plan counter and starts both timers back to back. Each plan tick then lands on a latch tick and runs just after it, with the whole interval to publish. This needs the same timer clock and a plan period of exactly N pulse periods; step 6 of `docs/bench-step4.md` checks it on the board.
+- Each timer's prescaler makes its counter run at 1 MHz: 143 at a 144 MHz timer clock, 169 at 170 MHz. Count up, no output.
+- Update interrupt enabled for both.
+- The period (ARR) does not matter: `port_start` writes it, `PULDIR_PULSE_US - 1` for the pulse timer and `1e6 / PULDIR_PLAN_HZ - 1` for the plan timer (the counter runs 0..ARR), and forces an update so a preloaded ARR takes effect at once.
+- `port_start` then puts both counters one count before their first update and starts the pulse timer, then the plan timer. Each plan tick follows a latch tick by the few cycles between the two starts, with the whole interval to publish. Step 6 of `docs/bench-step4.md` checks it on the board.
 
 Priorities (CubeMX, NVIC):
 
@@ -118,7 +119,7 @@ Priorities (CubeMX, NVIC):
 - Plan timer: next, 1.
 - Everything else (UART, DMA, USB, CAN): 2 or lower urgency. Any interrupt left at 0 adds its duration to the pulse jitter. CubeMX leaves SysTick at 15, the lowest, but application code may raise it: the 164-race firmware's `functions.c` sets it to 0.
 
-`port_lock` disables exactly those two IRQ numbers in the NVIC. A tick that comes due inside the lock fires on unlock, late by the lock's duration. Before `PulDir_stm32_bind` the lock does nothing.
+`port_lock` disables exactly those two IRQ numbers in the NVIC (on a shared vector, the other source too). A tick that comes due inside the lock fires on unlock, late by the lock's duration. Until both timers are attached the lock does nothing. `PulDir_start` with a timer not attached dereferences a null handle.
 
 Main context only: call every `PulDir_*` function from the main loop (or one thread), never from an interrupt, including the UART interrupt. Do not call them from the two timer handlers. Pass commands to the main loop through a flag or a queue.
 
@@ -154,8 +155,8 @@ Define these on the compiler command line. Defaults are from the headers.
 
 | macro | default | meaning |
 |---|---|---|
-| `PULDIR_TICK_HZ` | 50000u | pulse tick rate; 200000u for 100k pulses/s |
-| `PULDIR_PLAN_HZ` | 1000u | plan tick rate; 1000 to 4000, must divide the tick rate, N = tick / plan in 2..4096 |
+| `PULDIR_PULSE_US` | 20u | pulse width, which is one pulse tick, in us; at least 2. 5u for 100k pulses/s. The tick rate `PULDIR_TICK_HZ` = 1e6 / this is derived; defining it is an error |
+| `PULDIR_PLAN_HZ` | 1000u | plan tick rate; 1000 to 4000, must divide 1 MHz, and its period must be a whole number of pulse ticks, N = tick / plan in 2..4096 |
 | `PULDIR_MAX_AXES` | 8u | axis table size |
 | `PULDIR_MAX_GROUPS` | 4u | group table size |
 | `PULDIR_CATCHUP_MS` | 50u | stream catch-up time |
@@ -170,13 +171,13 @@ A bad combination fails to compile.
 
 ## The numbers
 
-| tick rate | pulse width | max pulses/s per axis | four axes, CPU (estimate) |
+| `PULDIR_PULSE_US` | tick rate | max pulses/s per axis | four axes, CPU (estimate) |
 |---|---|---|---|
-| 50 kHz (default) | 20 us | just under 25,000 | about 5 % |
-| 100 kHz | 10 us | just under 50,000 | about 10 % |
-| 200 kHz | 5 us | just under 100,000 | about 20 % |
+| 20 (default) | 50 kHz | just under 25,000 | about 5 % |
+| 10 | 100 kHz | just under 50,000 | about 10 % |
+| 5 | 200 kHz | just under 100,000 | about 20 % |
 
-- The pulse is one tick wide, and the gap, the DIR setup and the DIR hold are each at least one tick. There is no separate pulse width setting. A drive that needs a 40 us pulse runs at a 25 kHz tick.
+- The pulse is one tick wide, and the gap, the DIR setup and the DIR hold are each at least one tick. A drive that needs a 40 us pulse builds with `PULDIR_PULSE_US=40u`, a 25 kHz tick.
 - The maximum rate is just under half the tick rate. Setters refuse a speed at or above it.
 - The plan tick runs at 1 kHz by default. It is the stream rate limit: setpoints can arrive up to that rate.
 - CPU is a Cortex-M4F at 144 MHz: about 20 cycles per axis per tick plus about 50 cycles of interrupt overhead. It scales with the tick rate, not the pulse rate.
@@ -219,5 +220,5 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E24) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E26) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.
