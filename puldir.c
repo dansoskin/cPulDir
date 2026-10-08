@@ -383,11 +383,10 @@ bool PulDir_jog(PulDir* a, float speed)
     return true;
 }
 
-/* Under the lock, a homing run ended from main, unhomed: the limits homeStart
- * found go back. The plan tick hands them to the generator once its window allows. */
-static void home_unwind(PulDir* a)
+/* Under the lock, a homing run ending unhomed: the limits homeStart found go
+ * back. The plan tick hands them to the generator once its window allows. */
+static void home_restore(PulDir* a)
 {
-    a->home_state = PULDIR_HOME_IDLE;
     memcpy(a->lim, a->home_lim, sizeof a->lim);
     a->req |= REQ_LIMITS;
 }
@@ -400,7 +399,8 @@ void PulDir_stop(PulDir* a)
     const bool group = a->mode == PULDIR_MODE_GROUP;
     if (!group && a->mode != PULDIR_MODE_IDLE) {
         if (a->mode == PULDIR_MODE_HOMING) {
-            home_unwind(a);
+            a->home_state = PULDIR_HOME_IDLE;
+            home_restore(a);
             a->req &= (uint16_t)~REQ_HOME;  /* not yet begun: there is nothing to stop */
         }
         a->req |= REQ_STOP;
@@ -411,16 +411,8 @@ void PulDir_stop(PulDir* a)
         puldir_refuse(a, "stop", PULDIR_R_MODE, 0.0f);
 }
 
-/* Immediate (D17): no rising edge after this tick, the target where the pulses stopped. A member
- * halts its whole group (5.5); a homing run ends. isMoving clears once the pin is low. */
-void PulDir_halt(PulDir* a)
+void puldir_halt_locked(PulDir* a)
 {
-    port_lock();
-    if (a->mode == PULDIR_MODE_GROUP && a->group != NULL) {
-        puldir_group_halt(a->group, NULL);
-        port_unlock();
-        return;
-    }
     if (a->slot < PULDIR_MAX_AXES) {
         PulDirPulse s;
         puldir_kill(a->slot);
@@ -428,10 +420,25 @@ void PulDir_halt(PulDir* a)
         a->target = (uint64_t)(uint32_t)s.count << 32;
     }
     if (a->mode == PULDIR_MODE_HOMING)
-        home_unwind(a);
+        home_restore(a);
     a->req = (uint16_t)((a->req & ~REQ_COURSE) | REQ_HALT);
     a->mode = PULDIR_MODE_IDLE;
     a->vel_out = 0.0f;
+}
+
+/* Immediate (D17): no rising edge after this tick, the target where the pulses stopped. A member
+ * halts its whole group (5.5); a homing run ends. isMoving clears once the pin is low. */
+void PulDir_halt(PulDir* a)
+{
+    port_lock();
+    if (a->mode == PULDIR_MODE_GROUP && a->group != NULL) {
+        puldir_group_halt(a->group, NULL);
+    } else {
+        const bool homing = a->mode == PULDIR_MODE_HOMING;
+        puldir_halt_locked(a);
+        if (homing)
+            a->home_state = PULDIR_HOME_IDLE;
+    }
     port_unlock();
 }
 

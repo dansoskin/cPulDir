@@ -97,22 +97,6 @@ static void halt_generator(PulDir* a, int64_t pb)
     a->stream_live = false;
 }
 
-/* PulDir_halt from inside the plan tick, after the re-base (E17): no rising edge after this tick,
- * the target where the pulses stopped, IDLE; isMoving clears once the pin is low. */
-static void halt_now(PulDir* a, PulDirInc* out, uint64_t base)
-{
-    PulDirPulse s;
-    port_lock();
-    puldir_kill(a->slot);
-    puldir_pulse_read(a->slot, &s);
-    port_unlock();
-    a->target = (uint64_t)(uint32_t)s.count << 32;
-    a->mode = PULDIR_MODE_IDLE;
-    a->vel_out = 0.0f;
-    halt_generator(a, (int64_t)(s.P - base));
-    puldir_set_inc(a, out, 0);
-}
-
 /* Aims this interval's end at the generator's position (T, pb, end: 32.32 from base). True at rest:
  * settled on the final position, the generator done, the last pulse lowered. */
 static bool run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
@@ -162,14 +146,17 @@ static void take_limits(PulDir* a, const float l[4])
             a->lim[k] = l[k];
 }
 
-/* The run ends unhomed: halted, the generator takes back the limits homeStart found. */
-static void home_fail(PulDir* a, PulDirInc* out, uint64_t base)
+/* A phase timed out: the run ends unhomed, the pulses stop now. The next plan tick
+ * applies the halt's REQ_HALT and REQ_LIMITS (the limits homeStart found) to the generator. */
+static void home_fail(PulDir* a, PulDirInc* out)
 {
     a->home_fail = a->home_state;
     a->home_state = PULDIR_HOME_ERROR;
     a->events |= PULDIR_EV_HOME_FAILED;
-    halt_now(a, out, base);
-    take_limits(a, a->home_lim);
+    port_lock();
+    puldir_halt_locked(a);
+    port_unlock();
+    puldir_set_inc(a, out, 0);
 }
 
 /* A new goal for the generator (E17). */
@@ -237,7 +224,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
             home_course(a);
             next = towards ? PULDIR_HOME_DELAY1 : PULDIR_HOME_DELAY2;
         } else if (late) {
-            home_fail(a, out, base);
+            home_fail(a, out);
             return;
         }
         break;
@@ -252,7 +239,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
         if (in_phase >= DELAY_TICKS) {
             const int64_t t = (int64_t)count + (int64_t)roundf(a->home_adjust * a->conv);
             if (t < INT32_MIN || t > INT32_MAX) {
-                home_fail(a, out, base);
+                home_fail(a, out);
                 return;
             }
             take_limits(a, a->def);             /* the defaults, for the adjust */
@@ -264,7 +251,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
         break;
     case PULDIR_HOME_ADJUST_POSITION:
         if (late) {
-            home_fail(a, out, base);
+            home_fail(a, out);
             return;
         }
         break;
@@ -333,7 +320,7 @@ static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
 }
 
 static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int32_t live,
-                     bool pul_high, uint32_t now, uint32_t ahead, bool latch)
+                     bool pul_high, uint32_t now, uint32_t ahead)
 {
     /* 1. Re-base on the whole pulses emitted. */
     const uint64_t base = (uint64_t)(uint32_t)count << 32;
@@ -346,17 +333,11 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     const float trel = to_pulses((int64_t)(a->target - base));
     MotionProfile_rebase(&a->prof, (float)shift, trel);
 
-    /* 3. Requests. Halt first, so commands start where the pulses stopped; a stream begin before the
-     * limits, so they reach an idle generator; a stop last. A latch this tick halts now (E17). */
+    /* 3. Requests, read after service: a latch's halt this tick is applied now (E17). Halt first, so
+     * commands start where the pulses stopped; a stream begin before the limits, so they reach an
+     * idle generator; a stop last. */
     uint16_t req = a->req;
     a->req = 0;
-    if (latch) {
-        const bool homing = a->mode == PULDIR_MODE_HOMING;   /* service has set ERROR */
-        req &= (uint16_t)~(REQ_COURSE | REQ_HALT);
-        halt_now(a, out, base);
-        if (homing)
-            take_limits(a, a->home_lim);
-    }
     if (req & REQ_HALT)                         /* puldir_kill zeroed the increments: pb is where they stopped */
         halt_generator(a, pb);
     if (req & REQ_STREAM_BEGIN) {
@@ -441,9 +422,21 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
 /* ---- fault, enable delay and release (5.8), for every axis, group members too ---- */
 
-/* Before the groups and axes run. True when the latch closes on an axis outside a group's move;
- * a member's latch halts its group here, under the lock, and refreshes the snapshots. */
-static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t ahead,
+/* Under the lock, after a kill: slot k's snapshot again, as the loop in puldir_plan_tick takes it. */
+static void refresh(uint8_t k, uint32_t ahead, PulDirSnap* snap)
+{
+    PulDirPulse s;
+    puldir_pulse_read(k, &s);
+    snap[k].Pb = s.P + (uint64_t)((int64_t)s.inc * ahead);
+    snap[k].count = s.count;
+    snap[k].live = s.inc;
+    snap[k].dir = s.dir;
+    snap[k].high = puldir_pul_high(k);
+}
+
+/* Before the groups and axes run. A latch halts under the lock, the axis or its whole group, and
+ * refreshes the snapshots of what it stopped; run_axis then reads the halt's requests. */
+static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t ahead,
                     PulDirSnap* snap, PulDirInc* out)
 {
     if (a->ena_wait && now - a->enabled_at >= a->enable_ticks)
@@ -459,7 +452,7 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         port_pin_write(a->clr, a->clr_inverted);
         a->clearing = false;
         a->clr_armed = a->fault;
-        return false;
+        return;
     }
 
     if (!flt) {
@@ -469,15 +462,15 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
             a->fault = false;
             a->events |= PULDIR_EV_FAULT_CLEARED;
         }
-        return false;
+        return;
     }
     if (!a->flt_seen) {
         a->flt_seen = true;
         a->flt_since = t_pin;
-        return false;
+        return;
     }
     if (a->fault || t_pin - a->flt_since < DEBOUNCE_TICKS)
-        return false;
+        return;
 
     /* Latch: halt, and leave the enable pin alone (D12). */
     a->fault = true;
@@ -492,24 +485,19 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         a->events |= PULDIR_EV_HOME_FAILED;
     }
     PulDirGroup* g = a->group;
-    if (a->mode != PULDIR_MODE_GROUP || g == NULL)
-        return true;
     port_lock();
-    puldir_group_halt(g, out);
-    g->faulted = true;
-    for (uint8_t i = 0; i < g->count; i++) {    /* the members' pulses stopped just now */
-        const uint8_t k = g->axes[i]->slot;
-        g->axes[i]->held = true;
-        PulDirPulse s;
-        puldir_pulse_read(k, &s);
-        snap[k].Pb = s.P + (uint64_t)((int64_t)s.inc * ahead);
-        snap[k].count = s.count;
-        snap[k].live = s.inc;
-        snap[k].dir = s.dir;
-        snap[k].high = puldir_pul_high(k);
+    if (a->mode == PULDIR_MODE_GROUP && g != NULL) {
+        puldir_group_halt(g, out);
+        g->faulted = true;
+        for (uint8_t i = 0; i < g->count; i++) {
+            g->axes[i]->held = true;
+            refresh(g->axes[i]->slot, ahead, snap);
+        }
+    } else {
+        puldir_halt_locked(a);
+        refresh(a->slot, ahead, snap);
     }
     port_unlock();
-    return false;
 }
 
 /* Auto-release: release_ticks after the axis went IDLE at the end of a move (D19). Never on an axis
@@ -571,17 +559,16 @@ void puldir_plan_tick(void)
     }
 
     PulDirInc* out = puldir_shadow();
-    bool latch[PULDIR_MAX_AXES], was[PULDIR_MAX_AXES];
+    bool was[PULDIR_MAX_AXES];
     for (uint8_t i = 0; i < n; i++) {
         was[i] = puldir_axes[i]->moving;
-        latch[i] = service(puldir_axes[i], flt[i], t_pin, now, ahead, snap, out);
+        service(puldir_axes[i], flt[i], t_pin, now, ahead, snap, out);
     }
     puldir_group_tick(snap, out);               /* the groups write their members' entries */
     for (uint8_t i = 0; i < n; i++) {
         PulDir* a = puldir_axes[i];
         if (a->mode != PULDIR_MODE_GROUP)
-            run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].live, snap[i].high, now, ahead,
-                     latch[i]);
+            run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].live, snap[i].high, now, ahead);
         release(a, was[i], now);
     }
     puldir_publish();

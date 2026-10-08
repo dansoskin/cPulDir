@@ -3810,10 +3810,13 @@ static void t_homing_limits(void)
     fake_run(N);
     limits_are(a, mine, true);
 
-    /* a phase timeout and a fault latch end the run from the plan tick */
+    /* a phase timeout and a fault latch end the run from the plan tick; the timeout's
+     * halt reaches the generator on the plan tick after it, the latch's on its own */
     home_begin(a, -1000000);
     home_finish(a, 400u);
     assert(PulDir_homeState(a) == PULDIR_HOME_ERROR);
+    limits_are(a, mine, false);
+    fake_run(N);
     limits_are(a, mine, true);
     run_until_idle(a, TICK_HZ);
     home_begin(a, -1000000);

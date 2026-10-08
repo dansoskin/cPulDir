@@ -106,6 +106,10 @@ void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
 /* Main context, under the lock, for every accepted motion command (5.8): enables a disabled drive,
  * whose motion the plan tick then holds for the enable delay, and cancels a pending release. */
 void puldir_wake(PulDir*);
+/* Under the lock, from main or the plan tick, for an axis outside a group's move: no rising edge
+ * after this tick, the target where the pulses stopped, IDLE, REQ_HALT for the generator. A homing
+ * run gets back the limits homeStart saved; its homing state is the caller's to set. */
+void puldir_halt_locked(PulDir*);
 
 /* events (puldir_loop.c) */
 void puldir_refuse(PulDir*, const char* call, PulDirRefusal why, float value);
