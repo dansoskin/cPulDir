@@ -103,12 +103,6 @@ void puldir_halt_generator(PulDir*, int64_t pb);
 bool puldir_run_generator(PulDir*, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
                           bool pul_high);
 
-/* groups (puldir_group.c) */
-void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group, before the axes */
-/* Under the lock, from main (shadow NULL) or the plan tick (shadow, the set it writes, zeroed too):
- * no rising edge on any member after this tick, every member IDLE, the move abandoned. */
-void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
-
 /* main context (puldir.c) */
 float puldir_rate_cap(float conv);            /* in user units: speeds at or above it are refused */
 /* Under the lock, for every motion command: the fault latch and the mode at one instant (D17). */
@@ -131,4 +125,5 @@ void   puldir_log(const PulDir* a, const char* line);     /* through the logger,
 #define PULDIR_INTERNAL_FUNCTIONS
 #include "puldir_homing.h"
 #include "puldir_stream.h"
+#include "puldir_group.h"
 #endif

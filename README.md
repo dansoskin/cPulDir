@@ -369,7 +369,7 @@ Define these on the compiler command line. Each default lives in the header of t
 | macro | default | header | meaning |
 |---|---|---|---|
 | `PULDIR_MAX_AXES` | 8u | `puldir.h` | axis table size |
-| `PULDIR_MAX_GROUPS` | 4u | `puldir.h` | group table size |
+| `PULDIR_MAX_GROUPS` | 4u | `puldir_group.h` | group table size |
 | `PULDIR_CATCHUP_MS` | 50u | `puldir_stream.h` | stream catch-up time |
 | `PULDIR_STREAM_TIMEOUT_MS` | 100u | `puldir_stream.h` | stream setpoint timeout |
 | `PULDIR_FAULT_DEBOUNCE_MS` | 2u | `drive/puldir_fault.h` | fault input must stay active this long |
@@ -435,5 +435,5 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E34) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E35) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.

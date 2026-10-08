@@ -20,9 +20,6 @@ extern "C" {
 #ifndef PULDIR_MAX_AXES
 #define PULDIR_MAX_AXES 8u
 #endif
-#ifndef PULDIR_MAX_GROUPS
-#define PULDIR_MAX_GROUPS 4u
-#endif
 #ifndef PULDIR_TICK_START
 #define PULDIR_TICK_START 0u                /* the rollover test starts near the wrap (D9) */
 #endif
@@ -87,19 +84,6 @@ typedef struct PulDir {
     float refused_value;                 /* R_RATE: the cap. R_TAPS: the jerk floor as a plain quotient; the
                                             log line rounds it up, and that printed value is the one that fits */
 } PulDir;
-
-typedef struct PulDirGroup {
-    PulDir* axes[PULDIR_MAX_AXES];
-    uint8_t count;
-    MotionProfile s;                     /* the path parameter, 0 to 1 */
-    uint64_t start[PULDIR_MAX_AXES];     /* 32.32 */
-    int32_t  delta[PULDIR_MAX_AXES];     /* whole pulses (D4) */
-    volatile bool moving, faulted;
-    volatile bool active;                /* the plan tick runs s: from an accepted move to its end or a halt */
-    volatile uint8_t req;                /* main -> plan requests, under the lock */
-    bool started;                        /* every member's direction was set; s advances */
-    bool still;                          /* every delta is zero */
-} PulDirGroup;
 
 /* library-wide */
 void     PulDir_attachLogger(void (*fn)(const char*));
@@ -174,20 +158,8 @@ void  PulDir_setLogging(PulDir*, bool);
 void  PulDir_loop(PulDir*);
 void  PulDir_console(PulDir*, char cmd, const char* arg);
 
-/* group */
-/* D16: refuses. The group's table keeps a pointer to it: give it static storage. */
-bool  PulDirGroup_init(PulDirGroup*, PulDir** axes, uint8_t count);
-/* Refuses a member not IDLE or faulted, and a member travel beyond 2^24 pulses.
- * While the move runs, members refuse their limit setters (R_MODE). */
-bool  PulDirGroup_moveTo(PulDirGroup*, const float* targets);
-/* Ramped along the line. After a stop mid-path each member ends on its last whole
- * pulse, within one pulse of the line; the final edges need not share a tick. */
-void  PulDirGroup_stop(PulDirGroup*);
-void  PulDirGroup_halt(PulDirGroup*);
-bool  PulDirGroup_isMoving(PulDirGroup*);
-bool  PulDirGroup_faulted(PulDirGroup*);
-
 #ifdef __cplusplus
 }
 #endif
+#include "puldir_group.h"                 /* after PulDir: a group holds its axes */
 #endif
