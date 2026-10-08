@@ -8,8 +8,8 @@
 #include <stdint.h>
 #include "motion_profile.h"
 #include "puldir_port.h"
-#include "puldir_enable.h"
-#include "puldir_fault.h"
+#include "drive/puldir_enable.h"
+#include "drive/puldir_fault.h"
 #include "puldir_homing.h"
 #include "puldir_stream.h"
 

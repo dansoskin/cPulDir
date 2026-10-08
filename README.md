@@ -4,7 +4,7 @@ puldir drives several PUL/DIR motor drives (steppers, closed-loop steppers, serv
 
 ## Adding it to a project
 
-Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_loop.c`, `puldir_group.c`, `puldir_console.c`, `puldir_enable.c`, `puldir_fault.c`, `puldir_homing.c`, `puldir_stream.c` and `port/stm32/puldir_port_stm32.c` to the build. Put the repo root and `port/stm32` on the include path. That directory supplies `puldir_pin.h`, which defines `puldir_pin_t` as a GPIO port and pin. Link with `-lm`. The library formats its log lines with `snprintf`, including `%f`, so a newlib-nano build must link float printf (`-u _printf_float`). newlib's `%f` allocates from the heap on its first use and needs roughly 1 KB of stack; logging happens only in main context, so both costs fall on the main loop, never on the interrupts. The planner alone (`motion_profile.c` and `.h`) needs nothing else.
+Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_loop.c`, `puldir_group.c`, `puldir_console.c`, `puldir_homing.c`, `puldir_stream.c`, `drive/puldir_enable.c`, `drive/puldir_fault.c` and `port/stm32/puldir_port_stm32.c` to the build. Put the repo root and `port/stm32` on the include path. That directory supplies `puldir_pin.h`, which defines `puldir_pin_t` as a GPIO port and pin. Link with `-lm`. The library formats its log lines with `snprintf`, including `%f`, so a newlib-nano build must link float printf (`-u _printf_float`). newlib's `%f` allocates from the heap on its first use and needs roughly 1 KB of stack; logging happens only in main context, so both costs fall on the main loop, never on the interrupts. The planner alone (`motion_profile.c` and `.h`) needs nothing else.
 
 ## STM32 timer setup
 
@@ -422,7 +422,7 @@ It builds and runs the generator tests, then builds the axis tests against `test
 Target compile, from bash with arm-none-eabi-gcc on the path and `$FW` set to a CubeMX project (STM32G473 here; change `-DSTM32G473xx` and the HAL include for another family):
 
 ```
-for f in motion_profile.c puldir*.c port/stm32/puldir_port_stm32.c; do
+for f in motion_profile.c puldir*.c drive/*.c port/stm32/puldir_port_stm32.c; do
   arm-none-eabi-gcc -std=c99 -O2 -Wall -Wextra -Werror -Wdouble-promotion \
     -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard \
     -DSTM32G473xx -DUSE_HAL_DRIVER -I. -Iport/stm32 -I$FW/Core/Inc \
