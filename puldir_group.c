@@ -8,6 +8,10 @@
 #define FIX 4294967296.0f                       /* one pulse in 32.32 */
 #define DT  (1.0f / (float)PULDIR_PLAN_HZ)      /* the profile's dt, the same expression as init's */
 #define PULSES_MAX 2147483648.0f                /* whole-pulse targets lie in [-2^31, 2^31) */
+/* The longest member travel. s is a float: past 2^24 pulses one ulp of s moves
+ * a member by more than a pulse, and its aim steps by more than its speed limit
+ * (6x measured at 2^28). It also keeps delta * s inside int64 without a clamp. */
+#define TRAVEL_MAX ((int64_t)1 << 24)
 
 static PulDirGroup* groups[PULDIR_MAX_GROUPS];
 static uint8_t ngroups;
@@ -136,7 +140,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
         const float x = roundf(targets[i] * a->conv);
         const bool fits = x >= -PULSES_MAX && x < PULSES_MAX;      /* false for NaN */
         const int64_t d = fits ? (int64_t)x - count[i] : 0;
-        if (!fits || d > INT32_MAX || d < -INT32_MAX) {     /* -2^31 would overflow delta * s */
+        if (!fits || d > TRAVEL_MAX || d < -TRAVEL_MAX) {
             why = PULDIR_R_ARG;
             bad = g->axes[i];
         } else {
@@ -147,6 +151,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
     MotionLimits L = { 1.0f, 1.0f, 1.0f, 0.0f };
     bool any = false;
     if (why == PULDIR_R_NONE) {
+        bad = g->axes[0];                       /* a path refusal: reported on the first member */
         any = path_limits(g, delta, &L);
         if (any && !(L.vmax > 0.0f && L.amax > 0.0f && L.dmax > 0.0f)) {
             why = PULDIR_R_ARG;                 /* underflowed: limits too small for the travel */
@@ -246,8 +251,7 @@ void puldir_group_halt(PulDirGroup* g, PulDirInc* shadow)
         a->settle = 0;
         a->group = NULL;
     }
-    g->req = 0;
-    g->active = false;                          /* moving clears once every pin is low */
+    g->active = false;                          /* moving clears once every member is at rest */
 }
 
 bool PulDirGroup_isMoving(PulDirGroup* g) { return g->moving; }
@@ -255,12 +259,11 @@ bool PulDirGroup_faulted(PulDirGroup* g)  { return g->faulted; }
 
 /* ---- the plan tick's part ----------------------------------------------------------------- */
 
-/* s in 32.32. s stays in [0, 1] (the trapezoid never passes its target, E2); the
- * top is held at 1 because delta * s just past 2^32 overflows for |delta| near 2^31. */
+/* s in 32.32. s stays in [0, 1] (the trapezoid never passes its target, E2), and
+ * |delta| <= 2^24, so delta * s_fix fits int64 with room to spare. */
 static int64_t s_fix(float s)
 {
-    const int64_t q = (int64_t)(s * FIX);
-    return q > (int64_t)PULDIR_ONE ? (int64_t)PULDIR_ONE : q;
+    return (int64_t)(s * FIX);
 }
 
 /* The direction member i must show before s advances. */
@@ -296,13 +299,11 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
 {
     const uint8_t n = g->count;
     if (!g->active) {
-        /* After a halt: moving until every member's last pulse is lowered. */
+        /* After a halt: moving until every member is at rest (its last pulse lowered). */
         if (g->moving) {
             bool rest = true;
-            for (uint8_t i = 0; i < n; i++) {
-                const PulDirSnap* q = &sn[g->axes[i]->slot];
-                rest = rest && !q->high && q->live == 0;
-            }
+            for (uint8_t i = 0; i < n; i++)
+                rest = rest && !g->axes[i]->moving;
             if (rest)
                 g->moving = false;
         }
@@ -318,13 +319,10 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
     MotionProfile* s = &g->s;
     const uint8_t req = g->req;
     g->req = 0;
-    if ((req & GROUP_REQ_STOP) && !s->landed) {
+    /* Before s lands no member has arrived, so nothing else changes course (E17);
+     * once landed, the move ends as planned. */
+    if ((req & GROUP_REQ_STOP) && !s->landed)
         MotionProfile_stop(s);
-        for (uint8_t i = 0; i < n; i++) {       /* a new course (E17) */
-            g->axes[i]->arrived = false;
-            g->axes[i]->settle = 0;
-        }
-    }
 
     if (!g->started) {
         /* The start tick (5.7): a reversal costs the member ticks (E14), so s waits

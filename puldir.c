@@ -178,7 +178,9 @@ static bool apply_limits(PulDir* a, const float lim[4], const char* call)
         value = jerk_floor(acc, dec, conv);
     } else {
         port_lock();
-        if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
+        if (a->mode == PULDIR_MODE_GROUP) {
+            why = PULDIR_R_MODE;            /* the path profile owns the limits until the move ends (5.7) */
+        } else if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
             for (int k = 0; k < 4; k++)
                 a->lim[k] = lim[k];
             a->req |= REQ_LIMITS;
