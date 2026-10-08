@@ -388,9 +388,5 @@ bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
 
 float MotionProfile_minJerk(float amax, float dmax, float dt)
 {
-    /* The quotient can round to a window one tap too long: step up until it fits. */
-    float j = (amax + dmax) / ((float)MOTION_PROFILE_MAX_TAPS * dt);
-    while (isfinite(j) && !(ceilf((amax + dmax) / (j * dt)) <= (float)MOTION_PROFILE_MAX_TAPS))
-        j = nextafterf(j, INFINITY);
-    return j;
+    return (amax + dmax) / ((float)MOTION_PROFILE_MAX_TAPS * dt);
 }

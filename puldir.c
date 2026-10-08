@@ -169,25 +169,6 @@ bool PulDir_register(PulDir* a)
 
 /* ---- limits ---------------------------------------------------------------- */
 
-/* Whether the jerk j, in user units, fits the ring under L's ramps, as the generator will see it. */
-static bool jerk_fits(MotionLimits L, float conv, float j)
-{
-    L.jmax = j * conv;
-    return MotionProfile_checkLimits(L, puldir_timing.dt, 0) == MOTION_LIMITS_OK;
-}
-
-/* The smallest jerk in user units that fits: minJerk's quotient and the
- * conversion each round, so step to the exact float boundary. */
-static float jerk_floor(MotionLimits L, float conv)
-{
-    float j = MotionProfile_minJerk(L.amax, L.dmax, puldir_timing.dt) / conv;
-    while (!jerk_fits(L, conv, j))
-        j = nextafterf(j, INFINITY);
-    for (float d = nextafterf(j, 0.0f); jerk_fits(L, conv, d); d = nextafterf(d, 0.0f))
-        j = d;
-    return j;
-}
-
 /* GROUP: the path profile owns the limits until the move ends (5.7). HOMING: the
  * run sets them from the plan tick. */
 static bool limits_busy(PulDirMode m)
@@ -211,7 +192,7 @@ static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const cha
         value = rate_cap(conv);
     } else if (check == MOTION_LIMITS_TAPS) {
         why = PULDIR_R_TAPS;
-        value = jerk_floor(L, conv);
+        value = MotionProfile_minJerk(L.amax, L.dmax, dt) / conv;   /* the log rounds it up to fit */
     } else {
         port_lock();
         if (limits_busy(a->mode))

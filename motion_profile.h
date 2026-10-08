@@ -55,7 +55,8 @@ float MotionProfile_stopDistance(const MotionProfile*);
 void  MotionProfile_rebase(MotionProfile*, float shift, float target);
 /* For the axis (D1): from rest, put the profile in motion at vel through pos, ring full of vel. */
 bool  MotionProfile_seed(MotionProfile*, float pos, float vel);
-/* The smallest jerk whose window fits MOTION_PROFILE_MAX_TAPS, for refusal messages. */
+/* The smallest jerk whose window fits MOTION_PROFILE_MAX_TAPS, as the plain quotient: it can be
+ * one ulp under the exact boundary, so a refusal message prints it rounded up. */
 float MotionProfile_minJerk(float amax, float dmax, float dt);
 
 #ifdef __cplusplus

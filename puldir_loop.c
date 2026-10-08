@@ -60,8 +60,9 @@ size_t puldir_put_uint(char* b, size_t at, uint64_t v, int min_digits)
     return at;
 }
 
-/* A signed decimal with four places, from integer arithmetic; up rounds a
- * positive v so the printed figure, read back as a float, is never below it. */
+/* A signed decimal with four places, from integer arithmetic. up rounds a positive v so the printed
+ * figure, read back as a float, is above v with margin: a jerk floor is a plain quotient (one ulp
+ * under the boundary), and its conversion, this scaling and the read-back each round again. */
 size_t puldir_put_num(char* b, size_t at, float v, bool up)
 {
     if (isnan(v))
@@ -72,7 +73,7 @@ size_t puldir_put_num(char* b, size_t at, float v, bool up)
     }
     if (!(v < 1.0e14f))                         /* also inf: past what four places can show */
         return puldir_put(b, at, "1e14+");
-    const uint64_t q = up ? (uint64_t)ceilf(v * (1.0f + 4.0f * FLT_EPSILON) * 10000.0f)
+    const uint64_t q = up ? (uint64_t)ceilf(v * (1.0f + 16.0f * FLT_EPSILON) * 10000.0f)
                           : (uint64_t)(v * 10000.0f + 0.5f);
     at = puldir_put_uint(b, at, q / 10000u, 1);
     at = puldir_put(b, at, ".");

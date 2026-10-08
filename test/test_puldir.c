@@ -1455,13 +1455,12 @@ static void t_live_limits(void)
     assert(nlines == 1 && strstr(lines[0], "setJerk refused: jerk below "));   /* 273.4 at 1 kHz */
     assert(strstr(lines[0], " needs more than 256 taps"));
     const float logged = strtof(strstr(lines[0], "below ") + 6, NULL);
-    assert(logged >= floor_ && logged - floor_ <= 1e-4f + 1e-6f * floor_);
+    assert(logged >= floor_ && logged - floor_ <= 1e-4f + 3e-6f * floor_);
     assert(PulDir_setJerk(a, logged) && PulDir_jerk(a) == logged);   /* the logged value fits */
-    assert(PulDir_setJerk(a, floor_));
 }
 
-/* The refused value of a jerk below the taps is the smallest that fits, and the
- * logged figure, rounded up, is accepted too (float rounding made both miss). */
+/* The refused value of a jerk below the taps is the floor as a plain quotient, and the logged
+ * figure, rounded up (at most 1e-4 and a few ulps above it), typed back, is accepted. */
 static void t_jerk_floor(void)
 {
     setup(1);
@@ -1477,13 +1476,12 @@ static void t_jerk_floor(void)
         nlines = 0;
         assert(!PulDir_setJerk(a, 0.5f * jmin) && a->refusal == PULDIR_R_TAPS);
         const float floor_ = a->refused_value;
+        assert(fabsf(floor_ - jmin) <= 1e-5f * jmin);
         PulDir_loop(a);
         assert(nlines == 1);
         const float logged = strtof(strstr(lines[0], "below ") + 6, NULL);
-        assert(logged >= floor_ && logged - floor_ <= 1e-4f + 1e-6f * floor_);
-        assert(!PulDir_setJerk(a, nextafterf(floor_, 0.0f)) && a->refusal == PULDIR_R_TAPS);
-        assert(PulDir_setJerk(a, floor_));
-        assert(PulDir_setJerk(a, 0.0f) && PulDir_setJerk(a, logged));
+        assert(logged >= floor_ && logged - floor_ <= 1e-4f + 3e-6f * floor_);
+        assert(PulDir_setJerk(a, logged) && PulDir_jerk(a) == logged);
         assert(PulDir_setJerk(a, 0.0f));
     }
 }
