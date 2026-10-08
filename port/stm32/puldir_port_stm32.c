@@ -20,9 +20,9 @@ void port_start(void (*pulse)(bool), void (*plan)(void))
 {
     pulse_fn = pulse;
     plan_fn = plan;
-    /* The core latches every N pulse ticks from the first; with a shared clock and a plan period
-     * of N pulse periods, zeroed counters put every plan tick just after a boundary. */
-    __HAL_TIM_SET_COUNTER(pulse_tim, 0);
+    /* The core latches on pulse ticks 1, N+1, ...: at ARR the pulse timer's first update is
+     * immediate, so each plan tick (period N pulses) lands on a latch tick and runs right after it. */
+    __HAL_TIM_SET_COUNTER(pulse_tim, __HAL_TIM_GET_AUTORELOAD(pulse_tim));
     __HAL_TIM_SET_COUNTER(plan_tim, 0);
     HAL_TIM_Base_Start_IT(pulse_tim);
     HAL_TIM_Base_Start_IT(plan_tim);

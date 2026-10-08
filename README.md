@@ -110,7 +110,7 @@ Timer setup, in CubeMX:
 - Both timers count up, same clock, update interrupt enabled, no output.
 - The pulse timer period is one tick: at a 144 MHz timer clock, 2880 clocks for 50 kHz, 720 for 200 kHz.
 - The plan timer period must be exactly N pulse periods, where N = `PULDIR_TICK_HZ / PULDIR_PLAN_HZ` (50 or 200 here). 144,000 clocks gives 1 kHz. If you change one period, change the other.
-- `port_start` zeroes both counters and starts the pulse timer, then the plan timer, so that the plan tick fires just after each interval boundary and has the whole interval to publish. This needs matching clocks and periods that divide exactly, and it depends on whether HAL leaves the update flag set when the timers start: step 6 of `docs/bench-step4.md` checks it.
+- `port_start` presets the pulse counter to its auto-reload value, so the first latch tick comes at start, zeroes the plan counter and starts both timers back to back. Each plan tick then lands on a latch tick and runs just after it, with the whole interval to publish. This needs the same timer clock and a plan period of exactly N pulse periods; step 6 of `docs/bench-step4.md` checks it on the board.
 
 Priorities (CubeMX, NVIC):
 
