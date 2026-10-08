@@ -101,7 +101,3 @@ void port_pin_write(puldir_pin_t p, bool level)
 }
 
 bool port_pin_read(puldir_pin_t p) { return (p.port->IDR & p.pin) != 0u; }
-
-/* Pin modes are CubeMX's business; only park the output at its idle level. */
-void port_pin_init_output(puldir_pin_t p, bool level) { port_pin_write(p, level); }
-void port_pin_init_input(puldir_pin_t p, bool pullup) { (void)p; (void)pullup; }

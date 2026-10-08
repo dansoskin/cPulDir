@@ -78,8 +78,8 @@ void PulDir_attachPins(PulDir* a, puldir_pin_t pulse, puldir_pin_t dir,
     a->pul_active_low = pulse_active_low;
     a->dir_inverted = dir_inverted;
     a->has_pins = true;
-    port_pin_init_output(pulse, pulse_active_low);        /* inactive */
-    port_pin_init_output(dir, !dir_inverted);             /* the level for +1 */
+    port_pin_write(pulse, pulse_active_low);              /* parked inactive, before the ticks run */
+    port_pin_write(dir, !dir_inverted);                   /* the level for +1 */
 }
 
 /* The enable, fault and clear pins: setup, before PulDir_start. The outputs are
@@ -90,7 +90,7 @@ void PulDir_attachEnable(PulDir* a, puldir_pin_t p, bool inverted)
     a->ena_inverted = inverted;
     a->has_ena = true;
     a->enabled = false;
-    port_pin_init_output(p, inverted);
+    port_pin_write(p, inverted);
 }
 
 void PulDir_attachFault(PulDir* a, puldir_pin_t p, bool inverted)
@@ -98,7 +98,6 @@ void PulDir_attachFault(PulDir* a, puldir_pin_t p, bool inverted)
     a->flt = p;
     a->flt_inverted = inverted;
     a->has_flt = true;
-    port_pin_init_input(p, false);
 }
 
 void PulDir_attachFaultClear(PulDir* a, puldir_pin_t p, bool inverted)
@@ -106,7 +105,7 @@ void PulDir_attachFaultClear(PulDir* a, puldir_pin_t p, bool inverted)
     a->clr = p;
     a->clr_inverted = inverted;
     a->has_clr = true;
-    port_pin_init_output(p, inverted);
+    port_pin_write(p, inverted);
 }
 
 /* A duration the plan tick can compare by unsigned subtraction. */

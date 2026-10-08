@@ -45,13 +45,12 @@ void fake_on_write(fake_write_fn fn)         { on_write = fn; }
 void fake_on_plan(fake_plan_fn fn)           { on_plan = fn; }
 void fake_on_lock(void (*fn)(void))          { on_lock = fn; }
 
-void port_pin_init_output(puldir_pin_t p, bool lvl) { assert(p.id < FAKE_PINS); level[p.id] = lvl; }
-void port_pin_init_input(puldir_pin_t p, bool pullup) { assert(p.id < FAKE_PINS); (void)pullup; }
-
 void port_pin_write(puldir_pin_t p, bool lvl)
 {
     assert(p.id < FAKE_PINS);
-    assert(!motion[p.id] || in_pulse);  /* pulse and direction pins belong to the pulse tick (D17) */
+    /* Pulse and direction pins belong to the pulse tick (D17) once the ticks
+     * run; before port_start the attach calls park them. */
+    assert(!motion[p.id] || in_pulse || pulse_cb == NULL);
     level[p.id] = lvl;
     if (on_write)
         on_write(PulDir_ticks(), p.id, lvl);
