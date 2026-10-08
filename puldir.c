@@ -257,26 +257,24 @@ float PulDir_jerk(PulDir* a)                     { return a->lim[3]; }
 
 /* ---- motion ---------------------------------------------------------------- */
 
-static bool motion_refused(PulDir* a, const char* call)
+/* Under the lock, for every motion command: the fault latch and the mode at one instant, so a
+ * latch the plan tick closes between a check and the store cannot slip through (D17). */
+static PulDirRefusal motion_check(const PulDir* a)
 {
     const PulDirMode m = a->mode;
-    PulDirRefusal why = PULDIR_R_NONE;
-    if (a->fault)
-        why = PULDIR_R_FAULT;
-    else if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
-        why = PULDIR_R_MODE;
-    if (why == PULDIR_R_NONE)
-        return false;
-    puldir_refuse(a, call, why, 0.0f);
-    return true;
-}
-
-/* Under the lock: what the caller may read back at once is set here (D17). The
- * fault latch is read again: the plan tick may have latched since the check. */
-static PulDirRefusal take_target(PulDir* a, uint64_t target)
-{
     if (a->fault)
         return PULDIR_R_FAULT;
+    if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
+        return PULDIR_R_MODE;
+    return PULDIR_R_NONE;
+}
+
+/* Under the lock: what the caller may read back at once is set here (D17). */
+static PulDirRefusal take_target(PulDir* a, uint64_t target)
+{
+    const PulDirRefusal why = motion_check(a);
+    if (why != PULDIR_R_NONE)
+        return why;
     a->target = target;
     a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_TARGET);
     a->mode = PULDIR_MODE_PROFILE;
@@ -288,8 +286,6 @@ static PulDirRefusal take_target(PulDir* a, uint64_t target)
 /* Targets are whole pulses (D4). */
 bool PulDir_moveTo(PulDir* a, float position)
 {
-    if (motion_refused(a, "moveTo"))
-        return false;
     const float x = roundf(position * a->conv);
     PulDirRefusal why = PULDIR_R_ARG;
     if (x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX) {
@@ -306,8 +302,6 @@ bool PulDir_moveTo(PulDir* a, float position)
 
 bool PulDir_moveBy(PulDir* a, float distance)
 {
-    if (motion_refused(a, "moveBy"))
-        return false;
     const float dx = roundf(distance * a->conv);
     PulDirRefusal why = PULDIR_R_ARG;
     if (dx >= -2.0f * PULDIR_PULSES_MAX && dx <= 2.0f * PULDIR_PULSES_MAX) {   /* finite, and the sum fits */
@@ -326,39 +320,35 @@ bool PulDir_moveBy(PulDir* a, float distance)
 }
 
 /* D7: run at speed until told otherwise; the count carries on (2.2). jog(0) is a stop, refused
- * wherever any jog is (5.5), so a jog never ends a STREAM. */
+ * wherever any jog is (5.5), so a jog never ends a STREAM: PulDir_stop's two stores, under the
+ * same check. */
 bool PulDir_jog(PulDir* a, float speed)
 {
-    if (motion_refused(a, "jog"))
-        return false;
-    if (speed == 0.0f) {
-        PulDir_stop(a);
-        return true;
-    }
     const float cap = rate_cap(a->conv);
     PulDirRefusal why = PULDIR_R_NONE;
-    if (!isfinite(speed))
+    if (!isfinite(speed)) {
         why = PULDIR_R_ARG;
-    else if (!(fabsf(speed) < cap))
+    } else if (!(fabsf(speed) < cap)) {
         why = PULDIR_R_RATE;
+    } else {
+        port_lock();
+        why = motion_check(a);
+        if (why == PULDIR_R_NONE && speed == 0.0f) {
+            if (a->mode != PULDIR_MODE_IDLE) {
+                a->req |= REQ_STOP;
+                a->mode = PULDIR_MODE_STOPPING;
+            }
+        } else if (why == PULDIR_R_NONE) {
+            a->req_speed = speed * a->conv;
+            a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
+            a->mode = PULDIR_MODE_PROFILE;
+            a->moving = true;
+            puldir_wake(a);
+        }
+        port_unlock();
+    }
     if (why != PULDIR_R_NONE) {
         puldir_refuse(a, "jog", why, why == PULDIR_R_RATE ? cap : 0.0f);
-        return false;
-    }
-    const float v = speed * a->conv;
-    port_lock();
-    if (a->fault) {
-        why = PULDIR_R_FAULT;
-    } else {
-        a->req_speed = v;
-        a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
-        a->mode = PULDIR_MODE_PROFILE;
-        a->moving = true;
-        puldir_wake(a);
-    }
-    port_unlock();
-    if (why != PULDIR_R_NONE) {
-        puldir_refuse(a, "jog", why, 0.0f);
         return false;
     }
     return true;
@@ -458,14 +448,9 @@ bool PulDir_enable(PulDir* a, bool on)
  * velocity as the stream's and starts the timeout, so the call itself changes no motion. */
 bool PulDir_streamBegin(PulDir* a)
 {
-    PulDirRefusal why = PULDIR_R_NONE;
     port_lock();
-    const PulDirMode m = a->mode;
-    if (a->fault) {
-        why = PULDIR_R_FAULT;
-    } else if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING) {
-        why = PULDIR_R_MODE;
-    } else {
+    const PulDirRefusal why = motion_check(a);
+    if (why == PULDIR_R_NONE) {
         a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_STREAM_BEGIN);
         a->mode = PULDIR_MODE_STREAM;
         a->moving = true;
