@@ -20,7 +20,7 @@ typedef struct {
 /* main -> plan requests (D17): set under the lock, applied by the next plan tick */
 enum {
     REQ_LIMITS = 1u << 0, REQ_TARGET = 1u << 1, REQ_ENDLESS = 1u << 2, REQ_STOP = 1u << 3,
-    REQ_HALT = 1u << 4, REQ_SETPOS = 1u << 5, REQ_STREAM_BEGIN = 1u << 6, REQ_STREAM_END = 1u << 7,
+    REQ_HALT = 1u << 4, REQ_SETPOS = 1u << 5, REQ_STREAM_BEGIN = 1u << 6,
     REQ_HOME = 1u << 8, REQ_HOME_STOP = 1u << 9
 };
 

@@ -135,7 +135,10 @@ static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
         /* sp_pos - P_b as (whole part - count) + (sp_pos's fraction) - frac: each
          * term is exact or small. PulDir_stream keeps |sp_pos| below 2^31. */
         const int32_t k = (int32_t)a->sp_pos;
-        const float age = (float)(uint32_t)(t_b - a->sp_tick) * (1.0f / (float)PULDIR_TICK_HZ);
+        /* A setpoint stamped after the snapshot (a caller outside main context)
+         * is taken as of now: its age is clamped at zero, never wrapped. */
+        const int32_t ticks_old = (int32_t)(t_b - a->sp_tick);
+        const float age = (float)(ticks_old > 0 ? ticks_old : 0) * (1.0f / (float)PULDIR_TICK_HZ);
         const float err = (float)((int64_t)k - (int64_t)count) + (a->sp_pos - (float)k)
                         + a->sp_vel * age - frac;
         a->stream_err = err;
@@ -206,7 +209,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
      * timeout. A move accepted in STOPPING after it starts from the seeded motion. */
     if (a->stream_live && a->mode != PULDIR_MODE_STREAM) {
         leave_stream(a, pb);
-    } else if (a->mode == PULDIR_MODE_STREAM && now - a->sp_tick >= TIMEOUT_TICKS) {
+    } else if (a->mode == PULDIR_MODE_STREAM && (int32_t)(now - a->sp_tick) >= (int32_t)TIMEOUT_TICKS) {
         a->mode = PULDIR_MODE_STOPPING;         /* at the axis's decel, without the defaults */
         a->stream_timed_out = true;
         a->events |= PULDIR_EV_STREAM_TIMEOUT;

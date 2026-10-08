@@ -1642,10 +1642,10 @@ static double rate_slope(size_t from, double lo, double hi)
 }
 
 /* Setpoints on the line p0 + v t (user units), one per plan interval, `offset`
- * ticks after each plan tick, for `ms` milliseconds. */
-static void stream_line(PulDir* a, double p0, double v, uint32_t ms, uint32_t offset)
+ * ticks after each plan tick, for `ms` milliseconds. Returns the last one's tick. */
+static uint32_t stream_line(PulDir* a, double p0, double v, uint32_t ms, uint32_t offset)
 {
-    uint32_t since = N, t0 = 0;
+    uint32_t since = N, t0 = 0, last = 0;
     bool first = true;
     for (uint32_t k = 0; k < ms * MS; k++) {
         if (tick1())
@@ -1660,8 +1660,10 @@ static void stream_line(PulDir* a, double p0, double v, uint32_t ms, uint32_t of
             }
             const double t = (double)(uint32_t)(now - t0) / (double)PULDIR_TICK_HZ;
             PulDir_stream(a, (float)(p0 + v * t), (float)v);
+            last = now;
         }
     }
+    return last;
 }
 
 /* Test 12: follow p(t) = A (1 - cos wt) for 10 s, setpoints at sp_hz arriving
@@ -1854,7 +1856,7 @@ static void t_stream_timeout(void)
 
     /* streamBegin restores service: 1,000 pulses/s for 200 ms */
     assert(PulDir_streamBegin(a) && !PulDir_streamTimedOut(a) && PulDir_inStream(a));
-    stream_line(a, (double)c, 1000.0, 200u, 11u);
+    (void)stream_line(a, (double)c, 1000.0, 200u, 11u);
     assert(PulDir_inStream(a) && !PulDir_streamTimedOut(a));
     const int32_t moved = st(0).count - c;
     assert(moved >= 196 && moved <= 201);
@@ -1881,17 +1883,22 @@ static void t_stream_end(void)
         fake_run(N);
         const double p0 = (double)PulDir_position(a);
         assert(PulDir_streamBegin(a));
-        stream_line(a, p0, 60.0, 300u, 11u);      /* 6,000 pulses/s, above the default speed */
+        (void)stream_line(a, p0, 60.0, 300u, 11u);      /* 6,000 pulses/s, above the default speed */
         assert(PulDir_inStream(a) && fabsf(PulDir_velocity(a) - 60.0f) < 0.05f);
         assert(fabsf(PulDir_streamError(a)) < 0.01f);
         nrise = 0;
         const uint32_t d0 = dirw[0];
+        const int32_t c_end = st(0).count;
+        const float v_end = a->v_cmd;             /* pulses/s */
+        const uint32_t t_end = PulDir_ticks();
         PulDir_streamEnd(a);
         assert(!PulDir_inStream(a) && a->mode == PULDIR_MODE_STOPPING && PulDir_isMoving(a));
         assert(PulDir_speed(a) == 50.0f && PulDir_acceleration(a) == 200.0f);
         assert(PulDir_deceleration(a) == 300.0f && PulDir_jerk(a) == jerk);
         while (!tick1())                          /* the plan tick that applies it */
             ;
+        /* ticks at v_end before the seeded set latches: to this plan tick, then to its boundary */
+        const uint32_t run_on = (PulDir_ticks() - t_end) + left() % N;
         assert(a->prof.lim.vmax == 5000.0f && a->prof.lim.dmax == 30000.0f);
         assert(a->prof.lim.jmax == jerk * 100.0f && !a->prof.done);
         const float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
@@ -1902,6 +1909,15 @@ static void t_stream_end(void)
         assert(PulDir_target(a) == PulDir_position(a) && dirw[0] == d0);
         check_rest(0, 1);
         if (!round) {
+            /* The seed, independent of the generator's own stopDistance: from the
+             * pre-end count, the run-on at v_end, then v^2 / (2 dmax) less the
+             * discrete stop's v dt / 2 (its first step already sheds dmax dt). */
+            const float dt = 1.0f / (float)PULDIR_PLAN_HZ;
+            const float seeded = (float)c_end + v_end * (float)run_on / (float)PULDIR_TICK_HZ
+                               + v_end * v_end / (2.0f * 30000.0f) - v_end * dt / 2.0f;
+            printf("  stream_end: stopped %.2f pulses from the pre-end count + run-on + v^2/2d\n",
+                   (double)((float)c - seeded));
+            assert(fabsf((float)c - seeded) <= 4.0f);
             const double slope = rate_slope(0, 1000.0, 5000.0);
             printf("  stream_end: edge-rate slope %.0f pulses/s^2 (default dmax 30000)\n", slope);
             assert(fabs(slope + 30000.0) <= 0.05 * 30000.0);
@@ -1950,6 +1966,9 @@ static void t_stream_transitions(void)
     assert(!PulDir_moveBy(a, 100.0f) && a->refusal == PULDIR_R_MODE);
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_jog(a, 100.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_jog(a, 0.0f) && a->refusal == PULDIR_R_MODE);   /* jog(0) too: not a way out */
+    assert(a->mode == PULDIR_MODE_STREAM && !(a->req & REQ_STOP));
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE);
     a->refusal = PULDIR_R_NONE;
@@ -2030,7 +2049,7 @@ static void t_stream_transitions(void)
 
     /* and streams again from rest: a setpoint where the axis is moves nothing */
     assert(PulDir_streamBegin(a));
-    stream_line(a, (double)ch, 0.0, 20u, 3u);
+    (void)stream_line(a, (double)ch, 0.0, 20u, 3u);
     assert(st(0).count == ch && edges[0] == e0);
     PulDir_streamEnd(a);
     run_until_idle(a, PULDIR_TICK_HZ);
@@ -2120,6 +2139,122 @@ static void t_request_order(void)
     }
 }
 
+/* 5.6: the configured speed limit bounds the stream, live. Setpoints asking for
+ * twice the limit move the axis at the limit, never faster. */
+static void t_stream_speed_limit(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    PulDir* a = &ax[0];
+    assert(PulDir_setDefaults(a, 2000.0f, 50000.0f, 50000.0f, 0.0f));
+    fake_run(N);
+    assert(PulDir_streamBegin(a));
+    nrise = 0;
+    (void)stream_line(a, 0.0, 4000.0, 200u, 11u);
+    assert(PulDir_inStream(a) && PulDir_velocity(a) == 2000.0f);
+    const uint32_t g = PULDIR_TICK_HZ / 2000u;
+    assert(nrise > 350);
+    for (size_t i = 1; i < nrise; i++)
+        assert(rise[i] - rise[i - 1u] >= g);      /* never above 2,000 pulses/s */
+    const int32_t c = st(0).count;
+    assert(c >= 395 && c <= 401);                 /* 200 ms at the limit, not at 4,000 */
+    assert(PulDir_streamError(a) > 300.0f);       /* the setpoints run away; the axis does not */
+
+    /* lowered mid-stream, setpoints still running away: obeyed from the set after next */
+    assert(PulDir_setSpeed(a, 1000.0f));
+    const uint32_t t_low = PulDir_ticks();
+    const size_t from = nrise;
+    (void)stream_line(a, 1000.0, 4000.0, 100u, 11u);
+    assert(PulDir_velocity(a) == 1000.0f);
+    size_t checked = 0;
+    for (size_t i = from + 1u; i < nrise; i++)
+        if (rise[i - 1u] - t_low >= 2u * N) {
+            assert(rise[i] - rise[i - 1u] >= 2u * g);
+            checked++;
+        }
+    assert(checked > 80);
+    PulDir_streamEnd(a);
+    run_until_idle(a, PULDIR_TICK_HZ);
+}
+
+/* Test 13 after real setpoints: the timeout counts from the last one, and the
+ * stop is v^2 / (2 dmax) from where the axis is when it fires. */
+static void t_stream_loss(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    PulDir_attachLogger(logger);
+    PulDir* a = &ax[0];
+    const float dmax = 50000.0f, v = 3000.0f;
+    assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, dmax, 0.0f));
+    fake_run(N);
+    assert(PulDir_streamBegin(a));
+    const uint32_t last = stream_line(a, 0.0, (double)v, 400u, 11u);
+    assert(PulDir_inStream(a) && fabsf(PulDir_velocity(a) - v) < 1.0f);
+
+    /* fed no more: the hold carries the axis on at v until the timeout */
+    nrise = 0;
+    while (PulDir_inStream(a)) {
+        fake_run(1);
+        assert(PulDir_ticks() - last < 110u * MS);
+    }
+    const uint32_t fired = PulDir_ticks() - last, lim = PULDIR_STREAM_TIMEOUT_MS * MS;
+    assert(fired >= lim && fired <= lim + N);
+    assert(a->mode == PULDIR_MODE_STOPPING && PulDir_streamTimedOut(a));
+    check_gaps(0, PULDIR_TICK_HZ / 3000u);        /* still at v, within a tick */
+    const int32_t c0 = st(0).count;
+    const uint32_t ahead = left() % N;            /* the stream's last set runs on this long */
+    const uint32_t d0 = dirw[0];
+    run_until_idle(a, PULDIR_TICK_HZ);
+    const int32_t c = st(0).count;
+    const float dt = 1.0f / (float)PULDIR_PLAN_HZ;
+    const float want = (float)c0 + v * (float)ahead / (float)PULDIR_TICK_HZ
+                     + v * v / (2.0f * dmax) - v * dt / 2.0f;
+    printf("  stream_loss: timed out %.2f ms after the last setpoint, stopped in %d pulses "
+           "(v^2/2d = %.0f), %.2f from the expected count\n",
+           (double)fired * 1000.0 / (double)PULDIR_TICK_HZ, (int)(c - c0),
+           (double)(v * v / (2.0f * dmax)), (double)((float)c - want));
+    assert(fabsf((float)c - want) <= 3.0f);
+    assert(a->mode == PULDIR_MODE_IDLE && dirw[0] == d0);
+    check_rest(0, 1);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 2 && strcmp(lines[0], "[a0] stream timed out") == 0);
+}
+
+/* streamEnd then streamBegin before the plan tick sees either: the stream goes
+ * on at its own velocity (not the idle generator's zero), with the defaults that
+ * streamEnd restored. */
+static void t_stream_end_begin(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    PulDir* a = &ax[0];
+    assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, 50000.0f, 0.0f));
+    assert(PulDir_setDeceleration(a, 20000.0f));
+    fake_run(N);
+    assert(PulDir_streamBegin(a));
+    (void)stream_line(a, 0.0, 3000.0, 400u, 11u);
+    while (!tick1())                              /* just after a plan tick */
+        ;
+    const float v = PulDir_velocity(a);
+    assert(fabsf(v - 3000.0f) < 1.0f && a->prof.done && a->prof.vel == 0.0f);
+    PulDir_streamEnd(a);
+    assert(PulDir_deceleration(a) == 50000.0f && a->mode == PULDIR_MODE_STOPPING);
+    assert(PulDir_streamBegin(a) && PulDir_inStream(a));
+    nrise = 0;
+    for (uint32_t k = 0; k < 50u * MS; k++) {    /* no setpoint: the velocity it had */
+        fake_run(1);
+        assert(PulDir_inStream(a) && PulDir_velocity(a) == v);
+    }
+    check_gaps(0, PULDIR_TICK_HZ / 3000u);
+    assert(a->prof.done && a->prof.lim.dmax == 50000.0f && !a->arrived);
+    PulDir_streamEnd(a);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(a->mode == PULDIR_MODE_IDLE);
+    check_rest(0, 1);
+}
+
 /* ---- the case table ------------------------------------------------------------------------ */
 
 static const struct { const char* name; void (*fn)(void); } cases[] = {
@@ -2156,6 +2291,9 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "stream_timeout", t_stream_timeout },
     { "stream_end", t_stream_end },
     { "stream_transitions", t_stream_transitions },
+    { "stream_speed_limit", t_stream_speed_limit },
+    { "stream_loss", t_stream_loss },
+    { "stream_end_begin", t_stream_end_begin },
     { "jerk_floor", t_jerk_floor },
     { "request_order", t_request_order },
 };

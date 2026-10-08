@@ -254,15 +254,17 @@ bool PulDir_moveBy(PulDir* a, float distance)
     return ok;
 }
 
-/* D7: run at speed until told otherwise. The count carries on (2.2). */
+/* D7: run at speed until told otherwise. The count carries on (2.2). jog(0) is
+ * a stop, but refused wherever any jog is (5.5), so STREAM is left by streamEnd
+ * or stop, never by a jog. */
 bool PulDir_jog(PulDir* a, float speed)
 {
+    if (motion_refused(a, "jog"))
+        return false;
     if (speed == 0.0f) {
         PulDir_stop(a);
         return true;
     }
-    if (motion_refused(a, "jog"))
-        return false;
     const float cap = (float)(PULDIR_TICK_HZ / 2u) / a->conv;
     PulDirRefusal why = PULDIR_R_NONE;
     if (!isfinite(speed))
@@ -306,7 +308,7 @@ void PulDir_halt(PulDir* a)
         puldir_pulse_read(a->slot, &s);
         a->target = (uint64_t)(uint32_t)s.count << 32;
     }
-    a->req = (uint16_t)((a->req & ~(REQ_MOTION | REQ_STREAM_BEGIN | REQ_STREAM_END)) | REQ_HALT);
+    a->req = (uint16_t)((a->req & ~(REQ_MOTION | REQ_STREAM_BEGIN)) | REQ_HALT);
     a->mode = PULDIR_MODE_IDLE;
     a->vel_out = 0.0f;
     port_unlock();
@@ -327,7 +329,7 @@ bool PulDir_streamBegin(PulDir* a)
     } else if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING) {
         why = PULDIR_R_MODE;
     } else {
-        a->req = (uint16_t)((a->req & ~(REQ_MOTION | REQ_STREAM_END)) | REQ_STREAM_BEGIN);
+        a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_STREAM_BEGIN);
         a->mode = PULDIR_MODE_STREAM;
         a->moving = true;
         a->stream_timed_out = false;
@@ -351,7 +353,9 @@ bool PulDir_streamBegin(PulDir* a)
  * digits. Beyond 2^24 pulses (16.8 million) from the datum the setpoint itself
  * is quantised to a whole pulse or more, before the library sees it; the plan
  * tick's error arithmetic is exact relative to it, but cannot restore what the
- * float has lost. */
+ * float has lost.
+ *
+ * Main context only (5.9): the plan tick relies on sp_tick never being ahead of its own reading. */
 void PulDir_stream(PulDir* a, float position, float velocity)
 {
     const float p = position * a->conv, v = velocity * a->conv;
@@ -378,7 +382,7 @@ void PulDir_streamEnd(PulDir* a)
     port_lock();
     if (a->mode == PULDIR_MODE_STREAM) {
         memcpy(a->lim, a->def, sizeof a->lim);   /* validated when set; fixed in pulses since */
-        a->req |= REQ_LIMITS | REQ_STREAM_END;
+        a->req |= REQ_LIMITS;                 /* the plan tick sees STOPPING and leaves */
         a->mode = PULDIR_MODE_STOPPING;
     }
     port_unlock();
