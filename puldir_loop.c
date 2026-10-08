@@ -126,6 +126,10 @@ void PulDir_loop(PulDir* a)
         }
         logger(b);
     }
+    if (ev & PULDIR_EV_STREAM_TIMEOUT) {
+        (void)put(b, head(b, a), "stream timed out");
+        logger(b);
+    }
     if (ev & PULDIR_EV_LANDED) {
         size_t at = head(b, a);
         at = put(b, at, "landed at ");

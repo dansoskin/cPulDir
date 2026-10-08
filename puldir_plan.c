@@ -6,6 +6,8 @@
 #define M   (N * N)                             /* D6 margin, in 2^-32 pulse */
 #define FIX 4294967296.0f                       /* one pulse in 32.32 */
 #define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
+#define DT  (1.0f / (float)PULDIR_PLAN_HZ)      /* the profile's dt, the same expression as init's */
+#define TIMEOUT_TICKS ((uint32_t)((uint64_t)PULDIR_STREAM_TIMEOUT_MS * PULDIR_TICK_HZ / 1000u))
 
 static int64_t to_fix(float pulses) { return (int64_t)(pulses * FIX); }
 
@@ -104,8 +106,52 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
     }
 }
 
+/* Leave STREAM for STOPPING (5.6): the idle generator is put in motion at the
+ * stream's velocity through the boundary position, then stopped at its decel. */
+static void leave_stream(PulDir* a, int64_t pb)
+{
+    /* The generator was halted by streamBegin and stays done: seed accepts. */
+    (void)MotionProfile_seed(&a->prof, to_pulses(pb), a->v_cmd);
+    MotionProfile_stop(&a->prof);
+    a->stream_live = false;
+    a->arrived = false;                         /* a new course (E17) */
+    a->settle = 0;
+}
+
+/* STREAM: feedforward plus proportional catch-up toward the first-order hold,
+ * evaluated at t_b, the boundary where the set published now takes over. pb is
+ * P_b relative to count, so no large float is subtracted from another. */
+static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t count,
+                       uint32_t t_b)
+{
+    const float frac = (float)pb * (1.0f / FIX);
+    if (a->sp_have) {
+        /* sp_pos - P_b as (whole part - count) + (sp_pos's fraction) - frac: each
+         * term is exact or small. PulDir_stream keeps |sp_pos| below 2^31. */
+        const int32_t k = (int32_t)a->sp_pos;
+        const float age = (float)(uint32_t)(t_b - a->sp_tick) * (1.0f / (float)PULDIR_TICK_HZ);
+        const float err = (float)((int64_t)k - (int64_t)count) + (a->sp_pos - (float)k)
+                        + a->sp_vel * age - frac;
+        a->stream_err = err;
+        a->v_cmd = a->sp_vel + err * (1000.0f / (float)a->catchup_ms);
+    }
+    /* Specified behaviour (5.6), not input clamping: in STREAM the configured
+     * speed limit bounds v_cmd, and it lies below the tick ceiling. */
+    const float vmax = a->lim[0] * a->conv;
+    if (a->v_cmd > vmax)
+        a->v_cmd = vmax;
+    else if (a->v_cmd < -vmax)
+        a->v_cmd = -vmax;
+
+    const int32_t inc = div_trunc(to_fix(a->v_cmd * DT));
+    publish(a, out, inc);
+    a->vel_out = a->v_cmd;
+    a->target = base + (uint64_t)(pb + (int64_t)inc * N);   /* the aim, as a jog reads it */
+    (void)MotionProfile_setPosition(&a->prof, frac);        /* the idle generator follows the pulses */
+}
+
 static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int32_t live,
-                     bool pul_high)
+                     bool pul_high, uint32_t now, uint32_t ahead)
 {
     /* 1. Re-base on the whole pulses emitted. */
     const uint64_t base = (uint64_t)(uint32_t)count << 32;
@@ -119,23 +165,47 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     MotionProfile_rebase(&a->prof, (float)shift, trel);
 
     /* 3. Requests (main writes req under the lock, which masks this tick). Halt
-     * first, so later commands start where the pulses stopped; a stop last. */
+     * first, so later commands start where the pulses stopped; then a stream
+     * begins, so limits reach an idle generator; a stop last. */
     const uint16_t req = a->req;
     a->req = 0;
-    if (req & REQ_LIMITS) {
-        const float c = a->conv;
-        const MotionLimits L = { a->lim[0] * c, a->lim[1] * c, a->lim[2] * c, a->lim[3] * c };
-        (void)MotionProfile_setLimits(&a->prof, L);  /* validated the same way by apply_limits */
-    }
     if (req & REQ_HALT) {
         /* puldir_kill zeroed the increments, so pb is where the pulses stopped */
         MotionProfile_halt(&a->prof);
         (void)MotionProfile_setPosition(&a->prof, to_pulses(pb));
         a->arrived = false;
         a->settle = 0;
+        a->stream_live = false;
+    }
+    if (req & REQ_STREAM_BEGIN) {
+        /* The stream starts at the velocity the running set was aimed with (a
+         * stream still live, ended and begun within one interval, keeps its own).
+         * The generator stays idle, where the pulses are, until the stream ends. */
+        if (!a->stream_live)
+            a->v_cmd = a->prof.vel;
+        MotionProfile_halt(&a->prof);
+        (void)MotionProfile_setPosition(&a->prof, to_pulses(pb));
+        a->stream_live = true;
+        a->arrived = false;                     /* the generator's goal is gone (E17) */
+        a->settle = 0;
+    }
+    if (req & REQ_LIMITS) {
+        const float c = a->conv;
+        const MotionLimits L = { a->lim[0] * c, a->lim[1] * c, a->lim[2] * c, a->lim[3] * c };
+        (void)MotionProfile_setLimits(&a->prof, L);  /* validated the same way by apply_limits */
     }
     if (req & REQ_SETPOS)                       /* the datum is count, which is the origin */
         (void)MotionProfile_setPosition(&a->prof, 0.0f);
+    /* streamEnd (its defaults applied just above) or stop left STREAM; so does the
+     * timeout. A move accepted in STOPPING after it starts from the seeded motion. */
+    if (a->stream_live && a->mode != PULDIR_MODE_STREAM) {
+        leave_stream(a, pb);
+    } else if (a->mode == PULDIR_MODE_STREAM && now - a->sp_tick >= TIMEOUT_TICKS) {
+        a->mode = PULDIR_MODE_STOPPING;         /* at the axis's decel, without the defaults */
+        a->stream_timed_out = true;
+        a->events |= PULDIR_EV_STREAM_TIMEOUT;
+        leave_stream(a, pb);
+    }
     if (req & (REQ_TARGET | REQ_ENDLESS)) {
         if (req & REQ_TARGET)
             (void)MotionProfile_setTarget(&a->prof, trel);
@@ -151,6 +221,9 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     case PULDIR_MODE_PROFILE:
     case PULDIR_MODE_STOPPING:
         run_profile(a, out, base, pb, live, pul_high);
+        break;
+    case PULDIR_MODE_STREAM:
+        run_stream(a, out, base, pb, count, now + ahead);
         break;
     case PULDIR_MODE_IDLE:
         publish(a, out, 0);
@@ -175,6 +248,7 @@ void puldir_plan_tick(void)
     /* Ticks the live increments still run before the next latch. At a boundary
      * (left == N) the set published below latches on the very next tick, so none. */
     const uint32_t ahead = puldir_left() % (uint32_t)N;
+    const uint32_t now = PulDir_ticks();        /* the tick count P was read at */
     for (uint8_t i = 0; i < n; i++) {
         puldir_pulse_read(i, &s[i]);
         high[i] = puldir_pul_high(i);
@@ -184,7 +258,7 @@ void puldir_plan_tick(void)
     PulDirInc* out = puldir_shadow();
     for (uint8_t i = 0; i < n; i++) {
         const uint64_t Pb = s[i].P + (uint64_t)((int64_t)s[i].inc * ahead);   /* D5 prediction */
-        run_axis(puldir_axes[i], &out[i], Pb, s[i].count, s[i].inc, high[i]);
+        run_axis(puldir_axes[i], &out[i], Pb, s[i].count, s[i].inc, high[i], now, ahead);
     }
     puldir_publish();
 }

@@ -288,10 +288,107 @@ void PulDir_halt(PulDir* a)
         puldir_pulse_read(a->slot, &s);
         a->target = (uint64_t)(uint32_t)s.count << 32;
     }
-    a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_HALT);
+    a->req = (uint16_t)((a->req & ~(REQ_MOTION | REQ_STREAM_BEGIN | REQ_STREAM_END)) | REQ_HALT);
     a->mode = PULDIR_MODE_IDLE;
     a->vel_out = 0.0f;
     port_unlock();
+}
+
+/* ---- stream (5.6) ---------------------------------------------------------- */
+
+/* From IDLE, PROFILE or STOPPING. The plan tick takes the velocity the axis has
+ * as the stream's, halts the generator and starts the timeout: the call itself
+ * changes nothing in the motion. A pending move or stop gives way to it. */
+bool PulDir_streamBegin(PulDir* a)
+{
+    PulDirRefusal why = PULDIR_R_NONE;
+    port_lock();
+    const PulDirMode m = a->mode;
+    if (a->fault) {
+        why = PULDIR_R_FAULT;
+    } else if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING) {
+        why = PULDIR_R_MODE;
+    } else {
+        a->req = (uint16_t)((a->req & ~(REQ_MOTION | REQ_STREAM_END)) | REQ_STREAM_BEGIN);
+        a->mode = PULDIR_MODE_STREAM;
+        a->moving = true;
+        a->stream_timed_out = false;
+        a->stream_err = 0.0f;
+        a->sp_tick = PulDir_ticks();        /* the timeout runs from here until a setpoint */
+        a->sp_have = false;
+    }
+    port_unlock();
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "streamBegin", why, 0.0f);
+        return false;
+    }
+    return true;
+}
+
+/* One setpoint: where the axis should be now, and how fast it moves there. One
+ * lock and four stores; the plan tick does the arithmetic. Outside STREAM it is
+ * dropped and never starts a stream.
+ *
+ * Precision: sp_pos is a float in pulses and carries about seven significant
+ * digits. Beyond 2^24 pulses (16.8 million) from the datum the setpoint itself
+ * is quantised to a whole pulse or more, before the library sees it; the plan
+ * tick's error arithmetic is exact relative to it, but cannot restore what the
+ * float has lost. */
+void PulDir_stream(PulDir* a, float position, float velocity)
+{
+    const float p = position * a->conv, v = velocity * a->conv;
+    bool ok = isfinite(v) && p >= -PULSES_MAX && p < PULSES_MAX;   /* false for NaN */
+    if (ok) {
+        port_lock();
+        ok = a->mode == PULDIR_MODE_STREAM;
+        if (ok) {
+            a->sp_pos = p;
+            a->sp_vel = v;
+            a->sp_tick = PulDir_ticks();
+            a->sp_have = true;
+        }
+        port_unlock();
+    }
+    if (!ok)
+        puldir_refuse(a, "stream", PULDIR_R_DROPPED, 0.0f);
+}
+
+/* In STREAM only: the defaults first, then a stop from the stream's velocity
+ * under them (the plan tick seeds the idle generator and stops it). */
+void PulDir_streamEnd(PulDir* a)
+{
+    port_lock();
+    if (a->mode == PULDIR_MODE_STREAM) {
+        memcpy(a->lim, a->def, sizeof a->lim);   /* validated when set; fixed in pulses since */
+        a->req |= REQ_LIMITS | REQ_STREAM_END;
+        a->mode = PULDIR_MODE_STOPPING;
+    }
+    port_unlock();
+}
+
+bool  PulDir_inStream(PulDir* a)       { return a->mode == PULDIR_MODE_STREAM; }
+bool  PulDir_streamTimedOut(PulDir* a) { return a->stream_timed_out; }
+float PulDir_streamError(PulDir* a)    { return a->stream_err / a->conv; }
+
+/* D11: at least five plan intervals (5.6), and not while streaming. */
+bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
+{
+    PulDirRefusal why = PULDIR_R_NONE;
+    if ((uint64_t)ms * PULDIR_PLAN_HZ < 5000u) {
+        why = PULDIR_R_ARG;
+    } else {
+        port_lock();
+        if (a->mode == PULDIR_MODE_STREAM)
+            why = PULDIR_R_MODE;
+        else
+            a->catchup_ms = ms;
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "setStreamCatchup", why, 0.0f);
+        return false;
+    }
+    return true;
 }
 
 /* ---- state ----------------------------------------------------------------- */

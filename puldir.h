@@ -97,11 +97,13 @@ typedef struct PulDir {
     int8_t   approach;                   /* the side the final interval came from: +1, -1, 0 */
 
     /* stream */
-    float sp_pos, sp_vel;                /* pulses, pulses/s */
-    uint32_t sp_tick;
+    float sp_pos, sp_vel;                /* pulses, pulses/s; the last setpoint */
+    uint32_t sp_tick;                    /* its arrival tick, or streamBegin's before the first */
+    bool  sp_have;                       /* a setpoint has arrived since streamBegin */
+    bool  stream_live;                   /* plan tick: the generator is idle under the stream */
     volatile bool stream_timed_out;
     float v_cmd;                         /* pulses/s */
-    volatile float stream_err;           /* pulses */
+    volatile float stream_err;           /* pulses: p_hold - P at the boundary */
 
     /* homing and fault */
     volatile PulDirHomeState home_state;
