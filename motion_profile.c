@@ -35,6 +35,8 @@ static void clear_ring(MotionProfile* p)
         p->taps[i] = 0.0f;
     p->head = 0;
     p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
+    p->run = 0;
+    p->run_sign = 0;
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -234,6 +236,16 @@ static void push(MotionProfile* p, float u)
     kahan_add(&p->wsum, &p->wsum_c, (float)p->n * u);
     kahan_add(&p->wsum, &p->wsum_c, -p->sum);
     p->taps[p->head] = u;
+    /* The run of newest taps sharing a sign, zeros extending it: the drain clamps the lag only
+     * once the run fills the ring. */
+    if (u != 0.0f) {
+        const int8_t s = u > 0.0f ? 1 : -1;
+        if (s != p->run_sign && p->run_sign != 0)
+            p->run = 0;
+        p->run_sign = s;
+    }
+    if (p->run < p->n)
+        p->run++;
     if (++p->head == p->n) {              /* recompute: rounding must not walk the sums */
         p->head = 0;
         recompute(p);
@@ -264,9 +276,10 @@ void MotionProfile_advance(MotionProfile* p)
     push(p, u);
     if (was_landed && p->drain >= p->n) {
         p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;   /* every tap is zero: exactly at rest */
-    } else if (was_landed) {
-        /* Draining, the lag only shrinks toward zero; a rounding residue past that would put
-         * the output a hair beyond its target. */
+    } else if (was_landed && p->run >= p->n) {
+        /* Draining a one-signed ring, the lag only shrinks toward zero; a rounding residue past
+         * that would put the output a hair beyond its target. A ring of both signs (a jog, then a
+         * target just behind) still carries the output on before it returns: it drains as it is. */
         const float w = fminf(fmaxf(p->wsum, fminf(w0, 0.0f)), fmaxf(w0, 0.0f));
         if (w != p->wsum) {
             p->wsum = w;
@@ -311,6 +324,8 @@ bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
     for (uint16_t i = 0; i < p->n; i++)
         p->taps[i] = vel;
     p->head = 0;
+    p->run = p->n;                        /* one-signed throughout */
+    p->run_sign = vel > 0.0f ? 1 : vel < 0.0f ? -1 : 0;
     recompute(p);
     /* The trapezoid runs ahead by the full ring's lag. fl(n*vel)/n and p_t - lag
      * may each be an ulp off, so the next output is vel and pos + vel*dt to an ulp. */

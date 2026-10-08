@@ -62,7 +62,8 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
         && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
         && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
-        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c;
+        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c
+        && a->run == b->run && a->run_sign == b->run_sign;
 }
 
 static void test_setup(void)
@@ -772,6 +773,43 @@ static void test_course_after_landing(float jmax)
     printf("ok course_after_landing\n");
 }
 
+/* A target at the position during a slow jog, so the ring lands with taps of both signs: the old
+ * positive taps carry the output on past the target before it returns. Through the drain pos must
+ * stay the integral of vel (E5) to rounding; a one-signed clamp there would hold pos still while
+ * vel is not zero, an unfiltered stop. */
+static void test_drain_mixed(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setEndless(&p, 0.2f));
+    run_until_vel(&p, 0.2f, 10000);
+    for (int i = 0; i < 300; i++)
+        step(&p);
+    assert(MotionProfile_setTarget(&p, p.pos));
+    int positive = 0;
+    float worst = 0.0f, furthest = 0.0f;
+    bool was_landed = false;
+    for (int calls = 0; !p.done; calls++) {
+        assert(calls < 10000);
+        const float pos0 = p.pos;
+        step(&p);
+        const float err = fabsf((p.pos - pos0) - p.vel * p.dt);
+        worst = fmaxf(worst, err);
+        assert(err <= 1e-6f);                 /* measured 1e-8; the clamp on this ring gave 5e-4 */
+        furthest = fmaxf(furthest, p.pos - p.target);
+        if (p.landed && !was_landed) {        /* the ring as it lands: the taps are velocities */
+            was_landed = true;
+            for (uint16_t k = 0; k < p.n; k++)
+                positive += p.taps[k] > 0.0f;
+        }
+    }
+    assert(positive >= 100 && positive < p.n);   /* both signs, mostly the jog's */
+    assert(furthest > 0.005f);                /* it went on past the target before returning */
+    assert(p.pos == p.target && p.vel == 0.0f);
+    printf("ok drain_mixed (%d of %u taps positive at landing, worst |dpos - vel dt| %.2e)\n",
+           positive, (unsigned)p.n, (double)worst);
+}
+
 /* D1: seeding the idle generator into motion, as the axis leaves a stream. */
 static void test_seed(void)
 {
@@ -836,6 +874,7 @@ int main(void)
     test_frozen_window();
     test_rebase();
     test_retarget_draining();
+    test_drain_mixed();
     test_seed();
     return 0;
 }

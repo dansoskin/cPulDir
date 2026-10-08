@@ -111,7 +111,7 @@ void puldir_pulse_tick(bool overrun)
             ax[i].inc = s[i].inc;
             ax[i].dir = s[i].dir;
         }
-        if (left != n_plan)
+        if ((int32_t)(ticks - due) > 0)
             late_sets++;
         latched = seq;
     }

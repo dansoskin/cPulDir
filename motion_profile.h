@@ -33,6 +33,8 @@ typedef struct {
     float    taps[MOTION_PROFILE_MAX_TAPS];   /* the trapezoid's velocities; zeros once it has landed */
     uint16_t n, head;                     /* window length; next slot to overwrite */
     uint16_t drain;                       /* calls since landing, up to n + 1 */
+    uint16_t run;                         /* the newest taps sharing a sign, zeros included, at most n */
+    int8_t   run_sign;                    /* that sign; 0 while the run holds only zeros */
     float    sum, sum_c;                  /* running sum of the ring, its Kahan compensation */
     float    wsum, wsum_c;                /* the ring weighted n-1 (newest) down to 0; pos = p_t - wsum*dt/n */
 } MotionProfile;

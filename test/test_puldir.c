@@ -1104,10 +1104,18 @@ static void late_move(PulDir* a, int32_t want)
  * interval, the next plan tick corrects the shortfall from the real position, and every move still
  * lands exactly. (Latched a whole interval late instead, the review's 301-pulse move ended at 310:
  * the settle branch republished the remainder and both sets ran.) Every late set is counted. */
+static uint32_t plan_ticks;                   /* plan ticks run, for one late set per plan tick */
+static void count_plans(bool after)
+{
+    check_published(after);
+    plan_ticks += after;
+}
+
 static void t_late_publish(void)
 {
     setup(2);
     fake_on_write(count_write);
+    fake_on_plan(count_plans);
     PulDir_attachLogger(logger);
     PulDir* a = &ax[0];
     const float v = 9.0f * (float)PLAN_HZ;      /* about 9 pulses per interval */
@@ -1162,12 +1170,14 @@ static void t_late_publish(void)
     for (int i = 0; i < nlines; i++)
         assert(strstr(lines[i], "plan tick late") == NULL);
 
-    /* the port's own timing again: once the last set published under the fault has latched,
-     * a normal move adds no late set */
+    /* the port's own timing again: once the last set published under the fault has latched, the
+     * late sets are one per plan tick run under it, and a normal move adds none */
+    const uint32_t faulted = plan_ticks;
     fake_preempt_unlock = 0u;
     fake_plan_phase = N / 2u;
     fake_run(2u * N);
     const uint32_t late0 = PulDir_lateSets();
+    assert(late0 == faulted);
     late_move(a, 0);
     assert(PulDir_lateSets() == late0);
     printf("  late_publish: %u sets latched late (N = %u)\n", (unsigned)late, (unsigned)N);
