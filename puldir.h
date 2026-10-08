@@ -11,6 +11,7 @@
 #include "puldir_enable.h"
 #include "puldir_fault.h"
 #include "puldir_homing.h"
+#include "puldir_stream.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,7 +67,6 @@ typedef struct PulDir {
     float conv;                          /* pulses per user unit, > 0 */
     float def[4];                        /* default speed, accel, decel, jerk, user units */
     float lim[4];                        /* current speed, accel, decel, jerk, user units */
-    uint32_t catchup_ms;
     bool  log_on;
     uint8_t slot;                        /* index in the axis table, PULDIR_MAX_AXES if unregistered */
 
@@ -85,22 +85,13 @@ typedef struct PulDir {
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
     bool     arrived;                    /* the final interval is published; settling */
     int8_t   approach;                   /* the side the final interval came from: +1, -1, 0 */
-
-    /* stream */
-    float sp_pos, sp_vel;                /* pulses, pulses/s; the last setpoint */
-    uint32_t sp_tick;                    /* its arrival tick, or streamBegin's before the first */
-    bool  sp_have;                       /* a setpoint has arrived since streamBegin */
-    bool  stream_live;                   /* plan tick: the generator is idle under the stream */
-    volatile bool stream_timed_out;
-    float v_cmd;                         /* pulses/s */
-    volatile float stream_err;           /* pulses: p_hold - P at the boundary */
-
     struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
 
     /* the modules, each with its own file */
     PulDirEnable enable;
     PulDirFault  fault;
     PulDirHoming home;
+    PulDirStream stream;
 
     /* the pulse tick's state lives in puldir_pulse.c, by slot */
 

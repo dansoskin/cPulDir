@@ -11,7 +11,7 @@ gcc $CFLAGS -o "$OUT/test_motion_profile" test/test_motion_profile.c motion_prof
 echo "generator: all ok"
 
 LIB="motion_profile.c puldir.c puldir_pulse.c puldir_plan.c puldir_loop.c puldir_group.c puldir_console.c
-     puldir_enable.c puldir_fault.c puldir_homing.c"
+     puldir_enable.c puldir_fault.c puldir_homing.c puldir_stream.c"
 build_axis() {   # $1 = output name, rest = extra flags
     local out="$1"; shift
     gcc $CFLAGS -Itest "$@" -o "$OUT/$out" test/test_puldir.c test/fake_port.c $LIB -lm

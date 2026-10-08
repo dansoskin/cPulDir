@@ -41,7 +41,7 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
     const float d[4] = { 200.0f, 200.0f, 200.0f, 0.0f };
     for (int k = 0; k < 4; k++)
         a->def[k] = a->lim[k] = d[k] / c;
-    a->catchup_ms = PULDIR_CATCHUP_MS;
+    a->stream.catchup_ms = PULDIR_CATCHUP_MS;
     a->log_on = true;
     a->slot = PULDIR_MAX_AXES;
     a->dir_out = 1;                     /* the pulse tick's entries start at +1 */
@@ -184,7 +184,7 @@ float PulDir_jerk(PulDir* a)                     { return a->lim[3]; }
 
 /* Under the lock, for every motion command: the fault latch and the mode at one instant, so a
  * latch the plan tick closes between a check and the store cannot slip through (D17). */
-static PulDirRefusal motion_check(const PulDir* a)
+PulDirRefusal puldir_motion_check(const PulDir* a)
 {
     const PulDirMode m = a->mode;
     if (a->slot == PULDIR_MAX_AXES)
@@ -199,7 +199,7 @@ static PulDirRefusal motion_check(const PulDir* a)
 /* Under the lock: what the caller may read back at once is set here (D17). */
 static PulDirRefusal take_target(PulDir* a, uint64_t target)
 {
-    const PulDirRefusal why = motion_check(a);
+    const PulDirRefusal why = puldir_motion_check(a);
     if (why != PULDIR_R_NONE)
         return why;
     a->target = target;
@@ -259,7 +259,7 @@ bool PulDir_jog(PulDir* a, float speed)
         why = PULDIR_R_RATE;
     } else {
         port_lock();
-        why = motion_check(a);
+        why = puldir_motion_check(a);
         if (why == PULDIR_R_NONE && speed == 0.0f) {
             if (a->mode != PULDIR_MODE_IDLE) {
                 a->req |= REQ_STOP;
@@ -330,91 +330,6 @@ void PulDir_halt(PulDir* a)
             a->home.state = PULDIR_HOME_IDLE;
     }
     port_unlock();
-}
-
-/* ---- stream (5.6) ---------------------------------------------------------- */
-
-/* From IDLE, PROFILE or STOPPING; a pending move or stop gives way. The plan tick takes the axis's
- * velocity as the stream's and starts the timeout, so the call itself changes no motion. */
-bool PulDir_streamBegin(PulDir* a)
-{
-    port_lock();
-    const PulDirRefusal why = motion_check(a);
-    if (why == PULDIR_R_NONE) {
-        a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_STREAM_BEGIN);
-        a->mode = PULDIR_MODE_STREAM;
-        a->moving = true;
-        puldir_enable_wake(a);
-        a->stream_timed_out = false;
-        a->stream_err = 0.0f;
-        a->sp_tick = PulDir_ticks();        /* the timeout runs from here until a setpoint */
-        a->sp_have = false;
-    }
-    port_unlock();
-    if (why != PULDIR_R_NONE) {
-        puldir_refuse(a, "streamBegin", why, 0.0f);
-        return false;
-    }
-    return true;
-}
-
-/* Main context only (5.9): the plan tick relies on sp_tick never being ahead of its reading. Past
- * 2^24 pulses from the datum the float setpoint is quantised before the library sees it. */
-void PulDir_stream(PulDir* a, float position, float velocity)
-{
-    const float p = position * a->conv, v = velocity * a->conv;
-    bool ok = isfinite(v) && p >= -PULDIR_PULSES_MAX && p < PULDIR_PULSES_MAX;   /* false for NaN */
-    if (ok) {
-        port_lock();
-        ok = a->mode == PULDIR_MODE_STREAM;
-        if (ok) {
-            a->sp_pos = p;
-            a->sp_vel = v;
-            a->sp_tick = PulDir_ticks();
-            a->sp_have = true;
-        }
-        port_unlock();
-    }
-    if (!ok)
-        puldir_refuse(a, "stream", PULDIR_R_DROPPED, 0.0f);
-}
-
-/* In STREAM only: the defaults first, then a stop from the stream's velocity
- * under them (the plan tick seeds the idle generator and stops it). */
-void PulDir_streamEnd(PulDir* a)
-{
-    port_lock();
-    if (a->mode == PULDIR_MODE_STREAM) {
-        memcpy(a->lim, a->def, sizeof a->lim);   /* validated when set, at the one conversion */
-        a->req |= REQ_LIMITS;                 /* the plan tick sees STOPPING and leaves */
-        a->mode = PULDIR_MODE_STOPPING;
-    }
-    port_unlock();
-}
-
-bool  PulDir_inStream(PulDir* a)       { return a->mode == PULDIR_MODE_STREAM; }
-bool  PulDir_streamTimedOut(PulDir* a) { return a->stream_timed_out; }
-float PulDir_streamError(PulDir* a)    { return a->stream_err / a->conv; }
-
-/* D11: at least five plan intervals (5.6), and not while streaming. */
-bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
-{
-    PulDirRefusal why = PULDIR_R_NONE;
-    if ((uint64_t)ms * 1000u < 5u * (uint64_t)puldir_timing.plan_us) {
-        why = PULDIR_R_ARG;
-    } else {
-        port_lock();
-        if (a->mode == PULDIR_MODE_STREAM)
-            why = PULDIR_R_MODE;
-        else
-            a->catchup_ms = ms;
-        port_unlock();
-    }
-    if (why != PULDIR_R_NONE) {
-        puldir_refuse(a, "setStreamCatchup", why, 0.0f);
-        return false;
-    }
-    return true;
 }
 
 /* ---- state ----------------------------------------------------------------- */

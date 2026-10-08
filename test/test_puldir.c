@@ -193,7 +193,7 @@ static void t_setup(void)
         const float want = i < 3 ? 200.0f : 0.0f;
         assert(a.def[i] == want && a.lim[i] == want);
     }
-    assert(a.catchup_ms == PULDIR_CATCHUP_MS);
+    assert(a.stream.catchup_ms == PULDIR_CATCHUP_MS);
     assert(a.log_on);
     assert(a.slot == PULDIR_MAX_AXES);
     assert(!a.has_pins && a.mode == PULDIR_MODE_IDLE && a.events == 0);
@@ -2160,7 +2160,7 @@ static void t_stream_end(void)
         nrise = 0;
         const uint32_t d0 = dirw[0];
         const int32_t c_end = st(0).count;
-        const float v_end = a->v_cmd;             /* pulses/s */
+        const float v_end = a->stream.v_cmd;             /* pulses/s */
         const uint32_t t_end = PulDir_ticks();
         PulDir_streamEnd(a);
         assert(!PulDir_inStream(a) && a->mode == PULDIR_MODE_STOPPING && PulDir_isMoving(a));
@@ -2208,15 +2208,15 @@ static void t_stream_transitions(void)
     /* catch-up: at least five plan intervals */
     const uint32_t min_ms = (5000u + PLAN_HZ - 1u) / PLAN_HZ;
     assert(!PulDir_setStreamCatchup(a, min_ms - 1u) && a->refusal == PULDIR_R_ARG);
-    assert(!PulDir_setStreamCatchup(a, 0u) && a->catchup_ms == PULDIR_CATCHUP_MS);
-    assert(PulDir_setStreamCatchup(a, min_ms) && a->catchup_ms == min_ms);
+    assert(!PulDir_setStreamCatchup(a, 0u) && a->stream.catchup_ms == PULDIR_CATCHUP_MS);
+    assert(PulDir_setStreamCatchup(a, min_ms) && a->stream.catchup_ms == min_ms);
     assert(PulDir_setStreamCatchup(a, PULDIR_CATCHUP_MS));
 
     /* a setpoint outside STREAM is dropped; it never starts a stream */
     a->refusal = PULDIR_R_NONE;
     PulDir_stream(a, 1.0f, 0.0f);
     assert(a->refusal == PULDIR_R_DROPPED && a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a));
-    assert(a->req == 0 && !a->sp_have);
+    assert(a->req == 0 && !a->stream.have);
 
     /* refused when faulted, in GROUP and in HOMING; nothing changes */
     a->fault.latched = true;
@@ -2248,18 +2248,18 @@ static void t_stream_transitions(void)
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE);
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setStreamCatchup(a, 20u) && a->refusal == PULDIR_R_MODE);
-    assert(a->catchup_ms == PULDIR_CATCHUP_MS && a->mode == PULDIR_MODE_STREAM);
+    assert(a->stream.catchup_ms == PULDIR_CATCHUP_MS && a->mode == PULDIR_MODE_STREAM);
 
     /* bad setpoints are dropped: not finite, or beyond 2^31 pulses */
     a->refusal = PULDIR_R_NONE;
     PulDir_stream(a, NAN, 0.0f);
-    assert(a->refusal == PULDIR_R_DROPPED && !a->sp_have);
+    assert(a->refusal == PULDIR_R_DROPPED && !a->stream.have);
     a->refusal = PULDIR_R_NONE;
     PulDir_stream(a, 0.0f, INFINITY);
-    assert(a->refusal == PULDIR_R_DROPPED && !a->sp_have);
+    assert(a->refusal == PULDIR_R_DROPPED && !a->stream.have);
     a->refusal = PULDIR_R_NONE;
     PulDir_stream(a, 3.0e9f, 0.0f);
-    assert(a->refusal == PULDIR_R_DROPPED && !a->sp_have);
+    assert(a->refusal == PULDIR_R_DROPPED && !a->stream.have);
     fake_run(5u * N);
     assert(st(0).count == 0 && nrise == 0 && PulDir_inStream(a));   /* streamBegin changed nothing */
     PulDir_streamEnd(a);
@@ -3388,7 +3388,7 @@ static void t_fault_cases(void)
         fake_run(1);
     const uint64_t e2 = edges[2];
     const int32_t c2 = st(2).count;
-    assert(b->mode == PULDIR_MODE_IDLE && !PulDir_inStream(b) && !b->stream_live && PulDir_velocity(b) == 0.0f);
+    assert(b->mode == PULDIR_MODE_IDLE && !PulDir_inStream(b) && !b->stream.live && PulDir_velocity(b) == 0.0f);
     fake_run(3u * N);
     assert(edges[2] == e2 && st(2).count == c2 && !PulDir_isMoving(b) && PulDir_target(b) == (float)c2);
     b->refusal = PULDIR_R_NONE;

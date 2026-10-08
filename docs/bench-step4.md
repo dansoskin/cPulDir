@@ -69,6 +69,10 @@ In `CMakeLists.txt`, in the existing user sections:
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_loop.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_group.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_console.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_enable.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_fault.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_homing.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_stream.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/port/stm32/puldir_port_stm32.c
     ${CMAKE_SOURCE_DIR}/Core/Src/puldir_bench.c
 
@@ -79,7 +83,7 @@ In `CMakeLists.txt`, in the existing user sections:
 
 No compile definitions: the rates are arguments of the timer attach calls in `puldir_bench.c`.
 
-(`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` is required too: the plan tick calls into it, so the link fails without it.)
+(`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` and the four module files (`puldir_enable.c`, `puldir_fault.c`, `puldir_homing.c`, `puldir_stream.c`) are required too: the plan tick calls into them, so the link fails without them.)
 
 ### 3.2 `Core/Src/stm32g4xx_it.c`
 

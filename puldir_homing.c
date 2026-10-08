@@ -63,7 +63,7 @@ bool PulDir_homeStart(PulDir* a)
     if (why == PULDIR_R_NONE) {
         port_lock();
         if (a->slot == PULDIR_MAX_AXES) {
-            why = PULDIR_R_UNREGISTERED;    /* as motion_check: the ticks cannot run it */
+            why = PULDIR_R_UNREGISTERED;    /* as puldir_motion_check: the ticks cannot run it */
         } else if (a->fault.latched) {
             why = PULDIR_R_FAULT;
         } else if (a->mode != PULDIR_MODE_IDLE) {
