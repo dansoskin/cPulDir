@@ -72,18 +72,25 @@ bool MotionProfile_init(MotionProfile* p, float pos, float dt)
     return true;
 }
 
-bool MotionProfile_setLimits(MotionProfile* p, MotionLimits L)
+MotionLimitsCheck MotionProfile_checkLimits(MotionLimits L, float dt, uint16_t frozen_n)
 {
     if (!limits_valid(L))
-        return false;
-    const uint16_t n = window(L, p->dt);
-    if (n == 0)
+        return MOTION_LIMITS_INVALID;
+    if (window(L, dt) == 0)
+        return MOTION_LIMITS_TAPS;
+    /* A window frozen in flight would not bound this jerk. */
+    if (frozen_n != 0 && L.jmax != 0.0f && (L.amax + L.dmax) / (L.jmax * dt) > (float)frozen_n)
+        return MOTION_LIMITS_WINDOW;
+    return MOTION_LIMITS_OK;
+}
+
+bool MotionProfile_setLimits(MotionProfile* p, MotionLimits L)
+{
+    if (MotionProfile_checkLimits(L, p->dt, p->done ? 0 : p->n) != MOTION_LIMITS_OK)
         return false;
     if (p->done) {
-        p->n = n;
+        p->n = window(L, p->dt);
         clear_ring(p);
-    } else if (L.jmax != 0.0f && (L.amax + L.dmax) / (L.jmax * p->dt) > (float)p->n) {
-        return false;       /* the window is frozen in flight and would not bound this jerk */
     }
     p->lim = L;
     return true;

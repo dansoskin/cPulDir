@@ -169,20 +169,21 @@ bool PulDir_register(PulDir* a)
 
 /* ---- limits ---------------------------------------------------------------- */
 
-/* The generator's window() test, on the same float products as apply_limits. */
-static bool taps_fit(float acc, float dec, float j)
+/* Whether the jerk j, in user units, fits the ring under L's ramps, as the generator will see it. */
+static bool jerk_fits(MotionLimits L, float conv, float j)
 {
-    return ceilf((acc + dec) / (j * puldir_timing.dt)) <= (float)MOTION_PROFILE_MAX_TAPS;
+    L.jmax = j * conv;
+    return MotionProfile_checkLimits(L, puldir_timing.dt, 0) == MOTION_LIMITS_OK;
 }
 
 /* The smallest jerk in user units that fits: minJerk's quotient and the
  * conversion each round, so step to the exact float boundary. */
-static float jerk_floor(float acc, float dec, float conv)
+static float jerk_floor(MotionLimits L, float conv)
 {
-    float j = MotionProfile_minJerk(acc, dec, puldir_timing.dt) / conv;
-    while (!taps_fit(acc, dec, j * conv))
+    float j = MotionProfile_minJerk(L.amax, L.dmax, puldir_timing.dt) / conv;
+    while (!jerk_fits(L, conv, j))
         j = nextafterf(j, INFINITY);
-    for (float d = nextafterf(j, 0.0f); taps_fit(acc, dec, d * conv); d = nextafterf(d, 0.0f))
+    for (float d = nextafterf(j, 0.0f); jerk_fits(L, conv, d); d = nextafterf(d, 0.0f))
         j = d;
     return j;
 }
@@ -194,35 +195,34 @@ static bool limits_busy(PulDirMode m)
     return m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING;
 }
 
-/* Checks four limits (user units) as MotionProfile_setLimits will see them, then
- * stores them, and def too, under the lock that reads the frozen window (D17). */
+/* Checks four limits (user units) as MotionProfile_setLimits will see them, the rate cap being the
+ * axis's own, then stores them, and def too, under the lock that reads the frozen window (D17). */
 static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const char* call)
 {
-    const float conv = a->conv;
-    const float v = lim[0] * conv, acc = lim[1] * conv, dec = lim[2] * conv, j = lim[3] * conv;
-    const float ratio = j > 0.0f ? (acc + dec) / (j * puldir_timing.dt) : 0.0f;    /* generator's window() */
+    const float conv = a->conv, dt = puldir_timing.dt;
+    const MotionLimits L = { lim[0] * conv, lim[1] * conv, lim[2] * conv, lim[3] * conv };
+    const MotionLimitsCheck check = MotionProfile_checkLimits(L, dt, 0);
     PulDirRefusal why = PULDIR_R_NONE;
     float value = 0.0f;
-    if (!(isfinite(v) && isfinite(acc) && isfinite(dec) && isfinite(j))
-        || !(v > 0.0f && acc > 0.0f && dec > 0.0f && j >= 0.0f)) {
+    if (check == MOTION_LIMITS_INVALID) {
         why = PULDIR_R_ARG;
     } else if (!(lim[0] < rate_cap(conv))) {
         why = PULDIR_R_RATE;
         value = rate_cap(conv);
-    } else if (j > 0.0f && !taps_fit(acc, dec, j)) {
+    } else if (check == MOTION_LIMITS_TAPS) {
         why = PULDIR_R_TAPS;
-        value = jerk_floor(acc, dec, conv);
+        value = jerk_floor(L, conv);
     } else {
         port_lock();
-        if (limits_busy(a->mode)) {
+        if (limits_busy(a->mode))
             why = PULDIR_R_MODE;
-        } else if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
+        else if (MotionProfile_checkLimits(L, dt, a->prof.done ? 0 : a->prof.n) == MOTION_LIMITS_WINDOW)
+            why = PULDIR_R_WINDOW;          /* the window is frozen in flight (5.2) */
+        else {
             memcpy(a->lim, lim, sizeof a->lim);
             if (defaults)
                 memcpy(a->def, lim, sizeof a->def);
             a->req |= REQ_LIMITS;
-        } else {
-            why = PULDIR_R_WINDOW;          /* the window is frozen in flight (5.2) */
         }
         port_unlock();
     }

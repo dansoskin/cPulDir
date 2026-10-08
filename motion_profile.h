@@ -38,7 +38,11 @@ typedef struct {
     float    wsum, wsum_c;                /* the ring weighted n-1 (newest) down to 0; pos = p_t - wsum*dt/n */
 } MotionProfile;
 
+typedef enum { MOTION_LIMITS_OK, MOTION_LIMITS_INVALID, MOTION_LIMITS_TAPS, MOTION_LIMITS_WINDOW } MotionLimitsCheck;
+
 bool  MotionProfile_init(MotionProfile*, float pos, float dt);
+/* What setLimits would answer: frozen_n is the window in flight, 0 when done. */
+MotionLimitsCheck MotionProfile_checkLimits(MotionLimits L, float dt, uint16_t frozen_n);
 bool  MotionProfile_setLimits(MotionProfile*, MotionLimits);
 bool  MotionProfile_setTarget(MotionProfile*, float target);
 bool  MotionProfile_setEndless(MotionProfile*, float speed);

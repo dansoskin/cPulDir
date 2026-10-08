@@ -143,14 +143,15 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
     if (why == PULDIR_R_NONE) {
         bad = g->axes[0];                       /* a path refusal: reported on the first member */
         any = path_limits(g, delta, &L);
-        if (any && !(L.vmax > 0.0f && L.amax > 0.0f && L.dmax > 0.0f)) {
-            why = PULDIR_R_ARG;                 /* underflowed: limits too small for the travel */
-        } else if (any && L.jmax > 0.0f
-                   && !(ceilf((L.amax + L.dmax) / (L.jmax * puldir_timing.dt)) <= (float)MOTION_PROFILE_MAX_TAPS)) {
-            /* Each member's own window fits, and the tightest jerk's member bounds the
-             * ratio, so only float rounding at the 256-tap edge can land here. */
+        /* Invalid is an underflow: limits too small for the travel. Each member's own window fits
+         * and the tightest jerk's member bounds the ratio, so only float rounding at the 256-tap
+         * edge lands on the taps. */
+        const MotionLimitsCheck check = any ? MotionProfile_checkLimits(L, puldir_timing.dt, 0)
+                                            : MOTION_LIMITS_OK;
+        if (check == MOTION_LIMITS_INVALID)
+            why = PULDIR_R_ARG;
+        else if (check == MOTION_LIMITS_TAPS)
             why = PULDIR_R_TAPS;
-        }
     }
     if (why != PULDIR_R_NONE) {
         if (bad != NULL)
