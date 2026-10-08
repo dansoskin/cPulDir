@@ -183,7 +183,7 @@ Host tests need only gcc, from bash:
 bash test/run.sh
 ```
 
-It builds and runs the generator tests, then the axis tests against `test/fake_port.c` at the default tick, at 200 kHz and with the tick counter near its wrap. All use `-Wall -Wextra -Werror`.
+It builds and runs the generator tests, then the axis tests against `test/fake_port.c` at the default tick, at 200 kHz, at a 2 kHz plan rate on a 100 kHz tick, and with the tick counter near its wrap. It takes about 25 s. All use `-Wall -Wextra -Werror`.
 
 Target compile, from bash with arm-none-eabi-gcc on the path and `$FW` set to a CubeMX project (STM32G473 here; change `-DSTM32G473xx` and the HAL include for another family):
 

@@ -1085,19 +1085,21 @@ static void t_jog(void)
     assert(PulDir_target(a) > PulDir_position(a) && PulDir_target(a) - PulDir_position(a) < 0.25f);
 
     /* D7: a lowered speed limit ramps the jog down at decel, a raised one back up
-     * at accel to the jog's own speed: 600 pulses/s at 10 a step, 60 steps each way */
+     * at accel to the jog's own speed: 600 pulses/s at 10,000 pulses/s^2 a second */
+    const float step = 100.0f / (float)PULDIR_PLAN_HZ;            /* user units/s per plan tick */
+    const int nsteps = (int)(6u * PULDIR_PLAN_HZ / 100u);         /* 60 at 1 kHz */
     for (int way = 0; way < 2; way++) {
         assert(PulDir_setSpeed(a, way == 0 ? 4.0f : 20.0f));
         const float to = way == 0 ? 4.0f : 10.0f;
         int steps = 0;
         for (float v = PulDir_velocity(a); v != to; steps++) {
-            assert(steps < 100);
+            assert(steps < 2 * nsteps);
             fake_run(N);
             const float w = PulDir_velocity(a), dv = way == 0 ? v - w : w - v;
-            assert(dv > 0.0999f && dv < 0.1001f);
+            assert(dv > step * 0.999f && dv < step * 1.001f);
             v = w;
         }
-        assert(steps == 60);
+        assert(steps == nsteps);
         fake_run(20u * N);
         assert(PulDir_velocity(a) == to && a->mode == PULDIR_MODE_PROFILE);
     }
@@ -1249,10 +1251,10 @@ static void t_halt(void)
     const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
     for (int k = 0; k < 12; k++) {
         fake_plan_phase = phases[k % 3];
-        assert(PulDir_setJerk(a, k % 6 < 3 ? 0.0f : 1.0e7f));     /* a 10-tap window */
+        assert(PulDir_setJerk(a, k % 6 < 3 ? 0.0f : 1.0e7f));     /* a 10-tap window at 1 kHz */
         const int32_t c0 = st(0).count, dir = k % 2 ? -1 : 1;
         assert(PulDir_moveTo(a, (float)(c0 + dir * 20000)));
-        fake_run(200u * N);                   /* cruising: the ramp takes 100 intervals */
+        fake_run(PULDIR_TICK_HZ / 5u);        /* 200 ms: cruising, the ramp takes 100 ms */
         assert(a->prof.vel == (float)dir * 5000.0f);
         if (k % 4 < 2)
             while (!high(0))                  /* just after a rising edge */
@@ -1366,6 +1368,8 @@ static void t_live_limits(void)
     PulDir* a = &ax[0];
     const float conv = 100.0f;
     assert(PulDir_setConversion(a, conv));
+    /* Jerks scale with the plan rate, so every window below has the same taps at any rate. */
+    const float hz = (float)PULDIR_PLAN_HZ / 1000.0f;
 
     /* jerk off, in flight: accel, decel and speed are live; switching jerk on is not */
     assert(PulDir_setDefaults(a, 20.0f, 40.0f, 40.0f, 0.0f));
@@ -1376,15 +1380,15 @@ static void t_live_limits(void)
     assert(PulDir_setSpeed(a, 10.0f));
     fake_run(N);
     assert(a->prof.lim.amax == 3000.0f && a->prof.lim.dmax == 3000.0f && a->prof.lim.vmax == 1000.0f);
-    assert(!PulDir_setJerk(a, 300.0f) && a->refusal == PULDIR_R_WINDOW);   /* fits the taps, not the frozen window */
+    assert(!PulDir_setJerk(a, 300.0f * hz) && a->refusal == PULDIR_R_WINDOW);   /* fits the taps, not the frozen window */
     assert(PulDir_jerk(a) == 0.0f && a->req == 0);
-    fake_run(500u * N);
+    fake_run(PULDIR_TICK_HZ / 2u);                       /* 500 ms */
     assert(PulDir_velocity(a) == 10.0f);                 /* the lowered speed took effect */
     run_until_idle(a, 30u * PULDIR_TICK_HZ);
     assert(st(0).count == 10000);
 
-    /* jerk 290 in flight: the window holds 207 taps, (30 + 30) / (290 * dt) = 206.9 */
-    assert(PulDir_setDefaults(a, 20.0f, 40.0f, 30.0f, 290.0f));  /* 7000 / 29 = 241.4 */
+    /* jerk 290 at 1 kHz in flight: the window holds 207 taps, (30 + 30) / (290 * dt) = 206.9 */
+    assert(PulDir_setDefaults(a, 20.0f, 40.0f, 30.0f, 290.0f * hz));  /* 7000 / 29 = 241.4 */
     assert(PulDir_setAcceleration(a, 30.0f));
     fake_run(N);
     assert(a->prof.n == 207);
@@ -1395,19 +1399,19 @@ static void t_live_limits(void)
     assert(PulDir_setAcceleration(a, 30.0f));            /* raised within the slack: live */
     assert(!PulDir_setAcceleration(a, 31.0f) && a->refusal == PULDIR_R_WINDOW);   /* 210.3 taps */
     assert(PulDir_acceleration(a) == 30.0f);
-    assert(!PulDir_setJerk(a, 250.0f) && a->refusal == PULDIR_R_WINDOW && PulDir_jerk(a) == 290.0f);
-    assert(PulDir_setJerk(a, 400.0f));                   /* raised: live */
+    assert(!PulDir_setJerk(a, 250.0f * hz) && a->refusal == PULDIR_R_WINDOW && PulDir_jerk(a) == 290.0f * hz);
+    assert(PulDir_setJerk(a, 400.0f * hz));                   /* raised: live */
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_restoreDefaults(a) && a->refusal == PULDIR_R_WINDOW);   /* accel 40: 241.4 taps */
     assert(PulDir_speed(a) == 20.0f && PulDir_acceleration(a) == 30.0f);
-    assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 400.0f);
+    assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 400.0f * hz);
     fake_run(N);
-    assert(a->prof.lim.jmax == 40000.0f && a->prof.lim.amax == 3000.0f && a->prof.n == 207);
+    assert(a->prof.lim.jmax == 40000.0f * hz && a->prof.lim.amax == 3000.0f && a->prof.n == 207);
     run_until_idle(a, 30u * PULDIR_TICK_HZ);
     assert(st(0).count == 15000);
     assert(PulDir_restoreDefaults(a));                   /* idle: accepted */
     assert(PulDir_speed(a) == 20.0f && PulDir_acceleration(a) == 40.0f);
-    assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 290.0f);
+    assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 290.0f * hz);
     fake_run(N);
     assert(a->prof.n == 242 && a->prof.lim.amax == 4000.0f);
 
@@ -1418,9 +1422,9 @@ static void t_live_limits(void)
     nlines = 0;
     assert(!PulDir_setJerk(a, 0.9f * jmin) && a->refusal == PULDIR_R_TAPS);
     const float floor_ = a->refused_value;
-    assert(fabsf(floor_ - jmin) <= 1e-5f * jmin && PulDir_jerk(a) == 290.0f);
+    assert(fabsf(floor_ - jmin) <= 1e-5f * jmin && PulDir_jerk(a) == 290.0f * hz);
     PulDir_loop(a);
-    assert(nlines == 1 && strstr(lines[0], "setJerk refused: jerk below 273.4"));
+    assert(nlines == 1 && strstr(lines[0], "setJerk refused: jerk below "));   /* 273.4 at 1 kHz */
     assert(strstr(lines[0], " needs more than 256 taps"));
     const float logged = strtof(strstr(lines[0], "below ") + 6, NULL);
     assert(logged >= floor_ && logged - floor_ <= 1e-4f + 1e-6f * floor_);
@@ -1562,7 +1566,7 @@ static void t_jog_settling(void)
                 ;
         assert(a->arrived && PulDir_isMoving(a) && a->mode == PULDIR_MODE_PROFILE);
         assert(PulDir_jog(a, speed));
-        fake_run(200u * N);                   /* 50 ms of ramp, then 150 ms at speed */
+        fake_run(PULDIR_TICK_HZ / 5u);        /* 50 ms of ramp, then 150 ms at speed */
         assert(PulDir_isMoving(a) && a->mode == PULDIR_MODE_PROFILE);
         assert(PulDir_velocity(a) == speed);
         const int32_t c = st(0).count;
@@ -2112,7 +2116,7 @@ static void t_request_order(void)
 
         /* halt then moveTo: from rest where the pulses stopped, onto the new target */
         assert(PulDir_moveTo(a, (float)(c0 + dir * 20000)));
-        fake_run(150u * N + (uint32_t)k * 7u);
+        fake_run(PULDIR_TICK_HZ * 3u / 20u + (uint32_t)k * 7u);   /* 150 ms: past the 100 ms ramp */
         assert(fabsf(PulDir_velocity(a)) == 5000.0f);
         const int32_t want = st(0).count - dir * 500;
         PulDir_halt(a);
@@ -2136,7 +2140,7 @@ static void t_request_order(void)
 
         /* streamBegin then halt, and halt then streamBegin: no pulse after the halt */
         assert(PulDir_jog(a, (float)dir * 3000.0f));
-        fake_run(100u * N);
+        fake_run(PULDIR_TICK_HZ / 10u);       /* 100 ms: past the 60 ms ramp */
         uint64_t e2 = edges[0];
         int32_t ch = st(0).count;
         assert(PulDir_streamBegin(a));
@@ -2145,7 +2149,7 @@ static void t_request_order(void)
         fake_run(3u * N);
         assert(!PulDir_isMoving(a) && edges[0] == e2 && st(0).count == ch);
         assert(PulDir_jog(a, (float)dir * 3000.0f));
-        fake_run(100u * N);
+        fake_run(PULDIR_TICK_HZ / 10u);       /* 100 ms: past the 60 ms ramp */
         e2 = edges[0];
         ch = st(0).count;
         PulDir_halt(a);
@@ -2159,7 +2163,7 @@ static void t_request_order(void)
         /* streamBegin then streamEnd or stop: a stop from the jog's velocity (check_ramps) */
         const int32_t c3 = st(0).count;
         assert(PulDir_jog(a, (float)dir * 3000.0f));
-        fake_run(100u * N);
+        fake_run(PULDIR_TICK_HZ / 10u);       /* 100 ms: past the 60 ms ramp */
         const uint32_t d3 = dirw[0];
         assert(PulDir_streamBegin(a));
         if (k < 3)
@@ -2928,7 +2932,7 @@ static void t_fault(void)
 
     /* active for 1 ms: no latch */
     assert(PulDir_jog(a, 4000.0f));
-    fake_run(100u * N);
+    fake_run(PULDIR_TICK_HZ / 10u);           /* 100 ms: past the 80 ms ramp */
     fake_set_input(FLT(0), true);
     fake_run(MS);
     fake_set_input(FLT(0), false);
@@ -3314,7 +3318,7 @@ static void t_group_paths(void)
     assert(!PulDirGroup_moveTo(&grp, tg) && a->refusal == PULDIR_R_ARG && a->mode == PULDIR_MODE_IDLE);
     tg[0] = -16777216.0f;
     assert(PulDirGroup_moveTo(&grp, tg) && a->mode == PULDIR_MODE_GROUP);
-    fake_run(50u * N);
+    fake_run(PULDIR_TICK_HZ / 20u);           /* 50 ms */
 
     /* a member's limits belong to the path while it moves: refused, unchanged */
     const uint16_t req0 = a->req;
@@ -3922,14 +3926,14 @@ static void t_console(void)
     assert(PulDir_setDeceleration(a, 30.0f));
     PulDir_console(a, 'A', "40");
     assert(PulDir_acceleration(a) == 40.0f && PulDir_deceleration(a) == 30.0f);
-    PulDir_console(a, 'Z', "300");
-    assert(PulDir_jerk(a) == 300.0f);
+    PulDir_console(a, 'Z', "600");
+    assert(PulDir_jerk(a) == 600.0f);
     nlines = 0;
     PulDir_console(a, 'z', NULL);
     PulDir_console(a, 'a', "");
     PulDir_console(a, 'd', "");
     PulDir_console(a, 'v', "");
-    assert(nlines == 4 && strstr(lines[0], "300.0000") && strstr(lines[1], "40.0000")
+    assert(nlines == 4 && strstr(lines[0], "600.0000") && strstr(lines[1], "40.0000")
            && strstr(lines[2], "30.0000") && strstr(lines[3], "0.0000"));
     PulDir_console(a, 'D', "32");
     PulDir_console(a, 'V', "80");
