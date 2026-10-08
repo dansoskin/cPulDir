@@ -33,6 +33,8 @@ static void set_period(TIM_HandleTypeDef* htim, uint32_t counts)
  * periods) then follows a latch tick (1, N+1, ...) by the start skew, under one pulse period. */
 void port_start(void (*pulse)(bool), void (*plan)(void))
 {
+    if (pulse_tim == NULL || plan_tim == NULL)
+        Error_Handler();                        /* attach both timers before PulDir_start */
     pulse_fn = pulse;
     plan_fn = plan;
     set_period(pulse_tim, PULDIR_PULSE_COUNTS);
