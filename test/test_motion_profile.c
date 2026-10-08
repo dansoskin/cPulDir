@@ -746,6 +746,10 @@ static void test_course_after_landing(float jmax)
         const float u = p.taps[(p.head + p.n - 1u) % p.n];   /* the landing step */
         if (u > 0.5f * L.dmax * p.dt)
             sizable++;
+        /* landed: nothing left to stop but the ring's lag, though v_t still holds u */
+        assert(fabsf(MotionProfile_stopDistance(&p) - (p.p_t - p.pos)) <= 1e-5f);
+        if (jmax == 0.0f)
+            assert(MotionProfile_stopDistance(&p) == 0.0f && p.v_t == u);
         MotionProfile q = p, r = p;
         assert(MotionProfile_setEndless(&p, k % 2 ? -15.0f : 15.0f));
         assert(MotionProfile_setTarget(&q, to - 1.0f));

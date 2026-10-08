@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "fake_port.h"
 #include "puldir_internal.h"
@@ -596,6 +597,7 @@ static void run_until_idle(PulDir* a, uint32_t max_ticks)
 typedef struct { bool valid; uint64_t aim; bool near; int8_t dir; bool reversal; } Aim;
 static Aim aim_next, aim_cur;
 static int64_t worst_track, worst_rev;        /* the largest |P - aim| - |inc| away from the target */
+static int64_t worst_raw;                     /* the largest |P - aim| itself, likewise and off reversals */
 
 static void track_run(PulDir* a, uint32_t ticks)
 {
@@ -611,6 +613,8 @@ static void track_run(PulDir* a, uint32_t ticks)
                 int64_t* worst = aim_cur.reversal ? &worst_rev : &worst_track;
                 if (!aim_cur.near && err - inc > *worst)
                     *worst = err - inc;
+                if (!aim_cur.near && !aim_cur.reversal && err > worst_raw)
+                    worst_raw = err;
                 assert(err <= (aim_cur.reversal ? 2 : 1) * inc + (int64_t)N + (aim_cur.near ? M : 0));
             }
             aim_cur = aim_next;
@@ -1046,6 +1050,25 @@ static void t_jog(void)
     /* a jog has no target: it reads where the profile is, an interval or two ahead of the pulses */
     assert(PulDir_target(a) > PulDir_position(a) && PulDir_target(a) - PulDir_position(a) < 0.25f);
 
+    /* D7: a lowered speed limit ramps the jog down at decel, a raised one back up
+     * at accel to the jog's own speed: 600 pulses/s at 10 a step, 60 steps each way */
+    for (int way = 0; way < 2; way++) {
+        assert(PulDir_setSpeed(a, way == 0 ? 4.0f : 20.0f));
+        const float to = way == 0 ? 4.0f : 10.0f;
+        int steps = 0;
+        for (float v = PulDir_velocity(a); v != to; steps++) {
+            assert(steps < 100);
+            fake_run(N);
+            const float w = PulDir_velocity(a), dv = way == 0 ? v - w : w - v;
+            assert(dv > 0.0999f && dv < 0.1001f);
+            v = w;
+        }
+        assert(steps == 60);
+        fake_run(20u * N);
+        assert(PulDir_velocity(a) == to && a->mode == PULDIR_MODE_PROFILE);
+    }
+    c = st(0).count;
+
     /* jog(-5) reverses through zero under the ramps (check_ramps) */
     assert(PulDir_jog(a, -5.0f));
     int32_t top = c;
@@ -1272,35 +1295,33 @@ static void t_rate_cap(void)
     const float to = (float)(PULDIR_TICK_HZ / 4u) / conv;     /* half a second at the cap */
     const int32_t want = (int32_t)roundf(to * conv);
     assert(PulDir_moveTo(a, to));
+    /* sat() clamps every increment, so a clamp shows only as lag: test 11's tracking */
     int32_t worst = 0;
     for (uint32_t t = 0; PulDir_isMoving(a); t++) {
         assert(t < 2u * PULDIR_TICK_HZ);
-        fake_run(1);
+        track_run(a, 1);
         const int32_t m = abs_inc();
-        assert(m <= PULDIR_INC_MAX);
         if (m > worst)
             worst = m;
     }
     assert(st(0).count == want && worst > PULDIR_INC_MAX - PULDIR_INC_MAX / 1000);
+    /* Unclamped, each boundary is within a few truncation remainders (3N seen);
+     * a clamp of even 1000 units a tick accumulates to ~10^7. */
+    assert(worst_raw <= 4 * (int64_t)N && worst_rev == 0);
 
     /* the same cap for a jog */
     assert(!PulDir_jog(a, cap) && a->refusal == PULDIR_R_RATE && !PulDir_isMoving(a));
     assert(PulDir_jog(a, -below));
     worst = 0;
     for (uint32_t t = 0; t < PULDIR_TICK_HZ / 5u; t++) {
-        fake_run(1);
+        track_run(a, 1);
         const int32_t m = abs_inc();
-        assert(m <= PULDIR_INC_MAX);
         if (m > worst)
             worst = m;
     }
     assert(worst > PULDIR_INC_MAX - PULDIR_INC_MAX / 1000);
     PulDir_stop(a);
-    for (uint32_t t = 0; PulDir_isMoving(a); t++) {
-        assert(t < PULDIR_TICK_HZ);
-        fake_run(1);
-        assert(abs_inc() <= PULDIR_INC_MAX);
-    }
+    track_until_idle(a, PULDIR_TICK_HZ);
 }
 
 /* 2.2 and test 24, the axis half: which limit changes are live. */
@@ -1361,12 +1382,44 @@ static void t_live_limits(void)
     nlines = 0;
     PulDir_loop(a);
     nlines = 0;
-    assert(!PulDir_setJerk(a, 0.9f * jmin) && a->refusal == PULDIR_R_TAPS && a->refused_value == jmin);
-    assert(PulDir_jerk(a) == 290.0f);
+    assert(!PulDir_setJerk(a, 0.9f * jmin) && a->refusal == PULDIR_R_TAPS);
+    const float floor_ = a->refused_value;
+    assert(fabsf(floor_ - jmin) <= 1e-5f * jmin && PulDir_jerk(a) == 290.0f);
     PulDir_loop(a);
     assert(nlines == 1 && strstr(lines[0], "setJerk refused: jerk below 273.4"));
     assert(strstr(lines[0], " needs more than 256 taps"));
-    assert(PulDir_setJerk(a, 1.001f * jmin));           /* just above the smallest that fits */
+    const float logged = strtof(strstr(lines[0], "below ") + 6, NULL);
+    assert(logged >= floor_ && logged - floor_ <= 1e-4f + 1e-6f * floor_);
+    assert(PulDir_setJerk(a, logged) && PulDir_jerk(a) == logged);   /* the logged value fits */
+    assert(PulDir_setJerk(a, floor_));
+}
+
+/* The refused value of a jerk below the taps is the smallest that fits, and the
+ * logged figure, rounded up, is accepted too (float rounding made both miss). */
+static void t_jerk_floor(void)
+{
+    setup(1);
+    PulDir_attachLogger(logger);
+    PulDir* a = &ax[0];
+    rng = 0x5EEDF00Du;
+    for (int k = 0; k < 3000; k++) {
+        const float conv = frand(0.5f, 500.0f);
+        assert(PulDir_setConversion(a, conv));
+        const float acc = frand(10.0f, 1.0e5f) / conv, dec = frand(10.0f, 1.0e5f) / conv;
+        assert(PulDir_setDefaults(a, 100.0f / conv, acc, dec, 0.0f));
+        const float jmin = MotionProfile_minJerk(acc * conv, dec * conv, 1.0f / (float)PULDIR_PLAN_HZ) / conv;
+        nlines = 0;
+        assert(!PulDir_setJerk(a, 0.5f * jmin) && a->refusal == PULDIR_R_TAPS);
+        const float floor_ = a->refused_value;
+        PulDir_loop(a);
+        assert(nlines == 1);
+        const float logged = strtof(strstr(lines[0], "below ") + 6, NULL);
+        assert(logged >= floor_ && logged - floor_ <= 1e-4f + 1e-6f * floor_);
+        assert(!PulDir_setJerk(a, nextafterf(floor_, 0.0f)) && a->refusal == PULDIR_R_TAPS);
+        assert(PulDir_setJerk(a, floor_));
+        assert(PulDir_setJerk(a, 0.0f) && PulDir_setJerk(a, logged));
+        assert(PulDir_setJerk(a, 0.0f));
+    }
 }
 
 /* D18: the datum moves only in IDLE, and moves everything together. */
@@ -1984,6 +2037,89 @@ static void t_stream_transitions(void)
     assert(st(0).count == ch && edges[0] == e0 && a->mode == PULDIR_MODE_IDLE);
 }
 
+/* Commands given together before one plan tick apply in order: a halt first, a
+ * stream begun before its end, a stop last. */
+static void t_request_order(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    fake_on_plan(check_ramps);
+    PulDir* a = &ax[0];
+    assert(PulDir_setDefaults(a, 5000.0f, 50000.0f, 50000.0f, 0.0f));
+    const float dv = 50000.0f / (float)PULDIR_PLAN_HZ * 1.0001f;   /* one interval at accel */
+    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    for (int k = 0; k < 6; k++) {
+        fake_plan_phase = phases[k % 3];
+        const int32_t c0 = st(0).count, dir = k % 2 ? -1 : 1;
+        const int64_t n0 = net[0];
+
+        /* halt then moveTo: from rest where the pulses stopped, onto the new target */
+        assert(PulDir_moveTo(a, (float)(c0 + dir * 20000)));
+        fake_run(150u * N + (uint32_t)k * 7u);
+        assert(fabsf(PulDir_velocity(a)) == 5000.0f);
+        const int32_t want = st(0).count - dir * 500;
+        PulDir_halt(a);
+        assert(PulDir_moveTo(a, (float)want));
+        while (!tick1())
+            ;
+        assert(fabsf(PulDir_velocity(a)) <= dv);
+        run_until_idle(a, 2u * PULDIR_TICK_HZ);
+        assert(st(0).count == want && PulDir_target(a) == (float)want);
+        assert(a->mode == PULDIR_MODE_IDLE && net[0] - n0 == want - c0);
+
+        /* moveTo then stop from rest: STOPPING, then IDLE without moving */
+        const uint64_t e1 = edges[0];
+        const uint32_t d1 = dirw[0];
+        assert(PulDir_moveTo(a, (float)(want + dir * 3000)));
+        PulDir_stop(a);
+        assert(a->mode == PULDIR_MODE_STOPPING && PulDir_isMoving(a));
+        run_until_idle(a, PULDIR_TICK_HZ);
+        assert(a->mode == PULDIR_MODE_IDLE && edges[0] == e1 && dirw[0] == d1);
+        assert(st(0).count == want && PulDir_target(a) == (float)want);
+
+        /* streamBegin then halt, and halt then streamBegin: no pulse after the halt */
+        assert(PulDir_jog(a, (float)dir * 3000.0f));
+        fake_run(100u * N);
+        uint64_t e2 = edges[0];
+        int32_t ch = st(0).count;
+        assert(PulDir_streamBegin(a));
+        PulDir_halt(a);
+        assert(a->mode == PULDIR_MODE_IDLE && !PulDir_inStream(a));
+        fake_run(3u * N);
+        assert(!PulDir_isMoving(a) && edges[0] == e2 && st(0).count == ch);
+        assert(PulDir_jog(a, (float)dir * 3000.0f));
+        fake_run(100u * N);
+        e2 = edges[0];
+        ch = st(0).count;
+        PulDir_halt(a);
+        assert(PulDir_streamBegin(a));
+        fake_run(20u * N);                    /* no setpoint: the stream holds the halted rest */
+        assert(PulDir_inStream(a) && PulDir_velocity(a) == 0.0f && edges[0] == e2);
+        PulDir_streamEnd(a);
+        run_until_idle(a, PULDIR_TICK_HZ);
+        assert(edges[0] == e2 && st(0).count == ch && a->mode == PULDIR_MODE_IDLE);
+
+        /* streamBegin then streamEnd or stop: a stop from the jog's velocity (check_ramps) */
+        const int32_t c3 = st(0).count;
+        assert(PulDir_jog(a, (float)dir * 3000.0f));
+        fake_run(100u * N);
+        const uint32_t d3 = dirw[0];
+        assert(PulDir_streamBegin(a));
+        if (k < 3)
+            PulDir_streamEnd(a);
+        else
+            PulDir_stop(a);
+        assert(a->mode == PULDIR_MODE_STOPPING);
+        while (!tick1())
+            ;
+        assert(fabsf(PulDir_velocity(a)) >= 3000.0f - dv && a->prof.stopping);
+        run_until_idle(a, PULDIR_TICK_HZ);
+        assert(dirw[0] == d3 && a->mode == PULDIR_MODE_IDLE && PulDir_target(a) == PulDir_position(a));
+        assert(dir > 0 ? st(0).count > c3 + 200 : st(0).count < c3 - 200);
+        check_rest(0, dir);
+    }
+}
+
 /* ---- the case table ------------------------------------------------------------------------ */
 
 static const struct { const char* name; void (*fn)(void); } cases[] = {
@@ -2020,6 +2156,8 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "stream_timeout", t_stream_timeout },
     { "stream_end", t_stream_end },
     { "stream_transitions", t_stream_transitions },
+    { "jerk_floor", t_jerk_floor },
+    { "request_order", t_request_order },
 };
 
 int main(int argc, char** argv)

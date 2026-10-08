@@ -1,4 +1,5 @@
 /* Events and the log: PulDir_loop turns an axis's event bits into log lines. */
+#include <float.h>
 #include <math.h>
 #include "puldir_internal.h"
 
@@ -54,8 +55,9 @@ static size_t put_uint(char* b, size_t at, uint64_t v, int min_digits)
     return at;
 }
 
-/* A signed decimal with four places, from integer arithmetic. */
-static size_t put_num(char* b, size_t at, float v)
+/* A signed decimal with four places, from integer arithmetic; up rounds a
+ * positive v so the printed figure, read back as a float, is never below it. */
+static size_t put_num(char* b, size_t at, float v, bool up)
 {
     if (isnan(v))
         return put(b, at, "nan");
@@ -65,7 +67,8 @@ static size_t put_num(char* b, size_t at, float v)
     }
     if (!(v < 1.0e14f))                         /* also inf: past what four places can show */
         return put(b, at, "1e14+");
-    const uint64_t q = (uint64_t)(v * 10000.0f + 0.5f);
+    const uint64_t q = up ? (uint64_t)ceilf(v * (1.0f + 4.0f * FLT_EPSILON) * 10000.0f)
+                          : (uint64_t)(v * 10000.0f + 0.5f);
     at = put_uint(b, at, q / 10000u, 1);
     at = put(b, at, ".");
     return put_uint(b, at, q % 10000u, 4);
@@ -115,14 +118,14 @@ void PulDir_loop(PulDir* a)
         at = put(b, at, " refused: ");
         if (why == PULDIR_R_TAPS) {
             at = put(b, at, "jerk below ");
-            at = put_num(b, at, value);
+            at = put_num(b, at, value, true);   /* a floor: typed back, it must fit */
             at = put(b, at, " needs more than ");
             at = put_uint(b, at, MOTION_PROFILE_MAX_TAPS, 1);
             (void)put(b, at, " taps");
         } else {
             at = put(b, at, reason(why));
             if (why == PULDIR_R_RATE)
-                (void)put_num(b, at, value);
+                (void)put_num(b, at, value, false);
         }
         logger(b);
     }
@@ -133,7 +136,7 @@ void PulDir_loop(PulDir* a)
     if (ev & PULDIR_EV_LANDED) {
         size_t at = head(b, a);
         at = put(b, at, "landed at ");
-        (void)put_num(b, at, PulDir_position(a));
+        (void)put_num(b, at, PulDir_position(a), false);
         logger(b);
     }
 }

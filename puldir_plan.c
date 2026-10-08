@@ -71,10 +71,16 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
         /* Arrival: round away from zero so the target's integer is crossed (5.4
          * step 5). D6 kept the last interval M short, so this one moves more than
          * N(N-1) and the final edge falls on its last tick. */
+        int32_t inc = div_away(T - pb);
+        /* No edge lies between pb and T (D3): a fraction back must not turn the pin. */
+        const int64_t one = (int64_t)PULDIR_ONE;
+        const bool no_edge = T < one && T > -one && pb < one && pb > -one;
+        if (no_edge && inc != 0 && (inc > 0) != (a->dir_out > 0))
+            inc = 0;
         a->arrived = true;
-        a->approach = T > pb ? 1 : T < pb ? -1 : 0;
+        a->approach = inc > 0 ? 1 : inc < 0 ? -1 : 0;
         a->settle = 2;
-        publish(a, out, div_away(T - pb));
+        publish(a, out, inc);
     } else if (!a->arrived) {
         /* D6: hold the end M short of the target on the approach side until
          * arrival. Only toward a target: a jog or a stop in progress has none. */

@@ -70,6 +70,24 @@ void PulDir_start(void)
 
 /* ---- limits ---------------------------------------------------------------- */
 
+/* The generator's window() test, on the same float products as apply_limits. */
+static bool taps_fit(float acc, float dec, float j)
+{
+    return ceilf((acc + dec) / (j * DT)) <= (float)MOTION_PROFILE_MAX_TAPS;
+}
+
+/* The smallest jerk in user units that fits: minJerk's quotient and the
+ * conversion each round, so step to the exact float boundary. */
+static float jerk_floor(float acc, float dec, float conv)
+{
+    float j = MotionProfile_minJerk(acc, dec, DT) / conv;
+    while (!taps_fit(acc, dec, j * conv))
+        j = nextafterf(j, INFINITY);
+    for (float d = nextafterf(j, 0.0f); taps_fit(acc, dec, d * conv); d = nextafterf(d, 0.0f))
+        j = d;
+    return j;
+}
+
 /* Validate four limits (user units) at conv exactly as MotionProfile_setLimits
  * will see them, so the plan tick's call cannot refuse; then hand them over
  * (D17). The frozen-window test reads n and done under the same lock as the
@@ -87,9 +105,9 @@ static bool apply_limits(PulDir* a, const float lim[4], const char* call)
     } else if (!(lim[0] < (float)(PULDIR_TICK_HZ / 2u) / conv)) {
         why = PULDIR_R_RATE;
         value = (float)(PULDIR_TICK_HZ / 2u) / conv;
-    } else if (j > 0.0f && !(ceilf(ratio) <= (float)MOTION_PROFILE_MAX_TAPS)) {
+    } else if (j > 0.0f && !taps_fit(acc, dec, j)) {
         why = PULDIR_R_TAPS;
-        value = MotionProfile_minJerk(acc, dec, DT) / conv;
+        value = jerk_floor(acc, dec, conv);
     } else {
         port_lock();
         if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
