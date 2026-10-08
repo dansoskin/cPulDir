@@ -7,8 +7,6 @@
 #define M   (N * N)                             /* D6 margin, in 2^-32 pulse */
 #define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
 #define TIMEOUT_TICKS  puldir_ms_ticks(PULDIR_STREAM_TIMEOUT_MS)
-#define DEBOUNCE_TICKS puldir_ms_ticks(PULDIR_FAULT_DEBOUNCE_MS)
-#define CLEAR_TICKS    puldir_ms_ticks(PULDIR_FAULT_CLEAR_MS)
 #define DELAY_TICKS    puldir_ms_ticks(PULDIR_HOMING_DELAY_MS)
 
 static int64_t to_fix(float pulses) { return (int64_t)(pulses * PULDIR_FIX); }
@@ -423,7 +421,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     }
 }
 
-/* ---- fault, enable delay and release (5.8), for every axis, group members too ---- */
+/* ---- enable delay, fault and release (5.8), for every axis, group members too ---- */
 
 /* Before the groups and axes run. A latch halts under the lock, the axis or its whole group, and
  * reads the snapshots of what it stopped again; run_axis then reads the halt's requests. */
@@ -431,38 +429,10 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
                     PulDirSnap* snap, PulDirInc* out)
 {
     puldir_enable_service(a, snap[a->slot].high, now);
-
-    /* The clear pulse ends. This sample was taken before the pin was lowered, so the latch holds
-     * until a later one reads inactive; a drive still in alarm stays latched, uncounted. */
-    if (a->clearing && now - a->clr_t0 >= CLEAR_TICKS) {
-        port_pin_write(a->clr, a->clr_inverted);
-        a->clearing = false;
-        a->clr_armed = a->fault;
-        return;
-    }
-
-    if (!flt) {
-        a->flt_seen = false;
-        if (a->clr_armed) {
-            a->clr_armed = false;
-            a->fault = false;
-            a->events |= PULDIR_EV_FAULT_CLEARED;
-        }
-        return;
-    }
-    if (!a->flt_seen) {
-        a->flt_seen = true;
-        a->flt_since = t_pin;
-        return;
-    }
-    if (a->fault || t_pin - a->flt_since < DEBOUNCE_TICKS)
+    if (!puldir_fault_service(a, flt, t_pin, now))
         return;
 
     /* Latch: halt, and leave the enable pin alone (D12). */
-    a->fault = true;
-    a->fault_count++;
-    a->last_fault_tick = t_pin;
-    a->events |= PULDIR_EV_FAULT;
     a->homed = false;
     a->enable.held = true;
     if (a->mode == PULDIR_MODE_HOMING) {
@@ -496,10 +466,8 @@ void puldir_plan_tick(void)
      * between the snapshot and the publish would make the prediction stale. */
     bool flt[PULDIR_MAX_AXES];
     const uint32_t t_pin = PulDir_ticks();
-    for (uint8_t i = 0; i < n; i++) {
-        const PulDir* a = puldir_axes[i];
-        flt[i] = a->has_flt && port_pin_read(a->flt) != a->flt_inverted;
-    }
+    for (uint8_t i = 0; i < n; i++)
+        flt[i] = puldir_fault_sample(puldir_axes[i]);
 
     PulDirSnap snap[PULDIR_MAX_AXES];
     port_lock();                                /* one consistent instant for every axis */

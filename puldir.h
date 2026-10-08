@@ -9,6 +9,7 @@
 #include "motion_profile.h"
 #include "puldir_port.h"
 #include "puldir_enable.h"
+#include "puldir_fault.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,9 +65,9 @@ struct PulDirGroup;
 typedef struct PulDir {
     /* setup, main context */
     char  name[16];
-    puldir_pin_t pul, dir, flt, clr;
-    bool  pul_active_low, dir_inverted, flt_inverted, clr_inverted;
-    bool  has_pins, has_flt, has_clr;
+    puldir_pin_t pul, dir;
+    bool  pul_active_low, dir_inverted;
+    bool  has_pins;
     float conv;                          /* pulses per user unit, > 0 */
     float def[4];                        /* default speed, accel, decel, jerk, user units */
     float lim[4];                        /* current speed, accel, decel, jerk, user units */
@@ -88,7 +89,7 @@ typedef struct PulDir {
     MotionProfile prof;                  /* pulses, relative to origin */
     uint64_t target;                     /* absolute, 32.32 pulses */
     int32_t  origin;
-    volatile bool moving, homed, fault;
+    volatile bool moving, homed;
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
@@ -104,20 +105,16 @@ typedef struct PulDir {
     float v_cmd;                         /* pulses/s */
     volatile float stream_err;           /* pulses: p_hold - P at the boundary */
 
-    /* homing and fault */
+    /* homing */
     volatile PulDirHomeState home_state;
     PulDirHomeState home_fail;           /* the phase the last failed run was in */
     uint32_t home_t0;                    /* the tick the current phase began */
-    uint32_t flt_since;                  /* the first sample of the current active run */
-    uint32_t fault_count, last_fault_tick, clr_t0;
-    bool flt_seen, clearing;
-    bool clr_armed;                      /* a clear pulse ended on a latch: the first sample that
-                                            reads the input inactive lifts it */
 
     struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
 
-    /* the modules (5.8), each in its own file */
+    /* the modules, each with its own file */
     PulDirEnable enable;
+    PulDirFault  fault;
 
     /* the pulse tick's state lives in puldir_pulse.c, by slot */
 

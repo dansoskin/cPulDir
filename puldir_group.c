@@ -70,7 +70,7 @@ bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
 /* 5.5: a member must be IDLE and at rest, not faulted, not in a group's move. */
 static PulDirRefusal member_refusal(const PulDir* a)
 {
-    if (a->fault)
+    if (a->fault.latched)
         return PULDIR_R_FAULT;
     if (a->mode == PULDIR_MODE_GROUP)
         return PULDIR_R_BUSY;                   /* in this group's move or another's */
@@ -178,7 +178,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     port_lock();
     for (uint8_t i = 0; i < n && why == PULDIR_R_NONE; i++)
-        if (g->axes[i]->fault) {
+        if (g->axes[i]->fault.latched) {
             why = PULDIR_R_FAULT;
             bad = g->axes[i];
         }

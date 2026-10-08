@@ -79,7 +79,7 @@ void PulDir_loop(PulDir* a)
     const PulDirRefusal why = a->refusal;
     const char* call = a->refused_call;
     const float value = a->refused_value;
-    const uint32_t faults = a->fault_count;
+    const uint32_t faults = a->fault.count;
     const PulDirHomeState failed_in = a->home_fail;
     port_unlock();
     if (!a->log_on || logger == NULL)

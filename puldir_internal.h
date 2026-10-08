@@ -113,4 +113,5 @@ void   puldir_log(const PulDir* a, const char* line);     /* through the logger,
 /* The modules' functions: each header's second half, kept out of puldir.h's view. */
 #define PULDIR_INTERNAL_FUNCTIONS
 #include "puldir_enable.h"
+#include "puldir_fault.h"
 #endif

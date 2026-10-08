@@ -73,22 +73,6 @@ void PulDir_attachPins(PulDir* a, puldir_pin_t pulse, puldir_pin_t dir,
     port_pin_write(dir, !dir_inverted);                   /* the level for +1 */
 }
 
-/* The fault and clear pins: setup, before PulDir_start. The clear output is parked inactive. */
-void PulDir_attachFault(PulDir* a, puldir_pin_t p, bool inverted)
-{
-    a->flt = p;
-    a->flt_inverted = inverted;
-    a->has_flt = true;
-}
-
-void PulDir_attachFaultClear(PulDir* a, puldir_pin_t p, bool inverted)
-{
-    a->clr = p;
-    a->clr_inverted = inverted;
-    a->has_clr = true;
-    port_pin_write(p, inverted);
-}
-
 bool PulDir_register(PulDir* a)
 {
     PulDirRefusal why = PULDIR_R_NONE;
@@ -205,7 +189,7 @@ static PulDirRefusal motion_check(const PulDir* a)
     const PulDirMode m = a->mode;
     if (a->slot == PULDIR_MAX_AXES)
         return PULDIR_R_UNREGISTERED;   /* the ticks cannot run it: start needs registration */
-    if (a->fault)
+    if (a->fault.latched)
         return PULDIR_R_FAULT;
     if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
         return PULDIR_R_MODE;
@@ -441,7 +425,7 @@ bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
     return true;
 }
 
-/* ---- homing and fault (5.8) -------------------------------------------------- */
+/* ---- homing (5.8) ------------------------------------------------------------ */
 
 /* The homing values, checked at the conversion they will run under: the speed
  * below the tick ceiling, the adjust and the datum whole pulses inside int32. */
@@ -500,7 +484,7 @@ bool PulDir_homeStart(PulDir* a)
         port_lock();
         if (a->slot == PULDIR_MAX_AXES) {
             why = PULDIR_R_UNREGISTERED;    /* as motion_check: the ticks cannot run it */
-        } else if (a->fault) {
+        } else if (a->fault.latched) {
             why = PULDIR_R_FAULT;
         } else if (a->mode != PULDIR_MODE_IDLE) {
             why = PULDIR_R_MODE;
@@ -536,31 +520,6 @@ void PulDir_homeStop(PulDir* a)
 
 PulDirHomeState PulDir_homeState(PulDir* a) { return a->home_state; }
 bool PulDir_isHomed(PulDir* a)              { return a->homed; }
-
-/* Raises the clear pin and returns; the plan tick lowers it after
- * PULDIR_FAULT_CLEAR_MS and lifts the latch (5.8). Nothing blocks. */
-bool PulDir_clearFault(PulDir* a)
-{
-    PulDirRefusal why = PULDIR_R_NONE;
-    if (!a->has_clr) {
-        why = PULDIR_R_NO_PIN;
-    } else {
-        port_lock();
-        if (a->clearing) {
-            why = PULDIR_R_BUSY;
-        } else {
-            port_pin_write(a->clr, !a->clr_inverted);
-            a->clearing = true;
-            a->clr_t0 = PulDir_ticks();
-        }
-        port_unlock();
-    }
-    if (why != PULDIR_R_NONE) {
-        puldir_refuse(a, "clearFault", why, 0.0f);
-        return false;
-    }
-    return true;
-}
 
 /* ---- state ----------------------------------------------------------------- */
 
@@ -628,7 +587,7 @@ PulDirMode PulDir_mode(PulDir* a)     { return a->mode; }
 
 PulDirStatus PulDir_status(PulDir* a)
 {
-    if (a->fault)
+    if (a->fault.latched)
         return PULDIR_FAULT;
     if (a->moving)
         return PULDIR_MOVING;
