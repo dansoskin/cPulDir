@@ -113,3 +113,13 @@ void puldir_enable_release(PulDir* a, bool was_moving, uint32_t now)
         e->release_due = false;
     }
 }
+
+bool puldir_enable_delaying(const PulDir* a)
+{
+    return a->enable.wait;
+}
+
+void puldir_enable_hold(PulDir* a)
+{
+    a->enable.held = true;
+}

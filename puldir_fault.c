@@ -48,6 +48,11 @@ bool PulDir_clearFault(PulDir* a)
     return true;
 }
 
+bool puldir_fault_latched(const PulDir* a)
+{
+    return a->fault.latched;
+}
+
 /* ---- the plan tick's part ----------------------------------------------------------------- */
 
 bool puldir_fault_sample(const PulDir* a)

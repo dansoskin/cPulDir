@@ -43,6 +43,7 @@ typedef struct {
     bool     started;                         /* PulDir_start has run */
 } PulDirTiming;
 extern PulDirTiming puldir_timing;
+#define PULDIR_N ((int64_t)puldir_timing.n)   /* pulse ticks per plan interval, as the 32.32 maths wants it */
 bool puldir_timing_take(void);                /* PulDir_init: checks the pair and fixes it; true once set */
 
 /* A duration in pulse ticks; every time is compared by unsigned subtraction (5.9). */

@@ -32,4 +32,9 @@ void puldir_enable_wake(PulDir*);
 void puldir_enable_service(PulDir*, bool pul_high, uint32_t now);
 /* Plan tick, after the axis ran: auto-release once the axis has been IDLE for the release delay. */
 void puldir_enable_release(PulDir*, bool was_moving, uint32_t now);
+/* Plan tick: the enable delay still holds the axis's motion. */
+bool puldir_enable_delaying(const PulDir*);
+/* Plan tick: a fault latch halted the axis, so no auto-release until its next
+ * accepted command (D12). */
+void puldir_enable_hold(PulDir*);
 #endif

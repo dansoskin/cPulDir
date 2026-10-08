@@ -85,6 +85,8 @@ No compile definitions: the rates are arguments of the timer attach calls in `pu
 
 (`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` and the four module files (`puldir_enable.c`, `puldir_fault.c`, `puldir_homing.c`, `puldir_stream.c`) are required too: the plan tick calls into them, so the link fails without them.)
 
+The library formats its log lines with `snprintf`, including `%f`: with newlib-nano the firmware must link float printf (`-u _printf_float`).
+
 ### 3.2 `Core/Src/stm32g4xx_it.c`
 
 Add the include and the two handlers' bodies inside the user sections (the function shells are CubeMX's):

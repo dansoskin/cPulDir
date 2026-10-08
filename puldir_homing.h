@@ -29,6 +29,12 @@ typedef struct {
 /* Under the lock, from main or the plan tick, a run ending unhomed: the limits homeStart found go
  * back. The plan tick hands them to the generator once its window allows. */
 void puldir_home_restore(PulDir*);
+/* Main context, under the lock: a stop or halt ended the run, and the homing state goes IDLE. */
+void puldir_home_cancel(PulDir*);
+/* Main context, under the lock: setPosition moved the datum, so the axis is no longer homed. */
+void puldir_home_lose_datum(PulDir*);
+/* Plan tick: the enable delay holds the axis, so the phase clock starts when the hold ends. */
+void puldir_home_hold(PulDir*, uint32_t now);
 /* Plan tick, on a fault latch: the datum is lost, and a run in progress fails. */
 void puldir_home_fault(PulDir*);
 /* Plan tick, homeStart's request in HOMING: the run sets off toward the switch. */

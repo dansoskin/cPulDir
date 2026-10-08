@@ -19,6 +19,10 @@ typedef struct {
 
 #if defined(PULDIR_INTERNAL_FUNCTIONS) && !defined(PULDIR_STREAM_FUNCTIONS)
 #define PULDIR_STREAM_FUNCTIONS
+/* PulDir_init: the default catch-up time. */
+void puldir_stream_defaults(PulDir*);
+/* Plan tick: a halt stopped the generator, which no longer idles under a stream. */
+void puldir_stream_halt(PulDir*);
 /* Plan tick, streamBegin's request, before the limits: the generator idles where the pulses are. */
 void puldir_stream_begin(PulDir*, int64_t pb);
 /* Plan tick, after the limits and the datum: leaves STREAM for STOPPING after streamEnd or stop,

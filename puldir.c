@@ -33,7 +33,7 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
         return init_refused(name, puldir_timing.pulse_us == 0u || puldir_timing.plan_us == 0u
                                   ? "timers not attached"
                                   : "plan period not 2 to 4096 whole pulse periods");
-    memset(a, 0, sizeof *a);
+    memset(a, 0, sizeof *a);              /* every module at rest: drive off, no latch, homing IDLE */
     memcpy(a->name, name, len);
     a->conv = c;
     /* The starting limits are 200 pulses/s, 200 pulses/s^2, no jerk: under the rate cap at any
@@ -41,12 +41,11 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
     const float d[4] = { 200.0f, 200.0f, 200.0f, 0.0f };
     for (int k = 0; k < 4; k++)
         a->def[k] = a->lim[k] = d[k] / c;
-    a->stream.catchup_ms = PULDIR_CATCHUP_MS;
+    puldir_stream_defaults(a);
     a->log_on = true;
     a->slot = PULDIR_MAX_AXES;
     a->dir_out = 1;                     /* the pulse tick's entries start at +1 */
     a->mode = PULDIR_MODE_IDLE;
-    a->home.state = PULDIR_HOME_IDLE;
     a->refusal = PULDIR_R_NONE;
     /* puldir_timing_plan kept dt inside MotionProfile_init's range and the
      * limits are finite and positive, so neither call can refuse. */
@@ -189,7 +188,7 @@ PulDirRefusal puldir_motion_check(const PulDir* a)
     const PulDirMode m = a->mode;
     if (a->slot == PULDIR_MAX_AXES)
         return PULDIR_R_UNREGISTERED;   /* the ticks cannot run it: start needs registration */
-    if (a->fault.latched)
+    if (puldir_fault_latched(a))
         return PULDIR_R_FAULT;
     if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
         return PULDIR_R_MODE;
@@ -289,7 +288,7 @@ void PulDir_stop(PulDir* a)
     const bool group = a->mode == PULDIR_MODE_GROUP;
     if (!group && a->mode != PULDIR_MODE_IDLE) {
         if (a->mode == PULDIR_MODE_HOMING) {
-            a->home.state = PULDIR_HOME_IDLE;
+            puldir_home_cancel(a);
             puldir_home_restore(a);
             a->req &= (uint16_t)~REQ_HOME;  /* not yet begun: there is nothing to stop */
         }
@@ -327,7 +326,7 @@ void PulDir_halt(PulDir* a)
         const bool homing = a->mode == PULDIR_MODE_HOMING;
         puldir_halt_locked(a);
         if (homing)
-            a->home.state = PULDIR_HOME_IDLE;
+            puldir_home_cancel(a);
     }
     port_unlock();
 }
@@ -381,7 +380,7 @@ bool PulDir_setPosition(PulDir* a, float pos)
             if (reg)
                 puldir_set_datum(a->slot, c);
             a->target = (uint64_t)(uint32_t)c << 32;
-            a->home.homed = false;
+            puldir_home_lose_datum(a);
             a->req |= REQ_SETPOS;
         }
         port_unlock();
@@ -398,7 +397,7 @@ PulDirMode PulDir_mode(PulDir* a)     { return a->mode; }
 
 PulDirStatus PulDir_status(PulDir* a)
 {
-    if (a->fault.latched)
+    if (puldir_fault_latched(a))
         return PULDIR_FAULT;
     if (a->moving)
         return PULDIR_MOVING;

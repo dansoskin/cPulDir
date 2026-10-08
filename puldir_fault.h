@@ -28,4 +28,6 @@ bool puldir_fault_sample(const PulDir*);
 /* Plan tick, after the enable service: the clear pulse ends, the sample taken at t_pin is debounced
  * and the latch closes. True if it just closed: the caller halts what it stopped. */
 bool puldir_fault_service(PulDir*, bool active, uint32_t t_pin, uint32_t now);
+/* The latch is closed: motion is refused. Under the lock wherever a refusal depends on it (D17). */
+bool puldir_fault_latched(const PulDir*);
 #endif

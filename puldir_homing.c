@@ -64,7 +64,7 @@ bool PulDir_homeStart(PulDir* a)
         port_lock();
         if (a->slot == PULDIR_MAX_AXES) {
             why = PULDIR_R_UNREGISTERED;    /* as puldir_motion_check: the ticks cannot run it */
-        } else if (a->fault.latched) {
+        } else if (puldir_fault_latched(a)) {
             why = PULDIR_R_FAULT;
         } else if (a->mode != PULDIR_MODE_IDLE) {
             why = PULDIR_R_MODE;
@@ -94,7 +94,7 @@ void PulDir_homeStop(PulDir* a)
     if (a->mode == PULDIR_MODE_HOMING)
         PulDir_halt(a);
     port_lock();
-    a->home.state = PULDIR_HOME_IDLE;
+    puldir_home_cancel(a);
     port_unlock();
 }
 
@@ -105,6 +105,16 @@ void puldir_home_restore(PulDir* a)
 {
     memcpy(a->lim, a->home.saved_lim, sizeof a->lim);
     a->req |= REQ_LIMITS;
+}
+
+void puldir_home_cancel(PulDir* a)
+{
+    a->home.state = PULDIR_HOME_IDLE;
+}
+
+void puldir_home_lose_datum(PulDir* a)
+{
+    a->home.homed = false;
 }
 
 /* ---- the plan tick's part ----------------------------------------------------------------- */
@@ -154,6 +164,11 @@ static void home_jog(PulDir* a, bool away)
     const float dir = away ? -(float)h->dir : (float)h->dir;
     (void)MotionProfile_setEndless(&a->prof, dir * speed * a->conv);   /* finite: homeStart checked it */
     home_course(a);
+}
+
+void puldir_home_hold(PulDir* a, uint32_t now)
+{
+    a->home.t0 = now;
 }
 
 void puldir_home_begin(PulDir* a, uint32_t now)

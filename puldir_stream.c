@@ -3,7 +3,6 @@
 #include <string.h>
 #include "puldir_internal.h"
 
-#define N             ((int64_t)puldir_timing.n)          /* fixed before the ticks start */
 #define TIMEOUT_TICKS puldir_ms_ticks(PULDIR_STREAM_TIMEOUT_MS)
 
 /* From IDLE, PROFILE or STOPPING; a pending move or stop gives way. The plan tick takes the axis's
@@ -89,7 +88,17 @@ bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
     return true;
 }
 
+void puldir_stream_defaults(PulDir* a)
+{
+    a->stream.catchup_ms = PULDIR_CATCHUP_MS;
+}
+
 /* ---- the plan tick's part ----------------------------------------------------------------- */
+
+void puldir_stream_halt(PulDir* a)
+{
+    a->stream.live = false;
+}
 
 void puldir_stream_begin(PulDir* a, int64_t pb)
 {
@@ -160,6 +169,6 @@ void puldir_stream_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
     const int32_t inc = puldir_div_trunc(puldir_to_fix(s->v_cmd * puldir_timing.dt));
     puldir_set_inc(a, out, inc);
     a->vel_out = s->v_cmd;
-    a->target = base + (uint64_t)(pb + (int64_t)inc * N);   /* the aim, as a jog reads it */
+    a->target = base + (uint64_t)(pb + (int64_t)inc * PULDIR_N);   /* the aim, as a jog reads it */
     (void)MotionProfile_setPosition(&a->prof, frac);        /* the idle generator follows the pulses */
 }

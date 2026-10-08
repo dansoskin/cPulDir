@@ -2,8 +2,7 @@
  * Float lives here; the pulse tick sees only the published integers. */
 #include "puldir_internal.h"
 
-#define N   ((int64_t)puldir_timing.n)          /* fixed before the ticks start */
-#define M   (N * N)                             /* D6 margin, in 2^-32 pulse */
+#define M   (PULDIR_N * PULDIR_N)               /* D6 margin, in 2^-32 pulse */
 #define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
 
 int64_t puldir_to_fix(float pulses) { return (int64_t)(pulses * PULDIR_FIX); }
@@ -25,12 +24,12 @@ static int32_t sat(int64_t q)
     return q > PULDIR_INC_MAX ? PULDIR_INC_MAX : q < -PULDIR_INC_MAX ? -PULDIR_INC_MAX : (int32_t)q;
 }
 
-int32_t puldir_div_trunc(int64_t d) { return sat(d / N); }
+int32_t puldir_div_trunc(int64_t d) { return sat(d / PULDIR_N); }
 
 static int32_t div_away(int64_t d)
 {
-    int64_t q = d / N;
-    if (q * N != d)
+    int64_t q = d / PULDIR_N;
+    if (q * PULDIR_N != d)
         q += d > 0 ? 1 : -1;
     return sat(q);
 }
@@ -89,7 +88,7 @@ void puldir_halt_generator(PulDir* a, int64_t pb)
     (void)MotionProfile_setPosition(&a->prof, puldir_to_pulses(pb));
     a->arrived = false;
     a->settle = 0;
-    a->stream.live = false;
+    puldir_stream_halt(a);
 }
 
 /* Aims this interval's end at the generator's position (T, pb, end: 32.32 from base). True at rest:
@@ -189,10 +188,10 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
     /* 4. The enable delay (5.8): a drive enabled too recently publishes nothing and its generator
      * waits. The homing phase clock starts when the hold ends. */
-    if (a->enable.wait && a->mode != PULDIR_MODE_IDLE) {
+    if (puldir_enable_delaying(a) && a->mode != PULDIR_MODE_IDLE) {
         puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
-        a->home.t0 = now;
+        puldir_home_hold(a, now);
         return;
     }
 
@@ -233,14 +232,14 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
 
     /* Latch: halt, and leave the enable pin alone (D12). */
     puldir_home_fault(a);
-    a->enable.held = true;
+    puldir_enable_hold(a);
     PulDirGroup* g = a->group;
     port_lock();
     if (a->mode == PULDIR_MODE_GROUP && g != NULL) {
         puldir_group_halt(g, out);
         g->faulted = true;
         for (uint8_t i = 0; i < g->count; i++) {
-            g->axes[i]->enable.held = true;
+            puldir_enable_hold(g->axes[i]);
             puldir_pulse_read(g->axes[i]->slot, ahead, &snap[g->axes[i]->slot]);
         }
     } else {
@@ -267,7 +266,7 @@ void puldir_plan_tick(void)
     port_lock();                                /* one consistent instant for every axis */
     /* Ticks the live increments still run before the next latch. At a boundary
      * (left == N) the set published below latches on the very next tick, so none. */
-    const uint32_t ahead = puldir_left() % (uint32_t)N;
+    const uint32_t ahead = puldir_left() % (uint32_t)PULDIR_N;
     const uint32_t now = PulDir_ticks();        /* the tick count the positions were read at */
     for (uint8_t i = 0; i < n; i++)
         puldir_pulse_read(i, ahead, &snap[i]);  /* D5 prediction */

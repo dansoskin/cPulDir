@@ -70,7 +70,7 @@ bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
 /* 5.5: a member must be IDLE and at rest, not faulted, not in a group's move. */
 static PulDirRefusal member_refusal(const PulDir* a)
 {
-    if (a->fault.latched)
+    if (puldir_fault_latched(a))
         return PULDIR_R_FAULT;
     if (a->mode == PULDIR_MODE_GROUP)
         return PULDIR_R_BUSY;                   /* in this group's move or another's */
@@ -178,7 +178,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     port_lock();
     for (uint8_t i = 0; i < n && why == PULDIR_R_NONE; i++)
-        if (g->axes[i]->fault.latched) {
+        if (puldir_fault_latched(g->axes[i])) {
             why = PULDIR_R_FAULT;
             bad = g->axes[i];
         }
@@ -321,7 +321,7 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
          * delay (5.8), publishing directions alone. A stop before the start need not wait. */
         bool ready = true;
         for (uint8_t i = 0; i < n; i++)
-            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !g->axes[i]->enable.wait;
+            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !puldir_enable_delaying(g->axes[i]);
         if (!ready && !s->stopping) {
             for (uint8_t i = 0; i < n; i++) {
                 PulDir* a = g->axes[i];
