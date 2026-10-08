@@ -10,6 +10,14 @@
 extern "C" {
 #endif
 
+/* Defaults for callers that count in ms; the module itself takes durations in ticks. */
+#ifndef PULDIR_FAULT_DEBOUNCE_MS
+#define PULDIR_FAULT_DEBOUNCE_MS 2u
+#endif
+#ifndef PULDIR_FAULT_CLEAR_MS
+#define PULDIR_FAULT_CLEAR_MS 10u
+#endif
+
 typedef struct {
     puldir_pin_t pin, clr_pin;           /* the alarm input, the clear output */
     bool     inverted, attached;

@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef PULDIR_HOMING_DELAY_MS
+#define PULDIR_HOMING_DELAY_MS 1000u
+#endif
+
 typedef enum {
     PULDIR_HOME_IDLE, PULDIR_HOME_MOVE_TOWARDS_LIMIT, PULDIR_HOME_DELAY1,
     PULDIR_HOME_MOVE_AWAY_FROM_LIMIT, PULDIR_HOME_DELAY2,

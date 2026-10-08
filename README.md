@@ -364,19 +364,19 @@ The STM32 `port_lock` disables exactly the two attached IRQ numbers in the NVIC 
 
 ## Configuration macros
 
-Define these on the compiler command line. Defaults are from the headers.
+Define these on the compiler command line. Each default lives in the header of the module that uses it.
 
-| macro | default | meaning |
-|---|---|---|
-| `PULDIR_MAX_AXES` | 8u | axis table size |
-| `PULDIR_MAX_GROUPS` | 4u | group table size |
-| `PULDIR_CATCHUP_MS` | 50u | stream catch-up time |
-| `PULDIR_STREAM_TIMEOUT_MS` | 100u | stream setpoint timeout |
-| `PULDIR_FAULT_DEBOUNCE_MS` | 2u | fault input must stay active this long |
-| `PULDIR_FAULT_CLEAR_MS` | 10u | fault clear pulse width |
-| `PULDIR_HOMING_DELAY_MS` | 1000u | pause between homing phases |
-| `PULDIR_TICK_START` | 0u | first tick count; tests only |
-| `MOTION_PROFILE_MAX_TAPS` | 256 | jerk filter window; raise for softer jerk |
+| macro | default | header | meaning |
+|---|---|---|---|
+| `PULDIR_MAX_AXES` | 8u | `puldir.h` | axis table size |
+| `PULDIR_MAX_GROUPS` | 4u | `puldir.h` | group table size |
+| `PULDIR_CATCHUP_MS` | 50u | `puldir_stream.h` | stream catch-up time |
+| `PULDIR_STREAM_TIMEOUT_MS` | 100u | `puldir_stream.h` | stream setpoint timeout |
+| `PULDIR_FAULT_DEBOUNCE_MS` | 2u | `drive/puldir_fault.h` | fault input must stay active this long |
+| `PULDIR_FAULT_CLEAR_MS` | 10u | `drive/puldir_fault.h` | fault clear pulse width |
+| `PULDIR_HOMING_DELAY_MS` | 1000u | `puldir_homing.h` | pause between homing phases |
+| `PULDIR_TICK_START` | 0u | `puldir.h` | first tick count; tests only |
+| `MOTION_PROFILE_MAX_TAPS` | 256 | `motion_profile.h` | jerk filter window; raise for softer jerk |
 
 ## Timing
 

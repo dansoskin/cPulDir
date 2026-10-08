@@ -5,6 +5,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef PULDIR_CATCHUP_MS
+#define PULDIR_CATCHUP_MS 50u
+#endif
+#ifndef PULDIR_STREAM_TIMEOUT_MS
+#define PULDIR_STREAM_TIMEOUT_MS 100u
+#endif
+
 typedef struct {
     float    sp_pos, sp_vel;             /* pulses, pulses/s; the last setpoint */
     uint32_t sp_tick;                    /* its arrival tick, or streamBegin's before the first */

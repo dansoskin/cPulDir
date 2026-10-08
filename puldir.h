@@ -23,21 +23,6 @@ extern "C" {
 #ifndef PULDIR_MAX_GROUPS
 #define PULDIR_MAX_GROUPS 4u
 #endif
-#ifndef PULDIR_CATCHUP_MS
-#define PULDIR_CATCHUP_MS 50u
-#endif
-#ifndef PULDIR_STREAM_TIMEOUT_MS
-#define PULDIR_STREAM_TIMEOUT_MS 100u
-#endif
-#ifndef PULDIR_FAULT_DEBOUNCE_MS
-#define PULDIR_FAULT_DEBOUNCE_MS 2u
-#endif
-#ifndef PULDIR_FAULT_CLEAR_MS
-#define PULDIR_FAULT_CLEAR_MS 10u
-#endif
-#ifndef PULDIR_HOMING_DELAY_MS
-#define PULDIR_HOMING_DELAY_MS 1000u
-#endif
 #ifndef PULDIR_TICK_START
 #define PULDIR_TICK_START 0u                /* the rollover test starts near the wrap (D9) */
 #endif
