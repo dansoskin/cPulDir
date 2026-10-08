@@ -550,5 +550,5 @@ void puldir_plan_tick(void)
             run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].inc, snap[i].high, now, ahead);
         release(a, was[i], now);
     }
-    puldir_publish();
+    puldir_publish(now + ahead);                /* due at the boundary the snapshot aimed at: the tick after the ahead ticks */
 }

@@ -23,9 +23,11 @@ static Axis ax[PULDIR_MAX_AXES];
 static PulDirInc sets[2][PULDIR_MAX_AXES];
 static volatile uint8_t pub;            /* index of the last published set */
 static volatile uint8_t seq, latched;   /* publish count; publish count last latched */
+static volatile uint32_t due;           /* the tick the published set is due at: its boundary */
 static volatile uint32_t ticks = PULDIR_TICK_START;
 static volatile uint32_t left;          /* ticks left in this interval: N from puldir_timing_take on */
 static volatile uint32_t overruns;
+static volatile uint32_t late_sets;     /* sets latched after their boundary: published too late */
 
 /* ---- timing: the port's attach calls set it, the first PulDir_init fixes it ---- */
 
@@ -101,12 +103,16 @@ void puldir_pulse_tick(bool overrun)
         overruns++;
     const uint32_t n = puldir_naxes;
     const uint32_t n_plan = puldir_timing.n;
-    if (left == n_plan && latched != seq) {   /* a boundary: latch the whole set */
+    /* A boundary latches the whole set; so does any tick at or past the set's due tick, so a set
+     * published late runs the rest of its interval rather than a whole one later. */
+    if (latched != seq && (left == n_plan || (int32_t)(ticks - due) >= 0)) {
         const PulDirInc* s = sets[pub];
         for (uint32_t i = 0; i < n; i++) {
             ax[i].inc = s[i].inc;
             ax[i].dir = s[i].dir;
         }
+        if (left != n_plan)
+            late_sets++;
         latched = seq;
     }
     for (uint32_t i = 0; i < n; i++) {
@@ -162,10 +168,11 @@ void puldir_pulse_add(PulDir* p)
 
 PulDirInc* puldir_shadow(void) { return sets[pub ^ 1u]; }
 
-void puldir_publish(void)
+void puldir_publish(uint32_t due_tick)
 {
+    due = due_tick;
 #if defined(__GNUC__)
-    __asm__ volatile("" ::: "memory");  /* the shadow's stores land before the flip */
+    __asm__ volatile("" ::: "memory");  /* the shadow's stores and due land before the flip */
 #endif
     pub ^= 1u;
     seq++;
@@ -198,3 +205,4 @@ void puldir_set_datum(uint8_t slot, int32_t count)
 
 uint32_t PulDir_ticks(void)    { return ticks; }
 uint32_t PulDir_overruns(void) { return overruns; }
+uint32_t PulDir_lateSets(void) { return late_sets; }

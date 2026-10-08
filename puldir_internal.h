@@ -67,9 +67,9 @@ extern uint8_t puldir_naxes;
 void       puldir_pulse_tick(bool overrun);
 void       puldir_pulse_add(PulDir*);         /* PulDir_register: take the next slot, entries at inc 0, dir +1 */
 PulDirInc* puldir_shadow(void);               /* the unpublished set; the plan tick writes it */
-/* One store; latched at the next boundary (D5). Every entry with a non-zero
- * inc must have dir equal to its sign: the plan tick guarantees it. */
-void       puldir_publish(void);
+/* One store; latched at the next boundary (D5), or on the next tick if due_tick, that boundary, has
+ * passed. Every entry with a non-zero inc must have dir equal to its sign: the plan tick guarantees it. */
+void       puldir_publish(uint32_t due_tick);
 void       puldir_kill(uint8_t slot);         /* under the lock: zero live and published inc */
 /* Under the lock: ticks left in this interval, N when the next tick is the
  * boundary that latches. The live inc runs left % N more ticks. */

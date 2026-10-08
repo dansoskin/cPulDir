@@ -13,6 +13,7 @@ Guidelines 5.3 and 5.9 estimate the pulse tick's cost and jitter. They are estim
 - the pulse handler's duration, typical and worst,
 - CPU load = handler duration x tick rate,
 - overrun count after one minute (`PulDir_overruns()`),
+- late-set count after one minute (`PulDir_lateSets()`): sets the plan tick published after their boundary,
 - the plan tick's phase: it must run just after the pulse tick that latches a set.
 
 It runs at `BENCH_PULSE_US` = 20 and 5. If a pulse length is hopeless, only that argument changes; the library writes both timer periods from the attach arguments, and nothing else changes.
@@ -212,9 +213,9 @@ void bench_console(const char* axis, const char* cmd)
 {
     if (axis[0] == 's' && axis[1] == '\0')
     {
-        log_data("ticks %lu  overruns %lu  plan phase %lu..%lu\n",
+        log_data("ticks %lu  overruns %lu  late sets %lu  plan phase %lu..%lu\n",
                  (unsigned long)PulDir_ticks(), (unsigned long)PulDir_overruns(),
-                 (unsigned long)phase_min, (unsigned long)phase_max);
+                 (unsigned long)PulDir_lateSets(), (unsigned long)phase_min, (unsigned long)phase_max);
         return;
     }
     int n = atoi(axis);
@@ -242,7 +243,7 @@ void bench_console(const char* axis, const char* cmd);
 and this case before `default:`:
 
 ```c
-        case 'B':   /* bench: B<axis>,<verb><arg> to puldir, Bs = ticks and overruns */
+        case 'B':   /* bench: B<axis>,<verb><arg> to puldir, Bs = ticks, overruns, late sets, plan phase */
             bench_console(result[0], result[1]);
             break;
 ```
@@ -269,11 +270,11 @@ Do not command the old axes (`@`, `#`, `R`, `K`) during the bench: they share th
 4. **200 kHz run**: set `BENCH_PULSE_US` to 5u and rebuild. Jog all four at 99,000 pulses/s (`B1,J99000` ... `B4,J99000`), same traffic, one minute, same measurements.
 4a. **Jitter run, 200 kHz**: jog axis 1 alone at 50,000 pulses/s (a PUL period of exactly 4 ticks), same measurements.
 5. Connect one drive (axis 1). At 50 kHz the pulse is 20 us wide. Check the drive's datasheet minimum pulse width and DIR setup time, then run `B1,J2000`, `B1,k`, and confirm it turns and stops without lost or extra steps (mark the shaft, count revolutions: 2000 pulses per second for ten seconds is 20,000 pulses).
-6. **Phasing**, at both rates. After reset, record the `UIF before start` line. Then send `Bs`: `plan phase a..b` is `PulDir_ticks() % N` on entry to every plan tick so far. It must read `1..1`: the plan tick runs just after the pulse tick that latches a set, and has the whole interval to publish. `0..0` means it runs one tick before the latch and has one tick to publish: a plan tick longer than that misses the latch, its set runs an interval late, and final edges miss their tick. The firmware's HAL sets URS around its UG, so `UIF before start: pulse 0 plan 0` is expected; `port_start` forces its own update and clears the flag either way, then puts both counters one count before their first update. If you read `0..0`, that preset is not taking effect: report it before anything is built on the port.
+6. **Phasing**, at both rates. After reset, record the `UIF before start` line. Then send `Bs` before and after a minute of jogging. The simple check is `late sets`, `PulDir_lateSets()`: it counts every set the plan tick published after its boundary, and it must read 0 and stay 0. A late set latches on the next tick and runs the rest of its interval, and the next plan tick corrects the shortfall, so the axes still land exactly; but a count that grows means the plan tick is running too late or too long, and `PulDir_loop` logs each new batch as `plan tick late, total N`. `plan phase a..b` says why: it is `PulDir_ticks() % N` on entry to every plan tick so far, and must read `1..1`, the plan tick running just after the pulse tick that latches a set, with the whole interval to publish. `0..0` means it runs one tick before the latch and has one tick to publish: any plan tick longer than that is a late set. The firmware's HAL sets URS around its UG, so `UIF before start: pulse 0 plan 0` is expected; `port_start` forces its own update and clears the flag either way, then puts both counters one count before their first update. If you read `0..0`, that preset is not taking effect: report it before anything is built on the port.
 
 ## 5. Results
 
-CPU load = (typical handler duration, from the marker width plus about 24 cycles (170 ns at 144 MHz) of exception entry and exit that the marker does not cover) x tick rate. Pass: zero overruns, jitter under 1 us (from the jitter runs 3a and 4a, not the full-rate runs), CPU at most 10 % (50 kHz) or 25 % (200 kHz).
+CPU load = (typical handler duration, from the marker width plus about 24 cycles (170 ns at 144 MHz) of exception entry and exit that the marker does not cover) x tick rate. Pass: zero overruns, zero late sets, jitter under 1 us (from the jitter runs 3a and 4a, not the full-rate runs), CPU at most 10 % (50 kHz) or 25 % (200 kHz).
 
 | measurement | 50 kHz, 4 axes at 24,000/s | 200 kHz, 4 axes at 99,000/s |
 |---|---|---|
@@ -284,6 +285,7 @@ CPU load = (typical handler duration, from the marker width plus about 24 cycles
 | pulse handler, worst (us) | | |
 | CPU load (typical duration x rate, %) | | |
 | overruns after one minute (`Bs`) | | |
+| late sets after one minute (`Bs`, expect 0) | | |
 | UIF before start (pulse, plan) | | |
 | plan phase (`Bs`, expect 1..1) | | |
 | ticks counted after one minute (expect 3.0e6 / 12.0e6) | | |

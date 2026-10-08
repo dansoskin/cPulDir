@@ -151,6 +151,7 @@ void     PulDir_attachLogger(void (*fn)(const char*));
 void     PulDir_start(void);
 uint32_t PulDir_ticks(void);
 uint32_t PulDir_overruns(void);
+uint32_t PulDir_lateSets(void);          /* sets that latched after their boundary: the plan tick published too late */
 void     PulDir_consoleMenu(char* buf, size_t n);
 
 /* axis setup, before PulDir_start(), after both timers are attached */

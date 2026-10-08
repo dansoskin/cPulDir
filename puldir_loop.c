@@ -5,6 +5,7 @@
 
 static void (*logger)(const char*);
 static uint32_t overruns_logged;        /* the overrun total last logged, by any axis */
+static uint32_t late_logged;            /* the late-set total last logged, likewise */
 
 void PulDir_attachLogger(void (*fn)(const char*))
 {
@@ -137,6 +138,14 @@ void PulDir_loop(PulDir* a)
         size_t at = puldir_head(b, a);
         at = puldir_put(b, at, "pulse tick overrun, total ");
         (void)puldir_put_uint(b, at, overruns, 1);
+        logger(b);
+    }
+    const uint32_t late = PulDir_lateSets();
+    if (late != late_logged) {
+        late_logged = late;
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, "plan tick late, total ");
+        (void)puldir_put_uint(b, at, late, 1);
         logger(b);
     }
     if (ev & PULDIR_EV_FAULT) {

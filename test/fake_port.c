@@ -7,6 +7,7 @@
 
 uint32_t fake_plan_phase;
 uint32_t fake_preempt;
+uint32_t fake_preempt_unlock;
 
 static uint32_t n_ticks;                /* pulse ticks per plan period, as the timers would run them */
 
@@ -87,6 +88,9 @@ void port_unlock(void)
 {
     assert(lock_depth == 1);
     lock_depth--;
+    if (tick_depth > 0)                 /* a tick that came due under the lock fires here */
+        for (uint32_t i = 0; i < fake_preempt_unlock; i++)
+            fake_pulse(false);
 }
 
 void fake_pulse(bool overrun)

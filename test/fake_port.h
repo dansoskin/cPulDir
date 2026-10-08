@@ -26,4 +26,7 @@ void  fake_on_lock(void (*fn)(void));
 void  fake_run(uint32_t ticks);
 extern uint32_t fake_plan_phase;                    /* fake_attach sets N / 2 */
 extern uint32_t fake_preempt;                       /* pulse ticks run inside each port_pin_read */
+/* Pulse ticks run inside port_unlock when a tick callback unlocks: an interrupt that came due
+ * under the lock, plus the time the plan tick then spends before it publishes. Default 0. */
+extern uint32_t fake_preempt_unlock;
 #endif

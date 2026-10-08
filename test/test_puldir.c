@@ -123,6 +123,9 @@ static PulDirSnap st(uint8_t slot)
 
 static bool high(uint8_t slot) { return st(slot).high; }
 
+/* The next boundary's tick: the due tick of a set published now, as the plan tick computes it. */
+static uint32_t next_boundary(void) { return PulDir_ticks() + left() % N; }
+
 /* Write every registered axis's shadow entry, then publish. */
 static void publish_all(const int32_t* inc, const int8_t* dir)
 {
@@ -131,7 +134,7 @@ static void publish_all(const int32_t* inc, const int8_t* dir)
         s[i].inc = inc[i];
         s[i].dir = dir[i];
     }
-    puldir_publish();
+    puldir_publish(next_boundary());
 }
 
 static void publish1(int32_t inc, int8_t dir) { publish_all(&inc, &dir); }
@@ -411,7 +414,7 @@ static void t_latch(void)
             assert(!tick_and_check(cur, next, &latched));   /* not before publish */
         }
         const bool boundary_next = left() == N;
-        puldir_publish();
+        puldir_publish(next_boundary());
         if (boundary_next) {                 /* published one tick before a boundary */
             assert(tick_and_check(cur, next, &latched));
         } else {
@@ -1077,6 +1080,97 @@ static void t_setup_order(void)
     assert(st(0).count == 101 && edges[0] == 1 && net[0] == 1 && !high(0));
     assert(PulDir_position(a) == 101.0f && PulDir_target(a) == 101.0f);
     assert(a->origin == 101 && a->prof.done && a->prof.pos == 0.0f);
+}
+
+/* One move under the late-publish fault, tick by tick: the count never leaves the span between
+ * where it started and the target, and lands on it. */
+static void late_move(PulDir* a, int32_t want)
+{
+    const int32_t c0 = st(a->slot).count;
+    const int32_t lo = c0 < want ? c0 : want, hi = c0 < want ? want : c0;
+    assert(PulDir_moveTo(a, (float)want));
+    for (uint32_t t = 0; PulDir_isMoving(a); t++) {
+        assert(t < 10u * TICK_HZ);
+        fake_run(1);
+        const int32_t c = st(a->slot).count;
+        assert(c >= lo && c <= hi);
+    }
+    assert(st(a->slot).count == want && !high(a->slot) && a->mode == PULDIR_MODE_IDLE);
+    assert(PulDir_target(a) == (float)want && PulDir_velocity(a) == 0.0f);
+}
+
+/* The plan tick publishing after its boundary: a preemption between its snapshot and its publish
+ * at a phase just before the boundary. The set latches on the next tick and runs the rest of its
+ * interval, the next plan tick corrects the shortfall from the real position, and every move still
+ * lands exactly. (Latched a whole interval late instead, the review's 301-pulse move ended at 310:
+ * the settle branch republished the remainder and both sets ran.) Every late set is counted. */
+static void t_late_publish(void)
+{
+    setup(2);
+    fake_on_write(count_write);
+    PulDir_attachLogger(logger);
+    PulDir* a = &ax[0];
+    const float v = 9.0f * (float)PLAN_HZ;      /* about 9 pulses per interval */
+    for (uint8_t i = 0; i < 2; i++)
+        assert(PulDir_setDefaults(&ax[i], v, 50.0f * v, 50.0f * v, 0.0f));
+    fake_plan_phase = N - 1u;                   /* one tick of slack before the boundary */
+    fake_preempt_unlock = 2u;                   /* and two ticks run before the publish */
+
+    /* the review's reproduction, then the same with jerk on */
+    late_move(a, 301);
+    assert(PulDir_setJerk(a, 5.0f * v / DT));  /* a 20-tap window */
+    late_move(a, 0);
+    assert(PulDir_setJerk(a, 0.0f));
+
+    /* a reversal mid-way: the count never passes the first target and lands on the second */
+    assert(PulDir_moveTo(a, 301.0f));
+    while (st(0).count < 150)
+        fake_run(1);
+    assert(PulDir_moveTo(a, -100.0f));
+    for (uint32_t t = 0; PulDir_isMoving(a); t++) {
+        assert(t < 10u * TICK_HZ);
+        fake_run(1);
+        assert(st(0).count <= 301 && st(0).count >= -100);
+    }
+    assert(st(0).count == -100 && PulDir_target(a) == -100.0f && !high(0));
+
+    /* a group move lands both members exactly; under this fault the final edges need not share
+     * a tick, since each member's shortfall is corrected on its own */
+    PulDir* m[2] = { &ax[0], &ax[1] };
+    assert(PulDirGroup_init(&grp, m, 2));
+    const float tg[2] = { 201.0f, -150.0f };
+    assert(PulDirGroup_moveTo(&grp, tg));
+    for (uint32_t t = 0; PulDirGroup_isMoving(&grp); t++) {
+        assert(t < 10u * TICK_HZ);
+        fake_run(1);
+        assert(st(0).count >= -100 && st(0).count <= 201 && st(1).count <= 0 && st(1).count >= -150);
+    }
+    assert(st(0).count == 201 && st(1).count == -150 && !high(0) && !high(1));
+    assert(PulDir_target(&ax[0]) == 201.0f && PulDir_target(&ax[1]) == -150.0f);
+
+    /* every set published under the fault latched late; the loop logs the total once */
+    const uint32_t late = PulDir_lateSets();
+    assert(late > 0u);
+    char want[PULDIR_LINE];
+    snprintf(want, sizeof want, "[a0] plan tick late, total %u", (unsigned)late);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines >= 1 && strcmp(lines[0], want) == 0);
+    nlines = 0;
+    PulDir_loop(a);
+    PulDir_loop(&ax[1]);
+    for (int i = 0; i < nlines; i++)
+        assert(strstr(lines[i], "plan tick late") == NULL);
+
+    /* the port's own timing again: once the last set published under the fault has latched,
+     * a normal move adds no late set */
+    fake_preempt_unlock = 0u;
+    fake_plan_phase = N / 2u;
+    fake_run(2u * N);
+    const uint32_t late0 = PulDir_lateSets();
+    late_move(a, 0);
+    assert(PulDir_lateSets() == late0);
+    printf("  late_publish: %u sets latched late (N = %u)\n", (unsigned)late, (unsigned)N);
 }
 
 /* ---- jog, stop, halt, the datum and live limits --------------------------------------------- */
@@ -4235,6 +4329,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "live_limits", t_live_limits },
     { "setpos_idle_only", t_setpos },
     { "settle_twice", t_settle_twice },
+    { "late_publish", t_late_publish },
     { "jog_settling", t_jog_settling },
     { "halt_any_tick", t_halt_any_tick },
     { "stream_sine", t_stream_sine },
