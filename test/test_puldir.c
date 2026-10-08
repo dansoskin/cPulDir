@@ -876,11 +876,11 @@ static void t_creep(void)
 }
 
 /* Logging and refusals. */
-static char lines[8][96];
+static char lines[8][PULDIR_LINE];
 static int nlines;
 static void logger(const char* s)
 {
-    assert(nlines < 8 && strlen(s) < 96);
+    assert(nlines < 8 && strlen(s) < PULDIR_LINE);
     strcpy(lines[nlines++], s);
 }
 
@@ -3726,6 +3726,151 @@ static void t_rollover(void)
 
 /* ---- the case table ------------------------------------------------------------------------ */
 
+/* The @ console (task 17). */
+static bool said(const char* what)
+{
+    for (int i = 0; i < nlines; i++)
+        if (strstr(lines[i], what) != NULL)
+            return true;
+    return false;
+}
+
+static void t_console(void)
+{
+    add_axis(0, false, false);
+    add_axis(1, false, false);
+    PulDir* a = &ax[0];
+    PulDir* b = &ax[1];                       /* no enable pin */
+    PulDir_attachEnable(a, fake_pin(ENA(0)), false);
+    start();
+    PulDir_attachLogger(logger);
+    assert(PulDir_setDefaults(a, 100.0f, 100.0f, 100.0f, 0.0f));
+    assert(PulDir_setDefaults(b, 100.0f, 100.0f, 100.0f, 0.0f));
+
+    /* T moves, p prints with four decimals and the axis prefix */
+    PulDir_console(a, 'T', "10");
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(PulDir_position(a) == 10.0f);
+    nlines = 0;
+    PulDir_console(a, 'p', "");
+    assert(nlines == 1 && strstr(lines[0], "10.0000") && strncmp(lines[0], "[a0] ", 5) == 0);
+
+    /* A leaves the deceleration alone; Z sets the jerk; the getters print */
+    assert(PulDir_setDeceleration(a, 30.0f));
+    PulDir_console(a, 'A', "40");
+    assert(PulDir_acceleration(a) == 40.0f && PulDir_deceleration(a) == 30.0f);
+    PulDir_console(a, 'Z', "300");
+    assert(PulDir_jerk(a) == 300.0f);
+    nlines = 0;
+    PulDir_console(a, 'z', NULL);
+    PulDir_console(a, 'a', "");
+    PulDir_console(a, 'd', "");
+    PulDir_console(a, 'v', "");
+    assert(nlines == 4 && strstr(lines[0], "300.0000") && strstr(lines[1], "40.0000")
+           && strstr(lines[2], "30.0000") && strstr(lines[3], "0.0000"));
+    PulDir_console(a, 'D', "32");
+    PulDir_console(a, 'V', "80");
+    assert(PulDir_deceleration(a) == 32.0f && PulDir_speed(a) == 80.0f);
+    PulDir_console(a, 'F', "");
+    assert(PulDir_speed(a) == 100.0f && PulDir_jerk(a) == 0.0f);
+
+    /* P, R, J, k, E, s */
+    PulDir_console(a, 'P', "5");
+    assert(PulDir_position(a) == 5.0f);
+    PulDir_console(a, 'R', "-2");
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(PulDir_position(a) == 3.0f);
+    PulDir_console(a, 'J', "40");
+    fake_run(50u * N);
+    assert(PulDir_isMoving(a) && PulDir_velocity(a) > 0.0f);
+    PulDir_console(a, 'k', "");
+    run_until_idle(a, PULDIR_TICK_HZ);
+    PulDir_console(a, 'E', "0");
+    assert(!a->enabled);
+    PulDir_console(a, 'E', "1");
+    assert(a->enabled);
+    nlines = 0;
+    PulDir_console(a, 's', "");
+    assert(nlines == 1 && strstr(lines[0], "status") && strstr(lines[0], "mode IDLE")
+           && strstr(lines[0], "homed 0") && strstr(lines[0], "faults 0")
+           && strstr(lines[0], "last fault tick 0") && !strstr(lines[0], "failed"));
+
+    /* K halts, then releases the drive */
+    PulDir_console(a, 'J', "40");
+    fake_run(50u * N);
+    PulDir_console(a, 'K', "");
+    assert(a->mode == PULDIR_MODE_IDLE && !a->enabled);
+    fake_run(4u * N);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(!PulDir_isMoving(a) && PulDir_velocity(a) == 0.0f);
+
+    /* K without an enable pin still halts, says so, and leaves no refusal */
+    PulDir_console(b, 'J', "40");
+    fake_run(50u * N);
+    nlines = 0;
+    PulDir_console(b, 'K', "");
+    assert(b->mode == PULDIR_MODE_IDLE);
+    assert(nlines == 1 && strstr(lines[0], "halted") && strstr(lines[0], "no enable pin"));
+    fake_run(4u * N);
+    PulDir_loop(b);
+    assert(nlines == 1);
+
+    /* a malformed number is "bad argument", never a silent 0 */
+    PulDir_console(a, 'P', "7");
+    PulDir_loop(a);                           /* flush the events of the steps above */
+    const char* bad[] = { "", "x", "1x", "1 2", "--1" };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        nlines = 0;
+        PulDir_console(a, 'T', bad[i]);
+        PulDir_loop(a);
+        assert(nlines == 1 && said("bad argument") && strncmp(lines[0], "[a0] ", 5) == 0);
+        assert(!PulDir_isMoving(a) && PulDir_position(a) == 7.0f);
+    }
+    nlines = 0;
+    PulDir_console(a, 'E', "2");
+    PulDir_console(a, 'Z', "abc");
+    PulDir_console(a, 'T', NULL);
+    PulDir_loop(a);
+    assert(said("bad argument") && PulDir_jerk(a) == 0.0f);
+    PulDir_console(a, 'T', " 8 \r\n");        /* white space round the number is not a fault */
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(PulDir_position(a) == 8.0f);
+
+    /* the other verbs and unknown ones */
+    nlines = 0;
+    PulDir_console(a, 'X', "");
+    assert(nlines == 1 && strstr(lines[0], "unknown command: X"));
+    PulDir_console(a, 'C', "");               /* no clear pin: a refusal through the loop */
+    PulDir_loop(a);
+    assert(said("clearFault refused"));
+    nlines = 0;
+    PulDir_console(a, 'H', "");               /* homing not configured */
+    PulDir_loop(a);
+    assert(said("homeStart refused"));
+
+    /* the switch silences the replies */
+    nlines = 0;
+    PulDir_setLogging(a, false);
+    PulDir_console(a, 'p', "");
+    PulDir_console(a, 'X', "");
+    assert(nlines == 0);
+    PulDir_setLogging(a, true);
+
+    /* the menu fits 1,024 bytes, names the jerk verbs and every verb */
+    char menu[1024];
+    memset(menu, 'x', sizeof menu);
+    PulDir_consoleMenu(menu, sizeof menu);
+    assert(memchr(menu, '\0', sizeof menu) != NULL && strstr(menu, "Z<jerk>") && strstr(menu, "z - "));
+    for (const char* v = "EPpVvAaDdJRTFkKsCH"; *v; v++) {
+        const char key[3] = { '\n', *v, 0 };
+        const char* at = strstr(menu, key);
+        assert(at != NULL && (at[2] == ' ' || at[2] == '<'));
+    }
+    char small[16];
+    PulDir_consoleMenu(small, sizeof small);
+    assert(strlen(small) < sizeof small);
+}
+
 static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "setup", t_setup },
     { "pulse_rate", t_pulse_rate },
@@ -3776,6 +3921,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "group_paths", t_group_paths },
     { "homing", t_homing },
     { "rollover", t_rollover },
+    { "console", t_console },
 };
 
 int main(int argc, char** argv)

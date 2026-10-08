@@ -3,13 +3,17 @@
 #include <math.h>
 #include "puldir_internal.h"
 
-#define LINE 96u
-
 static void (*logger)(const char*);
 
 void PulDir_attachLogger(void (*fn)(const char*))
 {
     logger = fn;
+}
+
+void puldir_log(const PulDir* a, const char* line)
+{
+    if (a->log_on && logger != NULL)
+        logger(line);
 }
 
 void PulDir_setLogging(PulDir* a, bool on)
@@ -31,15 +35,15 @@ void puldir_refuse(PulDir* a, const char* call, PulDirRefusal why, float value)
 
 /* ---- lines, without printf: no double ever reaches a formatter ------------- */
 
-static size_t put(char* b, size_t at, const char* s)
+size_t puldir_put(char* b, size_t at, const char* s)
 {
-    while (*s != '\0' && at < LINE - 1u)
+    while (*s != '\0' && at < PULDIR_LINE - 1u)
         b[at++] = *s++;
     b[at] = '\0';
     return at;
 }
 
-static size_t put_uint(char* b, size_t at, uint64_t v, int min_digits)
+size_t puldir_put_uint(char* b, size_t at, uint64_t v, int min_digits)
 {
     char d[21];
     int k = 0;
@@ -50,28 +54,28 @@ static size_t put_uint(char* b, size_t at, uint64_t v, int min_digits)
     char s[2] = { 0, 0 };
     while (k > 0) {
         s[0] = d[--k];
-        at = put(b, at, s);
+        at = puldir_put(b, at, s);
     }
     return at;
 }
 
 /* A signed decimal with four places, from integer arithmetic; up rounds a
  * positive v so the printed figure, read back as a float, is never below it. */
-static size_t put_num(char* b, size_t at, float v, bool up)
+size_t puldir_put_num(char* b, size_t at, float v, bool up)
 {
     if (isnan(v))
-        return put(b, at, "nan");
+        return puldir_put(b, at, "nan");
     if (v < 0.0f) {
-        at = put(b, at, "-");
+        at = puldir_put(b, at, "-");
         v = -v;
     }
     if (!(v < 1.0e14f))                         /* also inf: past what four places can show */
-        return put(b, at, "1e14+");
+        return puldir_put(b, at, "1e14+");
     const uint64_t q = up ? (uint64_t)ceilf(v * (1.0f + 4.0f * FLT_EPSILON) * 10000.0f)
                           : (uint64_t)(v * 10000.0f + 0.5f);
-    at = put_uint(b, at, q / 10000u, 1);
-    at = put(b, at, ".");
-    return put_uint(b, at, q % 10000u, 4);
+    at = puldir_put_uint(b, at, q / 10000u, 1);
+    at = puldir_put(b, at, ".");
+    return puldir_put_uint(b, at, q % 10000u, 4);
 }
 
 static const char* reason(PulDirRefusal why)
@@ -92,14 +96,14 @@ static const char* reason(PulDirRefusal why)
     }
 }
 
-static size_t head(char* b, const PulDir* a)
+size_t puldir_head(char* b, const PulDir* a)
 {
-    size_t at = put(b, 0, "[");
-    at = put(b, at, a->name);
-    return put(b, at, "] ");
+    size_t at = puldir_put(b, 0, "[");
+    at = puldir_put(b, at, a->name);
+    return puldir_put(b, at, "] ");
 }
 
-static const char* phase(PulDirHomeState h)
+const char* puldir_phase(PulDirHomeState h)
 {
     static const char* const name[] = {
         "IDLE", "MOVE_TOWARDS_LIMIT", "DELAY1", "MOVE_AWAY_FROM_LIMIT",
@@ -123,54 +127,54 @@ void PulDir_loop(PulDir* a)
         return;
 
     /* The bits keep no order: the drive's state first, then what it caused. */
-    char b[LINE];
+    char b[PULDIR_LINE];
     if (ev & PULDIR_EV_FAULT) {
-        size_t at = head(b, a);
-        at = put(b, at, "fault latched, count ");
-        (void)put_uint(b, at, faults, 1);
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, "fault latched, count ");
+        (void)puldir_put_uint(b, at, faults, 1);
         logger(b);
     }
     if (ev & PULDIR_EV_FAULT_CLEARED) {
-        (void)put(b, head(b, a), "fault cleared");
+        (void)puldir_put(b, puldir_head(b, a), "fault cleared");
         logger(b);
     }
     if (ev & PULDIR_EV_HOME_FAILED) {
-        size_t at = head(b, a);
-        at = put(b, at, "homing failed in ");
-        (void)put(b, at, phase(failed_in));
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, "homing failed in ");
+        (void)puldir_put(b, at, puldir_phase(failed_in));
         logger(b);
     }
     if (ev & PULDIR_EV_REFUSED) {
-        size_t at = head(b, a);
-        at = put(b, at, call != NULL ? call : "call");
-        at = put(b, at, " refused: ");
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, call != NULL ? call : "call");
+        at = puldir_put(b, at, " refused: ");
         if (why == PULDIR_R_TAPS) {
-            at = put(b, at, "jerk below ");
-            at = put_num(b, at, value, true);   /* a floor: typed back, it must fit */
-            at = put(b, at, " needs more than ");
-            at = put_uint(b, at, MOTION_PROFILE_MAX_TAPS, 1);
-            (void)put(b, at, " taps");
+            at = puldir_put(b, at, "jerk below ");
+            at = puldir_put_num(b, at, value, true);   /* a floor: typed back, it must fit */
+            at = puldir_put(b, at, " needs more than ");
+            at = puldir_put_uint(b, at, MOTION_PROFILE_MAX_TAPS, 1);
+            (void)puldir_put(b, at, " taps");
         } else {
-            at = put(b, at, reason(why));
+            at = puldir_put(b, at, reason(why));
             if (why == PULDIR_R_RATE)
-                (void)put_num(b, at, value, false);
+                (void)puldir_put_num(b, at, value, false);
         }
         logger(b);
     }
     if (ev & PULDIR_EV_STREAM_TIMEOUT) {
-        (void)put(b, head(b, a), "stream timed out");
+        (void)puldir_put(b, puldir_head(b, a), "stream timed out");
         logger(b);
     }
     if (ev & PULDIR_EV_LANDED) {
-        size_t at = head(b, a);
-        at = put(b, at, "landed at ");
-        (void)put_num(b, at, PulDir_position(a), false);
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, "landed at ");
+        (void)puldir_put_num(b, at, PulDir_position(a), false);
         logger(b);
     }
     if (ev & PULDIR_EV_HOMED) {
-        size_t at = head(b, a);
-        at = put(b, at, "homed at ");
-        (void)put_num(b, at, PulDir_position(a), false);
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, "homed at ");
+        (void)puldir_put_num(b, at, PulDir_position(a), false);
         logger(b);
     }
 }
