@@ -1,0 +1,535 @@
+<title>puldir Library Map</title>
+<meta name="description" content="How the puldir PUL/DIR motion library is built: every file, every struct and the function flows across main context, the plan tick and the pulse tick.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column with full-width figures; the three execution contexts
+   (main, plan tick, pulse tick) keep one colour each everywhere on the page. */
+:root {
+  --bg: #f2f3f1; --panel: #fbfbfa; --panel-2: #f6f7f5; --ink: #1b2125; --muted: #5b656b;
+  --line: #d5dad9; --line-strong: #b4bcbc;
+  --main: #3456a0; --main-soft: #e4e9f5;
+  --plan: #9c5a10; --plan-soft: #f5e9d8;
+  --pulse: #0d7564; --pulse-soft: #dbeee9;
+  --hw: #666c75; --hw-soft: #e9eaec;
+  --warn: #a3321f;
+  --f-disp: "Archivo", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "Source Sans 3", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121517; --panel: #181c1f; --panel-2: #1c2124; --ink: #e3e8ea; --muted: #98a2a8;
+    --line: #2b3236; --line-strong: #434c51;
+    --main: #8ea9e8; --main-soft: #1b2437;
+    --plan: #e2a35a; --plan-soft: #2f2410;
+    --pulse: #52c3ae; --pulse-soft: #11302a;
+    --hw: #a5aab3; --hw-soft: #22262b;
+    --warn: #f08c78;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121517; --panel: #181c1f; --panel-2: #1c2124; --ink: #e3e8ea; --muted: #98a2a8;
+  --line: #2b3236; --line-strong: #434c51;
+  --main: #8ea9e8; --main-soft: #1b2437;
+  --plan: #e2a35a; --plan-soft: #2f2410;
+  --pulse: #52c3ae; --pulse-soft: #11302a;
+  --hw: #a5aab3; --hw-soft: #22262b;
+  --warn: #f08c78;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { background: var(--bg); color: var(--ink); font: 16px/1.55 var(--f-body); padding-inline: 16px; padding-block: 0 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; }
+code, .mono { font-family: var(--f-mono); font-size: .86em; }
+h1, h2, h3 { font-family: var(--f-disp); text-wrap: balance; margin: 0; }
+header.top { padding-block: 36px 18px; display: grid; gap: 10px; }
+h1 { font-size: clamp(32px, 5vw, 48px); font-weight: 800; letter-spacing: -.01em; line-height: 1; }
+h1 span { color: var(--pulse); }
+.lede { max-width: 72ch; color: var(--muted); font-size: 17.5px; margin: 0; }
+.stamp { font: 12.5px var(--f-mono); color: var(--muted); }
+nav.toc { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line); display: flex; gap: 4px 18px; flex-wrap: wrap; padding-block: 10px; }
+nav.toc a { font: 600 13px var(--f-disp); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); text-decoration: none; padding: 4px 0; }
+nav.toc a:hover, nav.toc a:focus-visible { color: var(--ink); }
+a:focus-visible { outline: 2px solid var(--pulse); outline-offset: 2px; }
+section { padding-block: 44px 8px; scroll-margin-top: 56px; }
+section > h2 { font-size: 26px; font-weight: 700; display: flex; gap: 12px; align-items: baseline; }
+section > h2 .n { font: 600 13px var(--f-mono); color: var(--muted); }
+section > p.intro { max-width: 74ch; margin: 10px 0 18px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13.5px; color: var(--muted); margin: 6px 0 14px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.sw { width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid; }
+.sw.main { background: var(--main-soft); border-color: var(--main); }
+.sw.plan { background: var(--plan-soft); border-color: var(--plan); }
+.sw.pulse { background: var(--pulse-soft); border-color: var(--pulse); }
+.sw.hw { background: var(--hw-soft); border-color: var(--hw); }
+.ln { display: inline-block; width: 26px; border-top: 2px solid var(--muted); }
+.ln.dash { border-top-style: dashed; }
+figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+figure .scroll { overflow-x: auto; }
+figure svg { display: block; width: 100%; min-width: 860px; height: auto; }
+figcaption { font-size: 14px; color: var(--muted); margin-top: 10px; max-width: 90ch; }
+/* svg vocabulary */
+.lane rect { stroke-width: 1; }
+.lane.main rect { fill: var(--main-soft); stroke: var(--main); stroke-opacity: .35; }
+.lane.plan rect { fill: var(--plan-soft); stroke: var(--plan); stroke-opacity: .35; }
+.lane.pulse rect { fill: var(--pulse-soft); stroke: var(--pulse); stroke-opacity: .35; }
+.lane.hw rect { fill: var(--hw-soft); stroke: var(--hw); stroke-opacity: .35; stroke-dasharray: 5 4; }
+.lane text { font: 700 11.5px var(--f-disp); letter-spacing: .07em; text-transform: uppercase; }
+.lane.main text { fill: var(--main); } .lane.plan text { fill: var(--plan); } .lane.pulse text { fill: var(--pulse); } .lane.hw text { fill: var(--hw); }
+.box rect { fill: var(--panel); stroke-width: 1.6; }
+.box.main rect { stroke: var(--main); } .box.plan rect { stroke: var(--plan); } .box.pulse rect { stroke: var(--pulse); } .box.hw rect { stroke: var(--hw); stroke-dasharray: 4 3; }
+.box .t { font: 600 13.5px var(--f-mono); fill: var(--ink); }
+.box .s { font: 12px var(--f-body); fill: var(--muted); }
+a.box:hover rect, a.box:focus rect { stroke-width: 3; }
+.edge { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+.edge.dash { stroke-dasharray: 6 4; }
+.edge.main { stroke: var(--main); } .edge.plan { stroke: var(--plan); } .edge.pulse { stroke: var(--pulse); }
+.head { fill: var(--muted); }
+.lbl rect { fill: var(--panel); stroke: var(--line); }
+.lbl text { font: 11.5px var(--f-mono); fill: var(--ink); }
+.seq-life { stroke: var(--line-strong); stroke-dasharray: 3 4; }
+.seq-msg text { font: 12.5px var(--f-mono); fill: var(--ink); }
+.seq-msg .num { font: 700 11px var(--f-mono); fill: var(--bg); }
+.seq-msg circle { fill: var(--ink); }
+.seq-note { font: italic 12.5px var(--f-body); fill: var(--muted); }
+.fc rect, .fc polygon { fill: var(--panel); stroke: var(--pulse); stroke-width: 1.6; }
+.fc.dec polygon { stroke: var(--plan); }
+.fc.end rect { stroke: var(--muted); }
+.fc text { font: 12.5px var(--f-mono); fill: var(--ink); }
+.yes, .no { font: 600 11.5px var(--f-body); fill: var(--muted); }
+/* context cards */
+.ctx { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 14px; margin-top: 16px; }
+.ctx > div { background: var(--panel); border: 1px solid var(--line); border-top: 4px solid; border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.ctx .main { border-top-color: var(--main); } .ctx .plan { border-top-color: var(--plan); } .ctx .pulse { border-top-color: var(--pulse); }
+.ctx h3 { font-size: 18px; margin-bottom: 2px; }
+.ctx .rate { font: 13px var(--f-mono); color: var(--muted); margin: 0 0 8px; }
+.ctx ul { margin: 0; padding-left: 18px; font-size: 15px; }
+.ctx li { margin: 3px 0; }
+/* files */
+.tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 860px; font-size: 14.5px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font: 600 11.5px var(--f-disp); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); }
+tr.grp td { font: 700 12.5px var(--f-disp); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); background: var(--panel-2); padding-block: 7px; }
+td.file { font: 600 13.5px var(--f-mono); white-space: nowrap; }
+td.fns { font: 12.5px/1.6 var(--f-mono); color: var(--muted); max-width: 300px; }
+tr:target td { background: var(--pulse-soft); }
+.chip { display: inline-block; font: 600 11px var(--f-body); letter-spacing: .04em; text-transform: uppercase; border-radius: 4px; padding: 2px 7px; border: 1px solid; white-space: nowrap; }
+.chip.main { color: var(--main); border-color: var(--main); }
+.chip.plan { color: var(--plan); border-color: var(--plan); }
+.chip.pulse { color: var(--pulse); border-color: var(--pulse); }
+.chip.hw { color: var(--hw); border-color: var(--hw); }
+.chip.any { color: var(--muted); border-color: var(--line-strong); }
+/* structs */
+.structs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 14px; }
+.st { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.st h3 { font: 600 16px var(--f-mono); display: flex; justify-content: space-between; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.st h3 small { font: 12px var(--f-mono); color: var(--muted); font-weight: 400; }
+.st p { margin: 0; font-size: 15px; }
+.st .rw { font-size: 13.5px; color: var(--muted); display: flex; gap: 6px 10px; flex-wrap: wrap; align-items: center; }
+.st dl { margin: 2px 0 0; display: grid; grid-template-columns: minmax(96px, max-content) 1fr; gap: 3px 12px; font-size: 13.5px; border-top: 1px solid var(--line); padding-top: 8px; }
+.st dt { font: 500 12.5px var(--f-mono); color: var(--ink); }
+.st dd { margin: 0; color: var(--muted); }
+.st.big { grid-column: 1 / -1; }
+.st.big dl { grid-template-columns: minmax(96px, max-content) 1fr minmax(96px, max-content) 1fr; }
+@media (max-width: 760px) { .st.big dl { grid-template-columns: minmax(96px, max-content) 1fr; } }
+/* timelines */
+ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 0; display: grid; gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+ol.steps > li { counter-increment: s; display: grid; grid-template-columns: 44px minmax(0, 1fr) minmax(0, 300px); gap: 4px 16px; padding: 12px 16px; border-bottom: 1px solid var(--line); align-items: start; }
+ol.steps > li:last-child { border-bottom: 0; }
+ol.steps > li::before { content: counter(s); font: 700 15px var(--f-mono); color: var(--plan); background: var(--plan-soft); border-radius: 50%; width: 30px; height: 30px; display: grid; place-items: center; }
+ol.steps.pulse > li::before { color: var(--pulse); background: var(--pulse-soft); }
+ol.steps b { font-weight: 600; }
+ol.steps .fn { font: 12.5px/1.6 var(--f-mono); color: var(--muted); }
+ol.steps .lock { color: var(--warn); font-weight: 600; }
+@media (max-width: 760px) { ol.steps > li { grid-template-columns: 40px minmax(0, 1fr); } ol.steps .fn { grid-column: 2; } }
+.flows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+.flow { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.flow h3 { font-size: 18px; margin-bottom: 4px; }
+.flow > p { margin: 0 0 8px; font-size: 14.5px; color: var(--muted); }
+.flow ol { margin: 0; padding-left: 22px; font-size: 14.5px; }
+.flow li { margin: 5px 0; }
+.flow li code { font-size: 12.5px; }
+.tag { font: 600 10.5px var(--f-body); letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 3px; vertical-align: 1px; margin-right: 4px; }
+.tag.main { background: var(--main-soft); color: var(--main); } .tag.plan { background: var(--plan-soft); color: var(--plan); } .tag.pulse { background: var(--pulse-soft); color: var(--pulse); }
+/* units strip */
+.units { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.units > div { padding: 14px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); min-width: 0; position: relative; }
+.units h3 { font: 600 14px var(--f-mono); margin-bottom: 2px; }
+.units .ty { font: 12px var(--f-mono); color: var(--muted); margin-bottom: 6px; }
+.units p { margin: 0; font-size: 14px; }
+.units .where { margin-top: 8px; }
+.note { max-width: 74ch; font-size: 15px; color: var(--muted); margin-top: 14px; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); max-width: 90ch; }
+</style>
+
+<div class="wrap">
+<header class="top">
+  <h1>puldir <span>Library Map</span></h1>
+  <p class="lede">puldir drives several PUL/DIR motor drives from one microcontroller. Every pulse comes from a timer interrupt; the main loop only sends commands and reads state. This page shows which file does what, what each struct holds, and how a command travels from your code to a pulse on the wire.</p>
+  <div class="stamp">cPulDir · branch implement-puldir @ 416abcd · numbers below use the README timing: pulse_us = 20 (50 kHz pulse tick), plan_us = 1000 (1 kHz plan tick), so N = 50 pulse ticks per plan interval</div>
+</header>
+
+<nav class="toc" aria-label="Sections">
+  <a href="#contexts">Contexts</a><a href="#files">Files</a><a href="#structs">Structs</a><a href="#move">A move</a><a href="#plan">Plan tick</a><a href="#pulse">Pulse tick</a><a href="#flows">Other flows</a><a href="#units">Units</a>
+</nav>
+
+<!-- ============================================================ -->
+<section id="contexts">
+  <h2><span class="n">01</span>Three contexts, data moving down</h2>
+  <p class="intro">Everything in puldir runs in one of three places. Your main loop calls the API. A 1 kHz timer interrupt, the plan tick, does all the maths. A 50 kHz timer interrupt, the pulse tick, only adds integers and toggles pins. Commands flow down, measurements flow back up, and each crossing has one fixed mechanism. Click a file box to jump to it.</p>
+  <div class="legend"><span><i class="sw main"></i>main context, lowest priority</span><span><i class="sw plan"></i>plan tick · plan timer IRQ</span><span><i class="sw pulse"></i>pulse tick · pulse timer IRQ, highest</span><span><i class="sw hw"></i>hardware</span><span><i class="ln"></i>call in the same context</span><span><i class="ln dash"></i>crosses a context</span></div>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 1120 560" role="img" aria-label="Main context stores requests under a lock; the plan tick reads them, advances the generator and publishes one increment per axis; the pulse tick latches the increments and writes the pins; events flow back to PulDir_loop.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+      <g class="lane main"><rect x="10" y="10" width="1100" height="150" rx="10"/><text x="26" y="34">Main context · your main loop · PulDir_* calls only</text></g>
+      <g class="lane plan"><rect x="10" y="176" width="860" height="176" rx="10"/><text x="26" y="200">Plan tick · plan timer IRQ · 1 kHz · float maths</text></g>
+      <g class="lane pulse"><rect x="10" y="368" width="860" height="180" rx="10"/><text x="26" y="536">Pulse tick · pulse timer IRQ · 50 kHz · integers only</text></g>
+      <g class="lane hw"><rect x="886" y="176" width="224" height="372" rx="10"/><text x="902" y="200">Hardware</text></g>
+
+      <!-- main lane -->
+      <g class="box hw"><rect x="30" y="56" width="180" height="56" rx="8"/><text class="t" x="120" y="80" text-anchor="middle">your firmware</text><text class="s" x="120" y="98" text-anchor="middle">main loop, owns the axes</text></g>
+      <a class="box main" href="#f-puldir-c"><rect x="300" y="56" width="180" height="56" rx="8"/><text class="t" x="390" y="80" text-anchor="middle">puldir.c</text><text class="s" x="390" y="98" text-anchor="middle">validate, store a request</text></a>
+      <a class="box main" href="#f-console"><rect x="570" y="56" width="180" height="56" rx="8"/><text class="t" x="660" y="80" text-anchor="middle">puldir_console.c</text><text class="s" x="660" y="98" text-anchor="middle">@ verbs, same calls</text></a>
+      <a class="box main" href="#f-loop"><rect x="840" y="56" width="200" height="56" rx="8"/><text class="t" x="940" y="80" text-anchor="middle">puldir_loop.c</text><text class="s" x="940" y="98" text-anchor="middle">events to log lines</text></a>
+      <path class="edge" d="M210 84 H296" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="214" y="62" width="78" height="17" rx="3"/><text x="253" y="74.5" text-anchor="middle">PulDir_*()</text></g>
+      <path class="edge" d="M570 84 H484" marker-end="url(#ah)"/>
+      <path class="edge" d="M120 112 V140 H940 V116" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="590" y="131" width="186" height="17" rx="3"/><text x="683" y="143.5" text-anchor="middle">PulDir_loop() each pass</text></g>
+
+      <!-- plan lane -->
+      <a class="box plan" href="#f-plan"><rect x="300" y="214" width="180" height="56" rx="8"/><text class="t" x="390" y="238" text-anchor="middle">puldir_plan.c</text><text class="s" x="390" y="256" text-anchor="middle">one interval per axis</text></a>
+      <a class="box plan" href="#f-mp"><rect x="30" y="284" width="180" height="56" rx="8"/><text class="t" x="120" y="308" text-anchor="middle">motion_profile.c</text><text class="s" x="120" y="326" text-anchor="middle">ramps + jerk filter</text></a>
+      <a class="box plan" href="#f-group"><rect x="570" y="284" width="180" height="56" rx="8"/><text class="t" x="660" y="308" text-anchor="middle">puldir_group.c</text><text class="s" x="660" y="326" text-anchor="middle">one path for N axes</text></a>
+      <path class="edge" d="M300 262 L214 288" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="196" y="252" width="72" height="17" rx="3"/><text x="232" y="264.5" text-anchor="middle">advance()</text></g>
+      <path class="edge" d="M480 262 L566 290" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="490" y="250" width="72" height="17" rx="3"/><text x="526" y="262.5" text-anchor="middle">groups 1st</text></g>
+      <path class="edge" d="M570 318 H214" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="324" y="309" width="104" height="17" rx="3"/><text x="376" y="321.5" text-anchor="middle">advance(path)</text></g>
+
+      <!-- main <-> plan -->
+      <path class="edge dash main" d="M360 112 V210" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="226" y="160" width="128" height="17" rx="3"/><text x="290" y="172.5" text-anchor="middle">REQ_ bits · lock</text></g>
+      <path class="edge dash plan" d="M480 226 C 640 226, 760 200, 900 116" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="664" y="196" width="112" height="17" rx="3"/><text x="720" y="208.5" text-anchor="middle">EV_ events</text></g>
+      <path class="edge dash main" d="M640 112 V280" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="646" y="160" width="104" height="17" rx="3"/><text x="698" y="172.5" text-anchor="middle">group setup</text></g>
+
+      <!-- pulse lane -->
+      <a class="box pulse" href="#f-pulse"><rect x="300" y="420" width="180" height="56" rx="8"/><text class="t" x="390" y="444" text-anchor="middle">puldir_pulse.c</text><text class="s" x="390" y="462" text-anchor="middle">add inc, edge, pins</text></a>
+      <a class="box pulse" href="#f-port"><rect x="600" y="420" width="200" height="56" rx="8"/><text class="t" x="700" y="444" text-anchor="middle">port_pin_write()</text><text class="s" x="700" y="462" text-anchor="middle">STM32: one BSRR store</text></a>
+      <path class="edge" d="M480 448 H596" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="494" y="426" width="88" height="17" rx="3"/><text x="538" y="438.5" text-anchor="middle">PUL, DIR</text></g>
+
+      <!-- plan <-> pulse -->
+      <path class="edge dash plan" d="M360 270 V416" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="190" y="372" width="164" height="17" rx="3"/><text x="272" y="384.5" text-anchor="middle">publish() inc set</text></g>
+      <path class="edge dash pulse" d="M430 420 V274" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="436" y="372" width="146" height="17" rx="3"/><text x="509" y="384.5" text-anchor="middle">snapshot · lock</text></g>
+      <path class="edge dash main" d="M460 112 C 520 160, 560 330, 470 418" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="506" y="196" width="110" height="17" rx="3"/><text x="561" y="208.5" text-anchor="middle">halt: kill inc</text></g>
+
+      <!-- hardware -->
+      <g class="box hw"><rect x="906" y="222" width="184" height="56" rx="8"/><text class="t" x="998" y="246" text-anchor="middle">plan timer</text><text class="s" x="998" y="264" text-anchor="middle">every N pulse periods</text></g>
+      <g class="box hw"><rect x="906" y="320" width="184" height="56" rx="8"/><text class="t" x="998" y="344" text-anchor="middle">pulse timer</text><text class="s" x="998" y="362" text-anchor="middle">pulse_us, at attach</text></g>
+      <g class="box hw"><rect x="906" y="420" width="184" height="56" rx="8"/><text class="t" x="998" y="444" text-anchor="middle">PUL/DIR drive</text><text class="s" x="998" y="462" text-anchor="middle">counts edges, closes its loop</text></g>
+      <path class="edge dash" d="M906 250 H484" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="800" y="236" width="70" height="17" rx="3"/><text x="835" y="248.5" text-anchor="middle">IRQ</text></g>
+      <path class="edge dash" d="M906 350 H860 V500 H390 V480" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="580" y="491" width="70" height="17" rx="3"/><text x="615" y="503.5" text-anchor="middle">IRQ</text></g>
+      <path class="edge dash" d="M800 448 H902" marker-end="url(#ah)"/>
+      <g class="lbl"><rect x="814" y="426" width="70" height="17" rx="3"/><text x="849" y="438.5" text-anchor="middle">pins</text></g>
+    </svg>
+    </div>
+    <figcaption>Main context never touches the pulse tick except to halt. Requests go down under <code>port_lock</code>, which masks only the two library interrupts for a handful of stores. The plan tick reads every axis's pulse state in one locked snapshot, so all axes plan from the same instant. It hands increments to the pulse tick through a double-buffered set, which the pulse tick latches only at an interval boundary, every N = 50 ticks.</figcaption>
+  </figure>
+
+  <div class="ctx">
+    <div class="main"><h3>Main context</h3><p class="rate">your loop · any rate · lowest priority</p>
+      <ul><li>Setup: attach both timers, attach the logger, init each axis with its conversion, then pins, limits, register, start.</li><li>Commands check their arguments, then store a request bit under the lock. They never run the generator.</li><li>Getters read one value under the lock.</li><li><code>PulDir_loop</code> prints what happened. Calling it often or never changes no motion.</li></ul></div>
+    <div class="plan"><h3>Plan tick</h3><p class="rate">Plan timer (TIM7, say) · plan_us = 1000, a 1 kHz tick · below the pulse tick</p>
+      <ul><li>Reads fault pins, snapshots every axis, services faults, enable delay and release.</li><li>Applies requests, advances each profile, stream, group or homing phase.</li><li>Publishes one fixed-point increment and direction per axis.</li><li>All float maths lives here.</li></ul></div>
+    <div class="pulse"><h3>Pulse tick</h3><p class="rate">Pulse timer (TIM6, say) · pulse_us = 20, a 50 kHz tick · highest priority</p>
+      <ul><li>Latches a new increment set only at a boundary.</li><li>Per axis: lowers last tick's pulse, writes a direction change on an edge-free tick, adds the increment, raises a pulse at each whole-pulse crossing.</li><li>Integer only, about 20 cycles per axis. A pulse is one tick wide (20 µs).</li></ul></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="files">
+  <h2><span class="n">02</span>Every file and its role</h2>
+  <p class="intro">The library is eleven source files plus a port and the host tests. "Runs in" is the context its code executes in; the generator has no context of its own and runs wherever it is called.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>File</th><th>Runs in</th><th>Role</th><th>Main functions</th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="4">Generator, usable on its own</td></tr>
+      <tr id="f-mph"><td class="file">motion_profile.h</td><td><span class="chip any">any</span></td><td>The generator's public face: the limits and profile types and the calls to set a target, jog, stop, halt and advance. Depends on nothing else in puldir, so it works alone in any units.</td><td class="fns">MotionProfile_init · setLimits · setTarget · setEndless · stop · halt · advance · stopDistance · rebase · seed · minJerk</td></tr>
+      <tr id="f-mp"><td class="file">motion_profile.c</td><td><span class="chip any">caller's</span></td><td>An acceleration-limited trapezoid whose velocity passes through a moving-average jerk filter, with compensated sums so long moves do not drift. Float only, no static data, refuses bad limits. In puldir it runs in the plan tick.</td><td class="fns">trapezoid · toward · push · recompute · finish · window · kahan_add</td></tr>
+
+      <tr class="grp"><td colspan="4">Axis API, main context</td></tr>
+      <tr id="f-h"><td class="file">puldir.h</td><td><span class="chip main">main</span></td><td>The whole public interface: <code>PulDir</code>, <code>PulDirGroup</code>, the status, mode, homing and refusal enums, the build macros and every <code>PulDir_*</code> call. Fails to compile when the tick and plan rates do not fit together.</td><td class="fns">PULDIR_MAX_AXES · PULDIR_CATCHUP_MS · PULDIR_STREAM_TIMEOUT_MS · PULDIR_FAULT_* · PULDIR_HOMING_DELAY_MS</td></tr>
+      <tr id="f-puldir-c"><td class="file">puldir.c</td><td><span class="chip main">main</span></td><td>The main-context half of an axis: <code>PulDir_init</code> with the conversion (which logs the top speed and resolution), pins, limit setters, motion, stream, homing and fault commands, getters. Each command validates, then under the lock stores a request bit plus whatever the caller may read back at once (mode, target, isMoving, the enable pin).</td><td class="fns">PulDir_init · attachPins · setDefaults · register · moveTo · jog · stop · halt · enable · stream* · home* · position · velocity · apply_limits · take_target · puldir_wake</td></tr>
+      <tr id="f-loop"><td class="file">puldir_loop.c</td><td><span class="chip main">main</span></td><td>Turns what happened into log lines. <code>PulDir_loop</code> takes an axis's event bits under the lock and prints faults, refusals, landings, homing results, stream timeouts and overruns. Also holds the integer-only number formatting, so the core links no printf.</td><td class="fns">PulDir_loop · PulDir_attachLogger · puldir_refuse · puldir_put_num · reason</td></tr>
+      <tr id="f-console"><td class="file">puldir_console.c</td><td><span class="chip main">main</span></td><td>A one-letter UART console, verb for verb from cFlexyStepper plus jerk: move, jog, stop, halt, limits, status, clear fault, home. Parses one number and calls the public functions, so it adds no motion logic.</td><td class="fns">PulDir_console · PulDir_consoleMenu · status · halt_and_release</td></tr>
+
+      <tr class="grp"><td colspan="4">Plan tick</td></tr>
+      <tr id="f-internal"><td class="file">puldir_internal.h</td><td><span class="chip any">library only</span></td><td>Shared by the library's own files, never by applications. Declares every handoff between contexts: the pulse-tick accessors, the increment set and snapshot types, the request and event bits, and the 32.32 fixed-point constants.</td><td class="fns">PulDirInc · PulDirSnap · REQ_* · PULDIR_EV_* · PULDIR_ONE · PULDIR_INC_MAX</td></tr>
+      <tr id="f-plan"><td class="file">puldir_plan.c</td><td><span class="chip plan">plan tick</span></td><td>The 1 kHz interrupt that turns commands into pulse rates. Reads fault pins, snapshots every axis, services faults and delays, applies requests, advances each profile, stream or homing phase, and publishes one increment per axis.</td><td class="fns">puldir_plan_tick · service · run_axis · run_profile · run_stream · run_home · puldir_steer · puldir_set_inc · leave_stream · release</td></tr>
+      <tr id="f-group"><td class="file">puldir_group.c</td><td><span class="chip main">main</span> <span class="chip plan">plan tick</span></td><td>Moves several axes along one straight line so they finish on the same tick. The main part checks members, builds whole-pulse travels and the path limits. The plan part advances one path profile per group and steers each member to its share.</td><td class="fns">PulDirGroup_init · PulDirGroup_moveTo · stop · halt · path_limits · puldir_group_tick · run_group · puldir_group_halt · finish</td></tr>
+
+      <tr class="grp"><td colspan="4">Pulse tick</td></tr>
+      <tr id="f-pulse"><td class="file">puldir_pulse.c</td><td><span class="chip pulse">pulse tick</span></td><td>The pulse-tick interrupt (50 kHz at 20 µs) that writes every pulse and direction pin. Adds each axis's increment to its fixed-point position, raises a pulse at each whole-pulse crossing and lowers it the next tick. Owns the axis table, the tick counter, the double-buffered increment sets and the timing the attach calls hand over.</td><td class="fns">puldir_pulse_tick · aim · puldir_publish · puldir_shadow · puldir_pulse_read · puldir_kill · puldir_set_datum · puldir_timing_take · PulDir_start · PulDir_ticks · PulDir_overruns</td></tr>
+
+      <tr class="grp"><td colspan="4">Port</td></tr>
+      <tr id="f-port"><td class="file">puldir_port.h</td><td><span class="chip any">contract</span></td><td>What a platform must provide: pin setup, one-store pin writes, pin reads, starting the two timers, and a lock that masks only the library's two interrupts. Declares the two calls a port's timer attach functions make to hand over the periods. The core calls nothing else outside itself.</td><td class="fns">port_pin_write · port_pin_read · port_start · port_lock · port_unlock · puldir_timing_pulse · puldir_timing_plan</td></tr>
+      <tr><td class="file">port/stm32/puldir_pin.h</td><td><span class="chip hw">STM32</span></td><td>Tells the core what a pin is on STM32: a GPIO port and a pin mask. Includes <code>main.h</code> for the family's HAL types.</td><td class="fns">puldir_pin_t</td></tr>
+      <tr><td class="file">port/stm32/puldir_port_stm32.h/.c</td><td><span class="chip hw">STM32</span></td><td>Runs puldir on any two application-owned timers counting at 1 MHz, on any family. Writes their periods and starts them in step so each plan tick lands just after a latch tick. Raw IRQ entries clear the update flag by hand and flag overruns. Pins are one BSRR store; the lock disables just the two IRQs in the NVIC.</td><td class="fns">PulDir_stm32_attachPulseTimer · PulDir_stm32_attachPlanTimer · PulDir_stm32_pulseIrq · PulDir_stm32_planIrq · port_start · port_lock</td></tr>
+
+      <tr class="grp"><td colspan="4">Host tests</td></tr>
+      <tr><td class="file">test/puldir_pin.h · fake_port.h/.c</td><td><span class="chip any">host</span></td><td>The fake port: pins are an array and the ticks run only when a test calls them. Asserts the rules a host can check: motion pins written only from the pulse tick, no tick while the lock is held, no nested lock.</td><td class="fns">fake_run · fake_pulse · fake_plan · fake_on_write · fake_set_input</td></tr>
+      <tr><td class="file">test/test_motion_profile.c</td><td><span class="chip any">host</span></td><td>Proves the generator on its own (guideline tests 1 to 9): trapezoid against the analytic one, retargets, jogs, stops, the jerk window. Every step asserts the speed, acceleration and jerk bounds.</td><td class="fns">22 tests · step · check_step · run_to_done</td></tr>
+      <tr><td class="file">test/test_puldir.c</td><td><span class="chip any">host</span></td><td>Proves the axis library (tests 10 to 24) against the fake port, one process per case, built four ways by <code>test/run.sh</code>: 50 kHz, 200 kHz, a 2 kHz plan tick, and the tick counter near its wrap.</td><td class="fns">52 cases · move_exact · parity · group_sync · stream_* · homing · fault · rollover</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="structs">
+  <h2><span class="n">03</span>Every struct and enum</h2>
+  <p class="intro">Who writes a struct and who reads it matters more than its fields: that decides which context may touch it and under what guard. The two largest structs are shown by field group.</p>
+  <div class="structs">
+    <div class="st big">
+      <h3>PulDir <small>puldir.h · one per motor axis · owned by your firmware</small></h3>
+      <p>One motor axis: its pins, unit conversion, limits and delays, the requests main has made, the plan tick's view of the move, stream and homing progress, fault state and pending log events. The live pulse state is not in it; <code>puldir_pulse.c</code> keeps that by slot.</p>
+      <div class="rw"><span class="chip main">written by main</span>setup and requests, under the lock · <span class="chip plan">written by plan tick</span>everything below "requests"</div>
+      <dl>
+        <dt>setup</dt><dd>name, pins and polarities, <code>conv</code> (pulses per unit), <code>def[4]</code> and <code>lim[4]</code> limits, delays, homing settings, <code>slot</code></dd>
+        <dt>requests</dt><dd><code>req</code> (REQ_ bits), <code>req_speed</code>, <code>target</code> (32.32 pulses)</dd>
+        <dt>plan state</dt><dd><code>mode</code>, <code>prof</code> (its MotionProfile, in pulses), <code>origin</code>, <code>moving</code>, <code>arrived</code>, <code>settle</code>, <code>dir_out</code>, <code>vel_out</code></dd>
+        <dt>drive</dt><dd><code>enabled</code>, <code>enabled_at</code>, <code>ena_wait</code>, <code>release_due</code>, <code>held</code> (no release after a fault)</dd>
+        <dt>stream</dt><dd><code>sp_pos</code>, <code>sp_vel</code>, <code>sp_tick</code>, <code>v_cmd</code>, <code>stream_err</code>, <code>stream_timed_out</code></dd>
+        <dt>homing, fault</dt><dd><code>home_state</code>, <code>home_t0</code>, <code>home_lim[4]</code>, <code>fault</code>, <code>flt_since</code>, <code>fault_count</code>, <code>clearing</code></dd>
+        <dt>events</dt><dd><code>events</code> (PULDIR_EV_ bits), <code>refusal</code>, <code>refused_call</code></dd>
+        <dt>group</dt><dd><code>group</code>: the group whose move this axis is in</dd>
+      </dl>
+    </div>
+    <div class="st big">
+      <h3>MotionProfile <small>motion_profile.h · one per axis, one per group, any bare use</small></h3>
+      <p>One running motion: where it is, how fast, where it is heading, and a ring of recent velocities that smooths the jerk. Pure maths: no I/O, no timing, no static data. The 256-tap ring makes it about 1 KB.</p>
+      <div class="rw"><span class="chip plan">advanced by the plan tick</span>inside puldir · <span class="chip any">by your own beat</span>when used alone</div>
+      <dl>
+        <dt>output</dt><dd><code>pos</code>, <code>vel</code>, <code>acc</code>: the filtered motion you read</dd>
+        <dt>goal</dt><dd><code>target</code>, <code>endless</code> + <code>speed</code>, <code>stopping</code></dd>
+        <dt>state</dt><dd><code>landed</code> (trapezoid at rest), <code>done</code> (filter drained, vel exactly 0)</dd>
+        <dt>trapezoid</dt><dd><code>p_t</code>, <code>v_t</code>, <code>p_c</code> (Kahan compensation)</dd>
+        <dt>jerk filter</dt><dd><code>taps[256]</code>, <code>n</code> (window), <code>head</code>, <code>sum</code>, <code>wsum</code> (+ compensations), <code>drain</code></dd>
+        <dt>fixed</dt><dd><code>dt</code> (0.25 to 10 ms), <code>lim</code></dd>
+      </dl>
+    </div>
+    <div class="st"><h3>MotionLimits <small>motion_profile.h</small></h3><p>The four numbers a profile must respect: <code>vmax</code>, <code>amax</code>, <code>dmax</code>, <code>jmax</code>, in the caller's units. A jerk of 0 means no jerk limit.</p><div class="rw">built by the plan tick from <code>lim[] × conv</code>, and by group setup from the tightest member</div></div>
+    <div class="st"><h3>PulDirGroup <small>puldir.h · static storage</small></h3><p>Several axes on one straight line. Holds the members, each one's start and whole-pulse travel <code>delta[]</code>, and one path profile <code>s</code> from 0 to 1. Sends no pulses itself; each interval the plan tick writes every member's increment.</p><div class="rw"><span class="chip main">moveTo, stop, halt</span><span class="chip plan">puldir_group_tick</span></div></div>
+    <div class="st"><h3>Axis <small>puldir_pulse.c · static, one per slot</small></h3><p>The pulse tick's private state: <code>past</code> (position relative to the next edge, so the edge test is one sign check), <code>count</code> of edges emitted, live <code>inc</code> and <code>dir</code>, the pin's <code>dir_now</code>, <code>pul_high</code>, the two pins.</p><div class="rw"><span class="chip pulse">written only by the pulse tick</span>read through accessors under the lock</div></div>
+    <div class="st"><h3>PulDirInc <small>puldir_internal.h</small></h3><p>One axis's order for the next interval: <code>inc</code>, how far to advance per pulse tick in units of 2<sup>-32</sup> pulse, and <code>dir</code>. A non-zero inc always has the sign of its dir.</p><div class="rw"><span class="chip plan">written into the shadow set</span><span class="chip pulse">latched at the boundary</span></div></div>
+    <div class="st"><h3>PulDirSnap <small>puldir_internal.h</small></h3><p>One axis frozen at the plan tick's instant: <code>Pb</code>, the position predicted at the next boundary, plus count, live inc, pin direction and whether the pulse pin is high. Every axis is taken under one lock, so groups and axes plan from one moment.</p></div>
+    <div class="st"><h3>PulDirMode <small>enum · puldir.h</small></h3><p>Who steers the axis: <code>IDLE</code>, <code>PROFILE</code> (its own target or jog), <code>STOPPING</code>, <code>STREAM</code>, <code>GROUP</code>, <code>HOMING</code>. Main sets it at once when it accepts a command; the plan tick returns it to IDLE at the end.</p></div>
+    <div class="st"><h3>PulDirStatus <small>enum · puldir.h</small></h3><p>The coarse answer: <code>IDLE</code> (drive released), <code>ENABLED</code>, <code>MOVING</code>, <code>FAULT</code>. Computed on demand from the flags, fault first. An axis without an enable pin always counts as enabled.</p></div>
+    <div class="st"><h3>PulDirHomeState <small>enum · puldir.h</small></h3><p>The homing phase, as in cFlexyStepper: toward the switch, pause, back off at 0.2×, pause, adjust, pause, set the datum. <code>ERROR</code> marks a failed run; the failed phase is kept for the log.</p></div>
+    <div class="st"><h3>PulDirRefusal <small>enum · puldir.h</small></h3><p>Why a call said no: <code>FAULT</code>, <code>MODE</code>, <code>ARG</code>, <code>RATE</code>, <code>WINDOW</code>, <code>TAPS</code>, <code>NOT_IDLE</code>, <code>NO_PIN</code>, <code>NO_HOMING</code>, <code>DROPPED</code>, <code>BUSY</code>, <code>FULL</code>. Calls refuse, never clamp; <code>PulDir_loop</code> logs the reason.</p></div>
+    <div class="st"><h3>REQ_* bits <small>enum · puldir_internal.h</small></h3><p>What main asks the plan tick to do: <code>LIMITS</code>, <code>TARGET</code>, <code>ENDLESS</code>, <code>STOP</code>, <code>HALT</code>, <code>SETPOS</code>, <code>STREAM_BEGIN</code>, <code>HOME</code>. A newer motion request replaces an older pending one; the plan tick applies halt first. <code>GROUP_REQ_STOP</code> is the group's one request.</p></div>
+    <div class="st"><h3>PULDIR_EV_* bits <small>enum · puldir_internal.h</small></h3><p>What tells main something happened: <code>REFUSED</code>, <code>LANDED</code>, <code>STREAM_TIMEOUT</code>, <code>HOMED</code>, <code>HOME_FAILED</code>, <code>FAULT</code>, <code>FAULT_CLEARED</code>. Set by the plan tick and by refusing calls; taken and logged by <code>PulDir_loop</code>.</p></div>
+    <div class="st"><h3>puldir_pin_t <small>port/stm32 · test</small></h3><p>On STM32 a GPIO port plus a pin mask, all one BSRR store needs. In the host tests a pin number into the fake port's array. The include path picks the platform.</p></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="move">
+  <h2><span class="n">04</span>A move, end to end</h2>
+  <p class="intro"><code>PulDir_moveTo(&amp;ax, 10.0f)</code>, from the call until the log says it landed. Time runs down the page. Steps 5 to 9 repeat once per millisecond for as long as the move lasts, and step 9 runs 50 times per millisecond.</p>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 1120 700" role="img" aria-label="Sequence of a move: the application calls moveTo, puldir.c stores a request under the lock, the plan tick takes it, advances the generator, publishes increments, the pulse tick writes pulses to the drive, and on arrival an event reaches PulDir_loop.">
+      <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+      <!-- lifeline heads -->
+      <g class="box hw"><rect x="15" y="14" width="130" height="44" rx="7"/><text class="t" x="80" y="41" text-anchor="middle">your firmware</text></g>
+      <g class="box main"><rect x="175" y="14" width="130" height="44" rx="7"/><text class="t" x="240" y="41" text-anchor="middle">puldir.c</text></g>
+      <g class="box main"><rect x="335" y="14" width="130" height="44" rx="7"/><text class="t" x="400" y="41" text-anchor="middle">PulDir struct</text></g>
+      <g class="box plan"><rect x="495" y="14" width="130" height="44" rx="7"/><text class="t" x="560" y="41" text-anchor="middle">puldir_plan.c</text></g>
+      <g class="box plan"><rect x="655" y="14" width="130" height="44" rx="7"/><text class="t" x="720" y="41" text-anchor="middle">motion_profile</text></g>
+      <g class="box pulse"><rect x="815" y="14" width="130" height="44" rx="7"/><text class="t" x="880" y="41" text-anchor="middle">puldir_pulse.c</text></g>
+      <g class="box hw"><rect x="975" y="14" width="130" height="44" rx="7"/><text class="t" x="1040" y="41" text-anchor="middle">drive</text></g>
+      <line class="seq-life" x1="80" y1="58" x2="80" y2="690"/><line class="seq-life" x1="240" y1="58" x2="240" y2="690"/><line class="seq-life" x1="400" y1="58" x2="400" y2="690"/><line class="seq-life" x1="560" y1="58" x2="560" y2="690"/><line class="seq-life" x1="720" y1="58" x2="720" y2="690"/><line class="seq-life" x1="880" y1="58" x2="880" y2="690"/><line class="seq-life" x1="1040" y1="58" x2="1040" y2="690"/>
+      <!-- repeat band -->
+      <rect x="470" y="250" width="640" height="252" rx="8" fill="none" stroke="var(--plan)" stroke-dasharray="5 4" stroke-opacity=".7"/>
+      <text class="seq-note" x="482" y="268">every 1 ms until the move ends</text>
+
+      <g class="seq-msg">
+        <path class="edge" d="M80 92 H236" marker-end="url(#ah2)"/><circle cx="96" cy="80" r="9"/><text class="num" x="96" y="84" text-anchor="middle">1</text><text x="112" y="84">PulDir_moveTo(10.0)</text>
+        <text class="seq-note" x="252" y="122">2 · motion_check()? fault, or STREAM/GROUP/HOMING</text>
+        <text class="seq-note" x="252" y="140">roundf(10 × conv) → whole pulses</text>
+        <path class="edge dash main" d="M240 172 H396" marker-end="url(#ah2)"/><circle cx="256" cy="160" r="9"/><text class="num" x="256" y="164" text-anchor="middle">3</text><text x="272" y="164">take_target · lock</text>
+        <text class="seq-note" x="412" y="168">target, REQ_TARGET, mode PROFILE,</text>
+        <text class="seq-note" x="412" y="186">moving = true; puldir_wake: ENA on</text>
+        <path class="edge" d="M236 214 H84" marker-end="url(#ah2)"/><circle cx="220" cy="202" r="9"/><text class="num" x="220" y="206" text-anchor="middle">4</text><text x="96" y="206">true · isMoving()</text>
+
+        <path class="edge dash main" d="M400 298 H556" marker-end="url(#ah2)"/><circle cx="416" cy="286" r="9"/><text class="num" x="416" y="290" text-anchor="middle">5</text><text x="430" y="290">req taken</text>
+        <text class="seq-note" x="572" y="296">run_axis: re-base, apply REQ_TARGET</text>
+        <path class="edge" d="M560 336 H716" marker-end="url(#ah2)"/><circle cx="576" cy="324" r="9"/><text class="num" x="576" y="328" text-anchor="middle">6</text><text x="590" y="328">advance()</text>
+        <path class="edge" d="M716 370 H564" marker-end="url(#ah2)"/><text x="600" y="362">pos, vel</text>
+        <text class="seq-note" x="572" y="398">7 · puldir_steer: Δ = end − Pb,</text>
+        <text class="seq-note" x="572" y="416">inc = Δ / 50 (D6 hold near target)</text>
+        <path class="edge dash plan" d="M560 448 H876" marker-end="url(#ah2)"/><circle cx="576" cy="436" r="9"/><text class="num" x="576" y="440" text-anchor="middle">8</text><text x="590" y="440">publish() {inc, dir}</text>
+        <path class="edge dash pulse" d="M880 484 H1036" marker-end="url(#ah2)"/><circle cx="896" cy="472" r="9"/><text class="num" x="896" y="476" text-anchor="middle">9</text><text x="910" y="476">PUL edges</text>
+        <text class="seq-note" x="892" y="496">past += inc every 20 µs</text>
+
+        <text class="seq-note" x="572" y="540">10 · arrival: final inc rounded away,</text>
+        <text class="seq-note" x="572" y="558">2 settle runs, pin low → IDLE</text>
+        <path class="edge dash plan" d="M560 594 H404" marker-end="url(#ah2)"/><circle cx="544" cy="582" r="9"/><text class="num" x="544" y="586" text-anchor="middle">11</text><text x="420" y="586">EV_LANDED</text>
+        <path class="edge" d="M80 640 H396" marker-end="url(#ah2)"/><circle cx="96" cy="628" r="9"/><text class="num" x="96" y="632" text-anchor="middle">12</text><text x="112" y="632">PulDir_loop() takes events</text>
+        <path class="edge" d="M400 672 H84" marker-end="url(#ah2)"/><text x="112" y="664">log: "[ax] landed at 10.0000"</text>
+      </g>
+    </svg>
+    </div>
+    <figcaption>The call returns in microseconds; nothing in it waits for motion. The plan tick and the pulse tick never call each other: the plan tick writes the shadow set and flips one index, and the pulse tick copies the whole set at the next boundary, so every axis switches increments on the same tick. The count ends exactly on the rounded target, and the last rising edge falls on the last tick of the arrival interval.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ -->
+<section id="plan">
+  <h2><span class="n">05</span>One plan tick, in order</h2>
+  <p class="intro"><code>puldir_plan_tick()</code> in <code>puldir_plan.c</code>, once per millisecond. Steps 1 to 3 are the same for every axis; step 5 is per axis. <span class="lock">Red</span> marks the only locked section.</p>
+  <ol class="steps">
+    <li><div><b>Read the fault pins.</b> Done before the lock on purpose: a pin read can be preempted by pulse ticks, and one landing between the snapshot and the publish would make the prediction stale.</div><div class="fn">port_pin_read(a-&gt;flt)</div></li>
+    <li><div><b>Snapshot every axis at one instant.</b> Under one lock: how many ticks the live increments still run (<code>ahead = left % N</code>), and each axis's position, count, live inc, pin direction and pulse-pin level.</div><div class="fn"><span class="lock">port_lock</span> · puldir_left · puldir_pulse_read · <span class="lock">port_unlock</span></div></li>
+    <li><div><b>Predict the boundary.</b> <code>Pb = P + inc × ahead</code>: where each axis will be when the set published at the end latches. Planning from there lets each new set start exactly where the pulses are.</div><div class="fn">PulDirSnap.Pb</div></li>
+    <li><div><b>Service each axis.</b> Fault debounce (2 ms continuous) and latch, which halts at once; the 10 ms clear pulse; the enable delay; homing timeouts.</div><div class="fn">service · puldir_halt_locked · puldir_group_halt</div></li>
+    <li><div><b>Groups first.</b> Each group in a move advances its path <code>s</code> and writes every member's increment, once all members' direction pins are set.</div><div class="fn">puldir_group_tick · run_group · MotionProfile_advance(&amp;g-&gt;s)</div></li>
+    <li><div><b>Each other axis: re-base.</b> The generator's origin moves to the whole pulses emitted, so its floats stay small however far the axis has gone. The target is handed over relative to that origin.</div><div class="fn">run_axis · MotionProfile_rebase</div></li>
+    <li><div><b>Apply main's requests</b>, halt first, then stream begin, limits, datum, stream end or timeout, target or jog, stop, homing start.</div><div class="fn">halt_generator · setLimits · setTarget · setEndless · stop · leave_stream</div></li>
+    <li><div><b>Run the mode.</b> PROFILE and STOPPING advance the generator; STREAM computes feedforward plus catch-up; HOMING runs its phase; IDLE publishes zero. A drive still inside its enable delay publishes zero.</div><div class="fn">run_profile · run_stream · run_home</div></li>
+    <li><div><b>Turn position into an increment.</b> <code>Δ = end − Pb</code> in 32.32; <code>inc = Δ / N</code> truncated. Near the target the end is held a hair short (D6) until arrival, when the final inc is rounded away so the last edge lands on the interval's last tick.</div><div class="fn">puldir_steer · puldir_set_inc · div_trunc · div_away</div></li>
+    <li><div><b>Settle and finish.</b> Two runs after arrival, with the pulse pin low, the axis goes IDLE, <code>moving</code> clears and <code>EV_LANDED</code> is set. Auto-release starts its timer.</div><div class="fn">run_profile · release</div></li>
+    <li><div><b>Publish.</b> One index flip makes the new set visible. The pulse tick takes it at the next boundary, or at once if it arrives after that boundary (a late set, counted by <code>PulDir_lateSets</code>).</div><div class="fn">puldir_publish</div></li>
+  </ol>
+</section>
+
+<!-- ============================================================ -->
+<section id="pulse">
+  <h2><span class="n">06</span>One pulse tick, per axis</h2>
+  <p class="intro"><code>puldir_pulse_tick()</code> in <code>puldir_pulse.c</code>, 50,000 times a second. It makes no decisions beyond this chart. Because <code>|inc|</code> is below half a pulse per tick, a pulse is always one tick high and at least one tick low.</p>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 1120 470" role="img" aria-label="Pulse tick flow: latch at a boundary or past the set's due tick, then per axis lower last pulse, handle a direction change on an edge-free tick, add the increment and raise a pulse at a whole-pulse crossing.">
+      <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+      <g class="fc end"><rect x="20" y="30" width="170" height="50" rx="25"/><text x="105" y="60" text-anchor="middle">pulse timer IRQ</text></g>
+      <g class="fc dec"><polygon points="250,55 300,20 420,20 470,55 420,90 300,90"/><text x="360" y="51" text-anchor="middle">new set, and left == N</text><text x="360" y="67" text-anchor="middle">or past its due tick?</text></g>
+      <g class="fc"><rect x="530" y="30" width="200" height="50" rx="6"/><text x="630" y="51" text-anchor="middle">copy whole set:</text><text x="630" y="67" text-anchor="middle">inc, dir per axis</text></g>
+      <path class="edge" d="M190 55 H246" marker-end="url(#ah3)"/>
+      <path class="edge" d="M470 55 H526" marker-end="url(#ah3)"/><text class="yes" x="484" y="48">yes</text>
+      <path class="edge" d="M360 90 V150 H140 V168" marker-end="url(#ah3)"/><text class="no" x="368" y="116">no</text>
+      <path class="edge" d="M630 80 V130 H140 V168" marker-end="url(#ah3)"/>
+      <text class="seq-note" x="760" y="52">every axis switches on the same tick:</text>
+      <text class="seq-note" x="760" y="70">this is what lines a group up</text>
+
+      <g class="fc"><rect x="40" y="172" width="200" height="50" rx="6"/><text x="140" y="193" text-anchor="middle">for each axis:</text><text x="140" y="209" text-anchor="middle">PUL high? lower it</text></g>
+      <g class="fc dec"><polygon points="300,197 350,162 470,162 520,197 470,232 350,232"/><text x="410" y="193" text-anchor="middle">dir differs from</text><text x="410" y="209" text-anchor="middle">the pin?</text></g>
+      <path class="edge" d="M240 197 H296" marker-end="url(#ah3)"/>
+      <g class="fc dec"><polygon points="580,197 630,162 750,162 800,197 750,232 630,232"/><text x="690" y="193" text-anchor="middle">lowered a pulse</text><text x="690" y="209" text-anchor="middle">this tick?</text></g>
+      <path class="edge" d="M520 197 H576" marker-end="url(#ah3)"/><text class="yes" x="534" y="190">yes</text>
+      <g class="fc end"><rect x="880" y="172" width="210" height="50" rx="25"/><text x="985" y="193" text-anchor="middle">wait: try next tick</text><text x="985" y="209" text-anchor="middle">(next axis)</text></g>
+      <path class="edge" d="M800 197 H876" marker-end="url(#ah3)"/><text class="yes" x="814" y="190">yes</text>
+      <g class="fc"><rect x="590" y="282" width="200" height="50" rx="6"/><text x="690" y="303" text-anchor="middle">write DIR, aim():</text><text x="690" y="319" text-anchor="middle">re-point the edge</text></g>
+      <path class="edge" d="M690 232 V278" marker-end="url(#ah3)"/><text class="no" x="698" y="258">no</text>
+      <path class="edge" d="M790 307 H985 V226" marker-end="url(#ah3)"/>
+      <text class="seq-note" x="808" y="300">skip the add this tick</text>
+
+      <g class="fc"><rect x="310" y="282" width="200" height="50" rx="6"/><text x="410" y="303" text-anchor="middle">past += inc</text><text x="410" y="319" text-anchor="middle">(32.32, wraps safely)</text></g>
+      <path class="edge" d="M410 232 V278" marker-end="url(#ah3)"/><text class="no" x="418" y="258">no</text>
+      <g class="fc dec"><polygon points="300,402 350,367 470,367 520,402 470,437 350,437"/><text x="410" y="398" text-anchor="middle">crossed the next</text><text x="410" y="414" text-anchor="middle">whole pulse?</text></g>
+      <path class="edge" d="M410 332 V363" marker-end="url(#ah3)"/>
+      <g class="fc"><rect x="580" y="377" width="230" height="50" rx="6"/><text x="695" y="398" text-anchor="middle">raise PUL, count += dir,</text><text x="695" y="414" text-anchor="middle">edge moves one pulse on</text></g>
+      <path class="edge" d="M520 402 H576" marker-end="url(#ah3)"/><text class="yes" x="534" y="395">yes</text>
+      <g class="fc end"><rect x="40" y="377" width="200" height="50" rx="25"/><text x="140" y="398" text-anchor="middle">next axis; then</text><text x="140" y="414" text-anchor="middle">ticks++, left−−</text></g>
+      <path class="edge" d="M300 402 H244" marker-end="url(#ah3)"/><text class="no" x="262" y="395">no</text>
+      <path class="edge" d="M695 427 V452 H140 V431" marker-end="url(#ah3)"/>
+    </svg>
+    </div>
+    <figcaption>The edge test is hysteretic (D3): moving up, a pulse fires when the position reaches the next whole pulse; moving down, when it reaches the one below. Dithering around a whole pulse therefore emits nothing, and a direction change never shares a tick with a pulse edge, which gives the drive one full tick of direction setup and hold.</figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ -->
+<section id="flows">
+  <h2><span class="n">07</span>The other flows</h2>
+  <p class="intro">The same pattern repeats for every feature: main stores a request under the lock, the plan tick acts on it next millisecond, and the pulse tick knows nothing about features at all.</p>
+  <div class="flows">
+    <div class="flow"><h3>Setup</h3><p>The order the library requires. Init and register refuse, and log why, when a step before them is missing.</p><ol>
+      <li><span class="tag main">main</span><code>PulDir_stm32_attachPulseTimer(&amp;htim, irqn, pulse_us)</code> and <code>attachPlanTimer(..., plan_us)</code>: two timers counting at 1 MHz. The periods are arguments, in µs.</li>
+      <li><span class="tag main">main</span><code>PulDir_attachLogger(fn)</code>, so init can report.</li>
+      <li><span class="tag main">main</span><code>PulDir_init(&amp;ax, "tilt", 280.0f)</code> takes the conversion, fixes the timing and logs <code>max speed 89.2857 units/s, resolution 0.0036 units/pulse</code>. It refuses without both timers.</li>
+      <li><span class="tag main">main</span>Pins, <code>setDefaults</code>, <code>setDelays</code>, homing, then <code>PulDir_register</code>; groups after the axes.</li>
+      <li><span class="tag main">main</span><code>PulDir_start</code> writes both timer periods (count − 1) and starts them in step. From here the ticks run.</li></ol></div>
+    <div class="flow"><h3>Jog, stop and halt</h3><p>Ramped versus immediate.</p><ol>
+      <li><span class="tag main">main</span><code>PulDir_jog(&amp;ax, v)</code> stores <code>REQ_ENDLESS</code> and the speed. The position counter is never reset. <code>jog(0)</code> is a stop.</li>
+      <li><span class="tag main">main</span><code>PulDir_stop</code> stores <code>REQ_STOP</code>, mode STOPPING. The plan tick ramps down at decel and jerk.</li>
+      <li><span class="tag main">main</span><code>PulDir_halt</code> calls <code>puldir_kill</code> under the lock: live and published increments go to zero, so no pulse follows the tick it is called in.</li>
+      <li><span class="tag plan">plan</span><code>halt_generator</code> rests the profile where the pulses stopped; target = position.</li></ol></div>
+    <div class="flow"><h3>Stream mode</h3><p>Follow setpoints from your own planner.</p><ol>
+      <li><span class="tag main">main</span><code>PulDir_streamBegin</code>: mode STREAM, the current velocity is kept.</li>
+      <li><span class="tag main">main</span><code>PulDir_stream(pos, vel)</code> stores one setpoint and its arrival tick. One lock, four stores.</li>
+      <li><span class="tag plan">plan</span><code>run_stream</code> holds the setpoint to the boundary, then <code>v = vel + error / 50 ms</code>, clamped to the speed limit.</li>
+      <li><span class="tag plan">plan</span>No setpoint for 100 ms: <code>leave_stream</code> seeds the generator and stops at decel; <code>EV_STREAM_TIMEOUT</code>.</li>
+      <li><span class="tag main">main</span><code>PulDir_streamEnd</code> restores the defaults and stops the same way.</li></ol></div>
+    <div class="flow"><h3>Group move</h3><p>Straight line in joint space, one final tick.</p><ol>
+      <li><span class="tag main">main</span><code>PulDirGroup_moveTo</code> checks every member is idle, rounds each travel to whole pulses (at most 2<sup>24</sup>) and builds the path limits: each member's limit over its travel, tightest wins.</li>
+      <li><span class="tag main">main</span>Under one lock all members go to GROUP mode.</li>
+      <li><span class="tag plan">plan</span><code>run_group</code> waits until every member's direction pin is set, then advances <code>s</code> from 0 to 1.</li>
+      <li><span class="tag plan">plan</span>Member i aims at <code>start + Δ<sub>i</sub>·s</code>; <code>puldir_steer</code> per member.</li>
+      <li><span class="tag pulse">pulse</span>All members arrive on the same interval, so every final edge falls on the same tick.</li></ol></div>
+    <div class="flow"><h3>Homing</h3><p>The cFlexyStepper phases, run from the plan tick.</p><ol>
+      <li><span class="tag main">main</span><code>PulDir_homeStart</code> (IDLE, configured) saves the limits and stores <code>REQ_HOME</code>.</li>
+      <li><span class="tag plan">plan</span>Jog toward the switch at the homing speed until the switch byte reads 1; pause 1 s.</li>
+      <li><span class="tag plan">plan</span>Back off at 0.2× until it reads 0; pause; move by the adjust distance at the defaults; pause.</li>
+      <li><span class="tag plan">plan</span>Datum = zero position via <code>puldir_set_datum</code>, <code>homed</code>, <code>EV_HOMED</code>.</li>
+      <li><span class="tag plan">plan</span>A phase timeout halts, sets ERROR, restores the saved limits; <code>EV_HOME_FAILED</code>.</li></ol></div>
+    <div class="flow"><h3>Fault</h3><p>Nothing that stops a drive depends on the main loop.</p><ol>
+      <li><span class="tag plan">plan</span>The ALM pin is read every millisecond. Active for 2 ms continuously: latch.</li>
+      <li><span class="tag plan">plan</span><code>puldir_halt_locked</code> (the whole group if the axis is a member), <code>homed</code> cleared, fault count +1, <code>EV_FAULT</code>. The drive stays enabled (D12) and auto-release is suppressed.</li>
+      <li><span class="tag main">main</span>Motion commands are refused while latched.</li>
+      <li><span class="tag main">main</span><code>PulDir_clearFault</code> raises the clear pin; the plan tick lowers it after 10 ms.</li>
+      <li><span class="tag plan">plan</span>The latch drops once the alarm input reads inactive; <code>EV_FAULT_CLEARED</code>.</li></ol></div>
+    <div class="flow"><h3>Enable and release</h3><p>Per axis, set with <code>PulDir_setDelays</code>.</p><ol>
+      <li><span class="tag main">main</span>Any accepted motion command on a disabled drive sets ENA active at once (<code>puldir_wake</code>).</li>
+      <li><span class="tag plan">plan</span>The axis publishes zero until <code>enable_ms</code> has passed, then starts.</li>
+      <li><span class="tag plan">plan</span>With auto-release on, <code>release()</code> sets ENA inactive <code>release_ms</code> after the axis goes IDLE. A new command cancels it; a fault never releases.</li>
+      <li><span class="tag main">main</span><code>PulDir_enable(false)</code> during motion halts first.</li></ol></div>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="units">
+  <h2><span class="n">08</span>From user units to a pulse</h2>
+  <p class="intro">A position changes representation four times on its way to the pin. Each step exists to keep precision or speed where it is needed.</p>
+  <div class="units">
+    <div><h3>user units</h3><div class="ty">float · your degrees, mm</div><p><code>PulDir_moveTo(&amp;ax, 10.0f)</code>. Limits are set in the same units.</p><div class="where"><span class="chip main">main</span></div></div>
+    <div><h3>whole pulses</h3><div class="ty">roundf(x × conv)</div><p>Targets are whole pulses (D4), so a move ends exactly on an integer count. Limits are kept in pulses too.</p><div class="where"><span class="chip main">main</span></div></div>
+    <div><h3>32.32 target</h3><div class="ty">uint64 · 2<sup>-32</sup> pulse</div><p><code>PulDir.target</code>. Unsigned, so wrap is defined.</p><div class="where"><span class="chip main">main</span> <span class="chip plan">plan</span></div></div>
+    <div><h3>profile pulses</h3><div class="ty">float · relative to origin</div><p>The generator works near zero: re-based on the emitted count every millisecond, so float32 never loses precision.</p><div class="where"><span class="chip plan">plan</span></div></div>
+    <div><h3>increment</h3><div class="ty">int32 · 2<sup>-32</sup> pulse per tick</div><p><code>inc = Δ / N</code>. Below 2<sup>31</sup>, so under half a pulse per tick: the 25,000 pulses/s ceiling at 50 kHz.</p><div class="where"><span class="chip plan">plan</span> <span class="chip pulse">pulse</span></div></div>
+    <div><h3>edge</h3><div class="ty">PUL pin · one tick wide</div><p><code>past += inc</code> each tick; a pulse at each whole-pulse crossing; <code>count</code> is what <code>PulDir_position</code> reads.</p><div class="where"><span class="chip pulse">pulse</span></div></div>
+  </div>
+  <p class="note">The rates are arguments of the timer attach calls, fixed by the first <code>PulDir_init</code>. At <code>pulse_us = 5</code> (a 200 kHz tick) the pulse is 5 µs and the ceiling just under 100,000 pulses/s; the plan maths does not change. CPU and jitter figures in the README stay estimates until the bench checklist in <code>docs/bench-step4.md</code> measures them.</p>
+</section>
+
+<footer>Built from the code on branch implement-puldir. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1–D20 and execution record E1–E27 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those.</footer>
+</div>
