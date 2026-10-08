@@ -261,6 +261,8 @@ float PulDir_jerk(PulDir* a)                     { return a->lim[3]; }
 static PulDirRefusal motion_check(const PulDir* a)
 {
     const PulDirMode m = a->mode;
+    if (a->slot == PULDIR_MAX_AXES)
+        return PULDIR_R_UNREGISTERED;   /* the ticks cannot run it: start needs registration */
     if (a->fault)
         return PULDIR_R_FAULT;
     if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
@@ -583,7 +585,9 @@ bool PulDir_homeStart(PulDir* a)
     PulDirRefusal why = a->home_dir == 0 ? PULDIR_R_NO_HOMING : PULDIR_R_NONE;
     if (why == PULDIR_R_NONE) {
         port_lock();
-        if (a->fault) {
+        if (a->slot == PULDIR_MAX_AXES) {
+            why = PULDIR_R_UNREGISTERED;    /* as motion_check: the ticks cannot run it */
+        } else if (a->fault) {
             why = PULDIR_R_FAULT;
         } else if (a->mode != PULDIR_MODE_IDLE) {
             why = PULDIR_R_MODE;
@@ -649,8 +653,8 @@ bool PulDir_clearFault(PulDir* a)
 
 static int32_t emitted(const PulDir* a)
 {
-    if (a->slot >= PULDIR_MAX_AXES)
-        return 0;
+    if (a->slot >= PULDIR_MAX_AXES)             /* unregistered: the datum, which registration takes over */
+        return (int32_t)(uint32_t)(a->target >> 32);
     PulDirSnap s;
     port_lock();
     puldir_pulse_read(a->slot, 0u, &s);

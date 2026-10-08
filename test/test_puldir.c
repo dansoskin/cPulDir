@@ -1026,6 +1026,59 @@ static void t_overrun_log(void)
     assert(nlines == 2 && strcmp(lines[1], "[a1] pulse tick overrun, total 3") == 0);
 }
 
+/* A datum set before registration carries through it: registration takes the pulse state from
+ * the target. Motion before registration is refused, since the ticks cannot run it. */
+static void t_setup_order(void)
+{
+    PulDir* a = &ax[0];
+    static const uint8_t sw_in = 0;
+    assert(PulDir_init(a, "a0", 1.0f));
+    fake_mark_motion_pin(0);
+    fake_mark_motion_pin(1);
+    PulDir_attachPins(a, fake_pin(0), fake_pin(1), false, false);
+    assert(PulDir_setHoming(a, 1, 10.0f, 0.0f, &sw_in, 0.0f, 100u));
+    PulDir_attachLogger(logger);
+
+    /* the review's case: the datum before registration, read back at once */
+    assert(PulDir_setPosition(a, 100.0f));
+    assert(PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
+    const uint16_t req0 = a->req;             /* REQ_SETPOS, for the plan tick */
+
+    /* motion is refused and changes nothing */
+    assert(!PulDir_moveTo(a, 101.0f) && a->refusal == PULDIR_R_UNREGISTERED);
+    assert(!PulDir_moveBy(a, 1.0f) && a->refusal == PULDIR_R_UNREGISTERED);
+    assert(!PulDir_jog(a, 5.0f) && a->refusal == PULDIR_R_UNREGISTERED);
+    assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_UNREGISTERED);
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_UNREGISTERED);
+    assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && a->req == req0);
+    assert(a->home_state == PULDIR_HOME_IDLE && a->slot == PULDIR_MAX_AXES);
+    assert(PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] homeStart refused: not registered") == 0);
+
+    /* registration takes the datum; a second datum after it moves the pulse state too */
+    assert(PulDir_register(a) && a->slot == 0);
+    PulDirSnap s = st(0);
+    assert(s.count == 100 && s.Pb == (uint64_t)100 << 32 && s.inc == 0 && s.dir == 1 && !s.high);
+    assert(PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
+    assert(PulDir_setPosition(a, -7.0f));
+    s = st(0);
+    assert(s.count == -7 && s.Pb == (uint64_t)(int64_t)-7 << 32);
+    assert(PulDir_position(a) == -7.0f && PulDir_target(a) == -7.0f);
+    assert(PulDir_setPosition(a, 100.0f));
+    assert(st(0).count == 100 && PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
+
+    /* started: moveTo(101) from the datum emits exactly one pulse */
+    start();
+    fake_on_write(count_write);
+    assert(PulDir_moveTo(a, 101.0f));
+    run_until_idle(a, TICK_HZ);
+    assert(st(0).count == 101 && edges[0] == 1 && net[0] == 1 && !high(0));
+    assert(PulDir_position(a) == 101.0f && PulDir_target(a) == 101.0f);
+    assert(a->origin == 101 && a->prof.done && a->prof.pos == 0.0f);
+}
+
 /* ---- jog, stop, halt, the datum and live limits --------------------------------------------- */
 
 static uint32_t plan_left(void) { return fake_plan_phase == 0u ? N : N - fake_plan_phase; }
@@ -4163,6 +4216,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "inc_max", t_inc_max },
     { "hysteresis", t_hysteresis },
     { "register_after_start", t_register_after_start },
+    { "setup_order", t_setup_order },
     { "kill", t_kill },
     { "datum", t_datum },
     { "overrun", t_overrun },

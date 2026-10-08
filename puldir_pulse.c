@@ -138,19 +138,19 @@ void puldir_pulse_tick(bool overrun)
         left = n_plan;
 }
 
-/* Before PulDir_start: take the next slot at rest, inc 0, dir +1. */
+/* Before PulDir_start: take the next slot at rest, inc 0, dir +1, at the datum. */
 void puldir_pulse_add(PulDir* p)
 {
     const uint8_t i = puldir_naxes;
     const PulDirInc rest = { 0, 1 };
     sets[0][i] = sets[1][i] = rest;
     Axis* a = &ax[i];
-    a->count = 0;
     a->inc = 0;
     a->dir = a->dir_now = 1;
     a->down = 0;
-    a->past = 0 - edge(a);              /* at position 0 */
     a->pul_high = false;
+    /* The target is the datum PulDir_setPosition may have set before registration: whole in IDLE. */
+    puldir_set_datum(i, (int32_t)(uint32_t)(p->target >> 32));
     a->pul = p->pul;
     a->dir_pin = p->dir;
     a->pul_active_low = p->pul_active_low;

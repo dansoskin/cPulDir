@@ -208,7 +208,7 @@ if (!PulDir_jog(&tilt, 100.0f)) {
 }
 ```
 
-The cap is just under half the tick rate: 25,000 pulses/s at a 20 µs pulse, which is 89.3 deg/s here, the "max speed" init logged. Setup calls return false on refusal too, so check them. `PulDir_init` refuses a NULL name or one longer than 15 characters, a conversion that is not finite and positive, and missing or mismatched timing. It then writes nothing and logs the reason at once, for example `[tilt] init refused: timers not attached`. An axis whose init was refused is refused by `PulDir_register` too.
+The cap is just under half the tick rate: 25,000 pulses/s at a 20 µs pulse, which is 89.3 deg/s here, the "max speed" init logged. Setup calls return false on refusal too, so check them. `PulDir_init` refuses a NULL name or one longer than 15 characters, a conversion that is not finite and positive, and missing or mismatched timing. It then writes nothing and logs the reason at once, for example `[tilt] init refused: timers not attached`. An axis whose init was refused is refused by `PulDir_register` too. A datum may be set with `PulDir_setPosition` before `PulDir_register`, which takes it over, but motion commands are refused until the axis is registered: `[tilt] moveTo refused: not registered`.
 
 `PulDir_stop` and `PulDir_halt` leave the drive enabled, unless auto-release is on: then it is released after the release delay, as after any move. A fault input latch halts the axis and always keeps the drive enabled; `PulDir_clearFault` and `PulDir_attachFaultClear` handle the clear. Homing is `PulDir_setHoming`, then `PulDir_homeStart`; while it runs the limit setters are refused. `PulDir_console(&tilt, cmd, arg)` is a one-letter command console for a UART, and `PulDir_consoleMenu` prints the verbs.
 
