@@ -47,6 +47,7 @@ bool puldir_timing_take(void);                /* PulDir_init: checks the pair an
 
 /* A duration in pulse ticks; every time is compared by unsigned subtraction (5.9). */
 uint32_t puldir_ms_ticks(uint32_t ms);
+bool     puldir_ms_fits(uint32_t ms);         /* a setter's delay or timeout is at most PULDIR_TICKS_MAX */
 /* The longest delay or timeout a setter accepts, in ticks: half the counter. */
 #define PULDIR_TICKS_MAX 0x7FFFFFFFu
 
@@ -95,9 +96,6 @@ void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group
  * no rising edge on any member after this tick, every member IDLE, the move abandoned. */
 void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
 
-/* Main context, under the lock, for every accepted motion command (5.8): enables a disabled drive,
- * whose motion the plan tick then holds for the enable delay, and cancels a pending release. */
-void puldir_wake(PulDir*);
 /* Under the lock, from main or the plan tick, for an axis outside a group's move: no rising edge
  * after this tick, the target where the pulses stopped, IDLE, REQ_HALT for the generator. A homing
  * run gets back the limits homeStart saved; its homing state is the caller's to set. */
@@ -111,4 +109,8 @@ void puldir_refuse(PulDir*, const char* call, PulDirRefusal why, float value);
 #define PULDIR_LINE 128u
 const char* puldir_phase(PulDirHomeState h);
 void   puldir_log(const PulDir* a, const char* line);     /* through the logger, if the axis logs; NULL: no axis yet */
+
+/* The modules' functions: each header's second half, kept out of puldir.h's view. */
+#define PULDIR_INTERNAL_FUNCTIONS
+#include "puldir_enable.h"
 #endif

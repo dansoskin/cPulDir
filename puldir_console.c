@@ -94,7 +94,7 @@ static void status(PulDir* a)
 static void halt_and_release(PulDir* a)
 {
     PulDir_halt(a);
-    if (a->has_ena)
+    if (a->enable.attached)
         (void)PulDir_enable(a, false);
     else
         say(a, "halted, no enable pin to release");

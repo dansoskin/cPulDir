@@ -3009,20 +3009,20 @@ static void t_enable_release(void)
     assert(PulDir_setDelays(a, 50u, 200u));
     PulDir_setAutoRelease(a, true);
     fake_run(N);
-    assert(PulDir_status(a) == PULDIR_IDLE && !a->enabled && !PulDir_isMoving(a));
+    assert(PulDir_status(a) == PULDIR_IDLE && !a->enable.enabled && !PulDir_isMoving(a));
 
     /* refused: a delay beyond half the tick counter, and enable without a pin */
     assert(!PulDir_setDelays(a, 0xFFFFFFFFu, 0u) && a->refusal == PULDIR_R_ARG);
-    assert(!PulDir_setDelays(a, 0u, 0xFFFFFFFFu) && a->enable_ticks == 50u * MS && a->release_ticks == 200u * MS);
+    assert(!PulDir_setDelays(a, 0u, 0xFFFFFFFFu) && a->enable.enable_ticks == 50u * MS && a->enable.release_ticks == 200u * MS);
     PulDir b;
     assert(PulDir_init(&b, "b", 1.0f));
-    assert(!PulDir_enable(&b, true) && b.refusal == PULDIR_R_NO_PIN && !b.enabled);
+    assert(!PulDir_enable(&b, true) && b.refusal == PULDIR_R_NO_PIN && !b.enable.enabled);
 
     /* a move on a disabled drive: the pin and isMoving at once, the first pulse enable_ms later */
     size_t w = nw;
     uint32_t t_cmd = PulDir_ticks(), t;
     assert(PulDir_moveTo(a, 1000.0f));
-    assert(fake_level(ENA(0)) && a->enabled && PulDir_isMoving(a) && PulDir_status(a) == PULDIR_MOVING);
+    assert(fake_level(ENA(0)) && a->enable.enabled && PulDir_isMoving(a) && PulDir_status(a) == PULDIR_MOVING);
     assert(find_write(w, ENA(0), true, &t) && t == t_cmd);
     nrise = nfall = 0;
     run_until_idle(a, TICK_HZ);
@@ -3038,7 +3038,7 @@ static void t_enable_release(void)
         assert(PulDir_ticks() - f <= 200u * MS + N);
     }
     assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + N);
-    assert(nrise == 1000 && !high(0) && !a->enabled && PulDir_status(a) == PULDIR_IDLE);
+    assert(nrise == 1000 && !high(0) && !a->enable.enabled && PulDir_status(a) == PULDIR_IDLE);
     printf("  enable_release: first edge %.2f ms after enable, released %.2f ms after the last fall\n",
            (double)(rise[0] - t_cmd) * 1000.0 / TICK_HZ, (double)(t - f) * 1000.0 / TICK_HZ);
 
@@ -3046,11 +3046,11 @@ static void t_enable_release(void)
     assert(PulDir_moveTo(a, 0.0f));
     run_until_idle(a, TICK_HZ);
     fake_run(100u * MS);
-    assert(fake_level(ENA(0)) && a->release_due);
+    assert(fake_level(ENA(0)) && a->enable.release_due);
     w = nw;
     t_cmd = PulDir_ticks();
     const size_t r1 = nrise;
-    assert(PulDir_moveTo(a, 500.0f) && !a->release_due);
+    assert(PulDir_moveTo(a, 500.0f) && !a->enable.release_due);
     assert(!find_write(w, ENA(0), true, &t));     /* enabled already: no write, no delay */
     run_until_idle(a, TICK_HZ);
     assert(rise[r1] - t_cmd < 10u * MS);
@@ -3063,7 +3063,7 @@ static void t_enable_release(void)
     /* an explicit enable holds the drive: no release without a move */
     assert(PulDir_enable(a, true) && fake_level(ENA(0)) && PulDir_status(a) == PULDIR_ENABLED);
     fake_run(300u * MS);
-    assert(fake_level(ENA(0)) && a->enabled);
+    assert(fake_level(ENA(0)) && a->enable.enabled);
 
     /* enable(false) while moving: halts first (no rising edge after), then the pin goes inactive */
     assert(PulDir_jog(a, 3000.0f));
@@ -3076,7 +3076,7 @@ static void t_enable_release(void)
     t_cmd = PulDir_ticks();
     assert(PulDir_enable(a, false));
     /* the pulse is high: the drive stays enabled until the plan tick sees it lowered */
-    assert(high(0) && fake_level(ENA(0)) && !a->enabled && a->mode == PULDIR_MODE_IDLE);
+    assert(high(0) && fake_level(ENA(0)) && !a->enable.enabled && a->mode == PULDIR_MODE_IDLE);
     assert(PulDir_status(a) == PULDIR_MOVING);
     while (fake_level(ENA(0))) {
         fake_run(1);
@@ -3089,7 +3089,7 @@ static void t_enable_release(void)
 
     /* at rest the pin goes inactive at once */
     assert(PulDir_enable(a, true) && fake_level(ENA(0)));
-    assert(PulDir_enable(a, false) && !fake_level(ENA(0)) && !a->ena_off);
+    assert(PulDir_enable(a, false) && !fake_level(ENA(0)) && !a->enable.off_due);
 
     /* a command between enable(false) and the pulse's fall re-enables: the plan
      * tick must not lower the pin after it */
@@ -3097,10 +3097,10 @@ static void t_enable_release(void)
     fake_run(100u * MS);
     while (!high(0))
         fake_run(1);
-    assert(PulDir_enable(a, false) && a->ena_off && fake_level(ENA(0)));
-    assert(PulDir_moveTo(a, (float)(st(0).count + 10)) && a->enabled && fake_level(ENA(0)));
+    assert(PulDir_enable(a, false) && a->enable.off_due && fake_level(ENA(0)));
+    assert(PulDir_moveTo(a, (float)(st(0).count + 10)) && a->enable.enabled && fake_level(ENA(0)));
     fake_run(3u * N);
-    assert(fake_level(ENA(0)) && a->enabled);
+    assert(fake_level(ENA(0)) && a->enable.enabled);
     run_until_idle(a, TICK_HZ);
     assert(PulDir_enable(a, false) && !fake_level(ENA(0)));
 
@@ -3187,7 +3187,7 @@ static void t_fault(void)
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
     fake_run(10u * MS);
     assert(nrise == r0 && st(0).count == ch && !PulDir_isMoving(a) && PulDir_target(a) == (float)ch);
-    assert(fake_level(ENA(0)) && a->enabled);    /* D12: not released, auto-release or not */
+    assert(fake_level(ENA(0)) && a->enable.enabled);    /* D12: not released, auto-release or not */
     assert(PulDir_status(a) == PULDIR_FAULT);
 
     /* motion refused while latched */
@@ -3368,15 +3368,15 @@ static void t_fault_cases(void)
 
     /* a latch in the enable delay: no pulse ever, the drive left enabled (D12) */
     assert(PulDir_setDelays(a, 50u, 0u));
-    assert(PulDir_moveTo(a, 1000.0f) && fake_level(ENA(0)) && a->ena_wait);
+    assert(PulDir_moveTo(a, 1000.0f) && fake_level(ENA(0)) && a->enable.wait);
     fake_run(10u * MS);
     fake_set_input(FLT(0), true);
     while (!a->fault)
         fake_run(1);
-    assert(a->mode == PULDIR_MODE_IDLE && a->ena_wait);
+    assert(a->mode == PULDIR_MODE_IDLE && a->enable.wait);
     fake_run(100u * MS);
-    assert(edges[0] == 0u && st(0).count == 0 && !PulDir_isMoving(a) && !a->ena_wait);
-    assert(fake_level(ENA(0)) && a->enabled && PulDir_target(a) == 0.0f);
+    assert(edges[0] == 0u && st(0).count == 0 && !PulDir_isMoving(a) && !a->enable.wait);
+    assert(fake_level(ENA(0)) && a->enable.enabled && PulDir_target(a) == 0.0f);
 
     /* a latch in STREAM: halted, out of the stream, no edge after */
     PulDir* b = &ax[2];
@@ -3457,7 +3457,7 @@ static void t_group_fault(void)
     /* D12: no member released, faulted or not, for three release delays */
     fake_run(15u * MS);
     for (uint8_t i = 0; i < 3; i++)
-        assert(fake_level(ENA(i)) && ax[i].enabled && ax[i].held);
+        assert(fake_level(ENA(i)) && ax[i].enable.enabled && ax[i].enable.held);
 
     /* the group is refused while a member is latched */
     ax[1].refusal = PULDIR_R_NONE;
@@ -4186,9 +4186,9 @@ static void t_console(void)
     PulDir_console(a, 'k', "");
     run_until_idle(a, TICK_HZ);
     PulDir_console(a, 'E', "0");
-    assert(!a->enabled);
+    assert(!a->enable.enabled);
     PulDir_console(a, 'E', "1");
-    assert(a->enabled);
+    assert(a->enable.enabled);
     nlines = 0;
     PulDir_console(a, 's', "");
     assert(nlines == 1 && strstr(lines[0], "status") && strstr(lines[0], "mode IDLE")
@@ -4199,7 +4199,7 @@ static void t_console(void)
     PulDir_console(a, 'J', "40");
     fake_run(50u * N);
     PulDir_console(a, 'K', "");
-    assert(a->mode == PULDIR_MODE_IDLE && !a->enabled);
+    assert(a->mode == PULDIR_MODE_IDLE && !a->enable.enabled);
     fake_run(4u * N);
     run_until_idle(a, TICK_HZ);
     assert(!PulDir_isMoving(a) && PulDir_velocity(a) == 0.0f);

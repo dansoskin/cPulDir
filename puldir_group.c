@@ -192,7 +192,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
             a->arrived = false;                 /* a new course (E17) */
             a->settle = 0;
             a->vel_out = 0.0f;
-            puldir_wake(a);                     /* 5.8: s waits for every member's enable delay */
+            puldir_enable_wake(a);              /* 5.8: s waits for every member's enable delay */
         }
         g->faulted = false;
         g->moving = true;
@@ -321,7 +321,7 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
          * delay (5.8), publishing directions alone. A stop before the start need not wait. */
         bool ready = true;
         for (uint8_t i = 0; i < n; i++)
-            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !g->axes[i]->ena_wait;
+            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !g->axes[i]->enable.wait;
         if (!ready && !s->stopping) {
             for (uint8_t i = 0; i < n; i++) {
                 PulDir* a = g->axes[i];

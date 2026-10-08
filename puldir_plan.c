@@ -392,7 +392,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
     /* 4. The enable delay (5.8): a drive enabled too recently publishes nothing and its generator
      * waits. The homing phase clock starts when the hold ends. */
-    if (a->ena_wait && a->mode != PULDIR_MODE_IDLE) {
+    if (a->enable.wait && a->mode != PULDIR_MODE_IDLE) {
         puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
         a->home_t0 = now;
@@ -430,12 +430,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t ahead,
                     PulDirSnap* snap, PulDirInc* out)
 {
-    if (a->ena_wait && now - a->enabled_at >= a->enable_ticks)
-        a->ena_wait = false;
-    if (a->ena_off && !snap[a->slot].high) {    /* enable(false): the last pulse is lowered */
-        port_pin_write(a->ena, a->ena_inverted);
-        a->ena_off = false;
-    }
+    puldir_enable_service(a, snap[a->slot].high, now);
 
     /* The clear pulse ends. This sample was taken before the pin was lowered, so the latch holds
      * until a later one reads inactive; a drive still in alarm stays latched, uncounted. */
@@ -469,7 +464,7 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
     a->last_fault_tick = t_pin;
     a->events |= PULDIR_EV_FAULT;
     a->homed = false;
-    a->held = true;
+    a->enable.held = true;
     if (a->mode == PULDIR_MODE_HOMING) {
         a->home_fail = a->home_state;
         a->home_state = PULDIR_HOME_ERROR;
@@ -481,7 +476,7 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         puldir_group_halt(g, out);
         g->faulted = true;
         for (uint8_t i = 0; i < g->count; i++) {
-            g->axes[i]->held = true;
+            g->axes[i]->enable.held = true;
             puldir_pulse_read(g->axes[i]->slot, ahead, &snap[g->axes[i]->slot]);
         }
     } else {
@@ -489,27 +484,6 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         puldir_pulse_read(a->slot, ahead, &snap[a->slot]);
     }
     port_unlock();
-}
-
-/* Auto-release: release_ticks after the axis went IDLE at the end of a move (D19). Never on an axis
- * a fault latch halted, or its group's members, until its next accepted command (D12). */
-static void release(PulDir* a, bool was_moving, uint32_t now)
-{
-    if (was_moving && !a->moving && a->mode == PULDIR_MODE_IDLE && a->auto_release
-        && a->has_ena && a->enabled) {
-        a->release_due = true;
-        a->idle_at = now;
-    }
-    if (!a->release_due)
-        return;
-    if (a->moving || a->mode != PULDIR_MODE_IDLE || a->held) {
-        a->release_due = false;
-    } else if (now - a->idle_at >= a->release_ticks) {
-        port_pin_write(a->ena, a->ena_inverted);
-        a->enabled = false;
-        a->ena_wait = false;
-        a->release_due = false;
-    }
 }
 
 void puldir_plan_tick(void)
@@ -548,7 +522,7 @@ void puldir_plan_tick(void)
         PulDir* a = puldir_axes[i];
         if (a->mode != PULDIR_MODE_GROUP)
             run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].inc, snap[i].high, now, ahead);
-        release(a, was[i], now);
+        puldir_enable_release(a, was[i], now);
     }
     puldir_publish(now + ahead);                /* due at the boundary the snapshot aimed at: the tick after the ahead ticks */
 }

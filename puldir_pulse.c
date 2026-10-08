@@ -72,6 +72,12 @@ uint32_t puldir_ms_ticks(uint32_t ms)
     return (uint32_t)((uint64_t)ms * puldir_timing.tick_hz / 1000u);
 }
 
+/* A duration the plan tick can compare by unsigned subtraction. */
+bool puldir_ms_fits(uint32_t ms)
+{
+    return (uint64_t)ms * puldir_timing.tick_hz / 1000u <= PULDIR_TICKS_MAX;
+}
+
 /* Fixes the timing even if no axis took it; the plan tick then does nothing. */
 void PulDir_start(void)
 {

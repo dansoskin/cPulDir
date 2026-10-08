@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include "motion_profile.h"
 #include "puldir_port.h"
+#include "puldir_enable.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,15 +64,14 @@ struct PulDirGroup;
 typedef struct PulDir {
     /* setup, main context */
     char  name[16];
-    puldir_pin_t pul, dir, ena, flt, clr;
-    bool  pul_active_low, dir_inverted, ena_inverted, flt_inverted, clr_inverted;
-    bool  has_pins, has_ena, has_flt, has_clr;
+    puldir_pin_t pul, dir, flt, clr;
+    bool  pul_active_low, dir_inverted, flt_inverted, clr_inverted;
+    bool  has_pins, has_flt, has_clr;
     float conv;                          /* pulses per user unit, > 0 */
     float def[4];                        /* default speed, accel, decel, jerk, user units */
     float lim[4];                        /* current speed, accel, decel, jerk, user units */
     uint32_t catchup_ms;
-    uint32_t enable_ticks, release_ticks; /* setDelays' delays, in pulse ticks */
-    bool  auto_release, log_on;
+    bool  log_on;
     int8_t home_dir;                     /* +1, -1, 0 = not configured */
     float home_speed, home_adjust, home_zero;
     float home_lim[4];                   /* the limits at homeStart: a run that ends unhomed restores them */
@@ -88,14 +88,7 @@ typedef struct PulDir {
     MotionProfile prof;                  /* pulses, relative to origin */
     uint64_t target;                     /* absolute, 32.32 pulses */
     int32_t  origin;
-    volatile bool moving, enabled, homed, fault;
-    uint32_t enabled_at;                 /* tick of the enable edge */
-    bool     ena_wait;                   /* the enable delay has not yet passed since enabled_at: hold */
-    bool     release_due;                /* auto-release: the axis went IDLE at idle_at */
-    uint32_t idle_at;
-    bool     held;                       /* halted by a fault latch: no auto-release until a command (D12) */
-    bool     ena_off;                    /* enable(false) with the pulse pin high: the plan tick lowers
-                                            the enable pin once the pulse pin is low */
+    volatile bool moving, homed, fault;
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
@@ -122,6 +115,9 @@ typedef struct PulDir {
                                             reads the input inactive lifts it */
 
     struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
+
+    /* the modules (5.8), each in its own file */
+    PulDirEnable enable;
 
     /* the pulse tick's state lives in puldir_pulse.c, by slot */
 
