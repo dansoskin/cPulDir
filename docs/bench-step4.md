@@ -202,6 +202,8 @@ void bench_console(const char* axis, const char* cmd)
 }
 ```
 
+Axes 1 to 3 have enable pins, so their first motion command drives the enable pin active (guidelines 5.8). The enable delay and the release delay are left at 0 and auto-release is off, as cFlexyStepper behaved: the pin stays active after the jog stops, and only `PulDir_enable(false)` (the console's `K`, which halts first) lowers it. Before connecting a drive for the pulse-width check, add `(void)PulDir_setDelays(&bench[i], <ms>, 0u);` in the loop if the drive's datasheet asks for a wait between enable and the first pulse.
+
 If `PulDir_setDefaults` refuses the limits (it logs the refusal), lower them. If the verbs of the console (`J` jog, `k` stop, `K` halt, `s` status; the same letters as `@` in `cFlexyStepper_decode.c`) differ in the final `puldir_console.c`, use `PulDir_consoleMenu` output.
 
 ### 3.4 `Core/Src/decode_packet.c`

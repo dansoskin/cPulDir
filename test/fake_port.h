@@ -16,6 +16,9 @@ void  fake_pulse(bool overrun);                     /* one pulse tick */
 void  fake_plan(void);                              /* one plan tick */
 typedef void (*fake_plan_fn)(bool after);
 void  fake_on_plan(fake_plan_fn fn);                /* called before and after every plan tick */
+/* Called on entry to every port_lock, before the mask: a tick may run there, as
+ * an interrupt that came due just before main masked it. */
+void  fake_on_lock(void (*fn)(void));
 /* n pulse ticks; a plan tick runs fake_plan_phase ticks after every interval boundary */
 void  fake_run(uint32_t ticks);
 extern uint32_t fake_plan_phase;                    /* default PULDIR_TICKS_PER_PLAN / 2 */

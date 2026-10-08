@@ -99,6 +99,15 @@ static size_t head(char* b, const PulDir* a)
     return put(b, at, "] ");
 }
 
+static const char* phase(PulDirHomeState h)
+{
+    static const char* const name[] = {
+        "IDLE", "MOVE_TOWARDS_LIMIT", "DELAY1", "MOVE_AWAY_FROM_LIMIT",
+        "DELAY2", "ADJUST_POSITION", "DELAY3", "ERROR"
+    };
+    return (unsigned)h < sizeof name / sizeof name[0] ? name[h] : "?";
+}
+
 void PulDir_loop(PulDir* a)
 {
     port_lock();
@@ -107,11 +116,30 @@ void PulDir_loop(PulDir* a)
     const PulDirRefusal why = a->refusal;
     const char* call = a->refused_call;
     const float value = a->refused_value;
+    const uint32_t faults = a->fault_count;
+    const PulDirHomeState failed_in = a->home_fail;
     port_unlock();
     if (!a->log_on || logger == NULL || ev == 0u)
         return;
 
+    /* The bits keep no order: the drive's state first, then what it caused. */
     char b[LINE];
+    if (ev & PULDIR_EV_FAULT) {
+        size_t at = head(b, a);
+        at = put(b, at, "fault latched, count ");
+        (void)put_uint(b, at, faults, 1);
+        logger(b);
+    }
+    if (ev & PULDIR_EV_FAULT_CLEARED) {
+        (void)put(b, head(b, a), "fault cleared");
+        logger(b);
+    }
+    if (ev & PULDIR_EV_HOME_FAILED) {
+        size_t at = head(b, a);
+        at = put(b, at, "homing failed in ");
+        (void)put(b, at, phase(failed_in));
+        logger(b);
+    }
     if (ev & PULDIR_EV_REFUSED) {
         size_t at = head(b, a);
         at = put(b, at, call != NULL ? call : "call");
@@ -136,6 +164,12 @@ void PulDir_loop(PulDir* a)
     if (ev & PULDIR_EV_LANDED) {
         size_t at = head(b, a);
         at = put(b, at, "landed at ");
+        (void)put_num(b, at, PulDir_position(a), false);
+        logger(b);
+    }
+    if (ev & PULDIR_EV_HOMED) {
+        size_t at = head(b, a);
+        at = put(b, at, "homed at ");
         (void)put_num(b, at, PulDir_position(a), false);
         logger(b);
     }

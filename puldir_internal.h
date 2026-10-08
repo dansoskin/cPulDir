@@ -21,8 +21,18 @@ typedef struct {
 enum {
     REQ_LIMITS = 1u << 0, REQ_TARGET = 1u << 1, REQ_ENDLESS = 1u << 2, REQ_STOP = 1u << 3,
     REQ_HALT = 1u << 4, REQ_SETPOS = 1u << 5, REQ_STREAM_BEGIN = 1u << 6,
-    REQ_HOME = 1u << 8, REQ_HOME_STOP = 1u << 9
+    REQ_HOME = 1u << 8
 };
+/* The motion requests: a newer one replaces any older one still pending, so
+ * the plan tick applies only the latest (a halt is kept: it comes first). */
+#define REQ_MOTION (REQ_TARGET | REQ_ENDLESS | REQ_STOP)
+/* Every request a halt discards. */
+#define REQ_COURSE (REQ_MOTION | REQ_STREAM_BEGIN | REQ_HOME)
+
+/* A duration in pulse ticks; every time is compared by unsigned subtraction (5.9). */
+#define PULDIR_MS_TICKS(ms) ((uint32_t)((uint64_t)(ms) * PULDIR_TICK_HZ / 1000u))
+/* The longest delay or timeout a setter accepts, in ticks: half the counter. */
+#define PULDIR_TICKS_MAX 0x7FFFFFFFu
 
 /* main -> plan requests on a group */
 enum { GROUP_REQ_STOP = 1u << 0 };
@@ -81,6 +91,11 @@ void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group
  * member after this tick, every member IDLE, the move abandoned. shadow is the set
  * the plan tick is writing, whose members' entries are zeroed too; NULL from main. */
 void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
+
+/* Main context, under the lock, for every accepted motion command (5.8): enables a
+ * disabled drive (the plan tick then holds the motion for enable_ms) and cancels
+ * a pending auto-release. A few stores and one pin write. */
+void puldir_wake(PulDir*);
 
 /* events (puldir_loop.c) */
 void puldir_refuse(PulDir*, const char* call, PulDirRefusal why, float value);

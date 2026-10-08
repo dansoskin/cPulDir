@@ -45,6 +45,74 @@ void PulDir_attachPins(PulDir* a, puldir_pin_t pulse, puldir_pin_t dir,
     port_pin_init_output(dir, !dir_inverted);             /* the level for +1 */
 }
 
+/* The enable, fault and clear pins: setup, before PulDir_start. The outputs are
+ * parked inactive; the drive is disabled until a command or PulDir_enable. */
+void PulDir_attachEnable(PulDir* a, puldir_pin_t p, bool inverted)
+{
+    a->ena = p;
+    a->ena_inverted = inverted;
+    a->has_ena = true;
+    a->enabled = false;
+    port_pin_init_output(p, inverted);
+}
+
+void PulDir_attachFault(PulDir* a, puldir_pin_t p, bool inverted)
+{
+    a->flt = p;
+    a->flt_inverted = inverted;
+    a->has_flt = true;
+    port_pin_init_input(p, false);
+}
+
+void PulDir_attachFaultClear(PulDir* a, puldir_pin_t p, bool inverted)
+{
+    a->clr = p;
+    a->clr_inverted = inverted;
+    a->has_clr = true;
+    port_pin_init_output(p, inverted);
+}
+
+/* A duration the plan tick can compare by unsigned subtraction. */
+static bool ms_fits(uint32_t ms)
+{
+    return (uint64_t)ms * PULDIR_TICK_HZ / 1000u <= PULDIR_TICKS_MAX;
+}
+
+bool PulDir_setDelays(PulDir* a, uint32_t enable_ms, uint32_t release_ms)
+{
+    if (!ms_fits(enable_ms) || !ms_fits(release_ms)) {
+        puldir_refuse(a, "setDelays", PULDIR_R_ARG, 0.0f);
+        return false;
+    }
+    port_lock();
+    a->enable_ms = enable_ms;
+    a->release_ms = release_ms;
+    a->enable_ticks = PULDIR_MS_TICKS(enable_ms);
+    a->release_ticks = PULDIR_MS_TICKS(release_ms);
+    port_unlock();
+    return true;
+}
+
+void PulDir_setAutoRelease(PulDir* a, bool on)
+{
+    port_lock();
+    a->auto_release = on;
+    if (!on)
+        a->release_due = false;
+    port_unlock();
+}
+
+void puldir_wake(PulDir* a)
+{
+    a->release_due = false;
+    if (a->has_ena && !a->enabled) {
+        port_pin_write(a->ena, !a->ena_inverted);
+        a->enabled = true;
+        a->enabled_at = PulDir_ticks();
+        a->ena_wait = true;                 /* the plan tick lifts it once enable_ms has passed */
+    }
+}
+
 bool PulDir_register(PulDir* a)
 {
     PulDirRefusal why = PULDIR_R_NONE;
@@ -205,17 +273,18 @@ static bool motion_refused(PulDir* a, const char* call)
     return true;
 }
 
-/* The motion requests: a newer one replaces any older one still pending, so
- * the plan tick applies only the latest (a halt is kept: it comes first). */
-#define REQ_MOTION (REQ_TARGET | REQ_ENDLESS | REQ_STOP)
-
-/* Under the lock: what the caller may read back at once is set here (D17). */
-static void take_target(PulDir* a, uint64_t target)
+/* Under the lock: what the caller may read back at once is set here (D17). The
+ * fault latch is read again: the plan tick may have latched since the check. */
+static PulDirRefusal take_target(PulDir* a, uint64_t target)
 {
+    if (a->fault)
+        return PULDIR_R_FAULT;
     a->target = target;
     a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_TARGET);
     a->mode = PULDIR_MODE_PROFILE;
     a->moving = true;
+    puldir_wake(a);
+    return PULDIR_R_NONE;
 }
 
 /* Targets are whole pulses (D4). */
@@ -224,13 +293,16 @@ bool PulDir_moveTo(PulDir* a, float position)
     if (motion_refused(a, "moveTo"))
         return false;
     const float x = roundf(position * a->conv);
-    if (!(x >= -PULSES_MAX && x < PULSES_MAX)) {
-        puldir_refuse(a, "moveTo", PULDIR_R_ARG, 0.0f);
+    PulDirRefusal why = PULDIR_R_ARG;
+    if (x >= -PULSES_MAX && x < PULSES_MAX) {
+        port_lock();
+        why = take_target(a, (uint64_t)(int64_t)x << 32);
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "moveTo", why, 0.0f);
         return false;
     }
-    port_lock();
-    take_target(a, (uint64_t)(int64_t)x << 32);
-    port_unlock();
     return true;
 }
 
@@ -239,19 +311,20 @@ bool PulDir_moveBy(PulDir* a, float distance)
     if (motion_refused(a, "moveBy"))
         return false;
     const float dx = roundf(distance * a->conv);
-    bool ok = dx >= -2.0f * PULSES_MAX && dx <= 2.0f * PULSES_MAX;   /* finite, and the sum fits */
-    if (ok) {
+    PulDirRefusal why = PULDIR_R_ARG;
+    if (dx >= -2.0f * PULSES_MAX && dx <= 2.0f * PULSES_MAX) {   /* finite, and the sum fits */
         port_lock();
         const int64_t whole = (int32_t)(uint32_t)((a->target + (PULDIR_ONE >> 1)) >> 32);
         const int64_t t = whole + (int64_t)dx;
-        ok = t >= INT32_MIN && t <= INT32_MAX;
-        if (ok)
-            take_target(a, (uint64_t)t << 32);
+        if (t >= INT32_MIN && t <= INT32_MAX)
+            why = take_target(a, (uint64_t)t << 32);
         port_unlock();
     }
-    if (!ok)
-        puldir_refuse(a, "moveBy", PULDIR_R_ARG, 0.0f);
-    return ok;
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "moveBy", why, 0.0f);
+        return false;
+    }
+    return true;
 }
 
 /* D7: run at speed until told otherwise. The count carries on (2.2). jog(0) is
@@ -277,22 +350,36 @@ bool PulDir_jog(PulDir* a, float speed)
     }
     const float v = speed * a->conv;
     port_lock();
-    a->req_arg[0] = v;
-    a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
-    a->mode = PULDIR_MODE_PROFILE;
-    a->moving = true;
+    if (a->fault) {
+        why = PULDIR_R_FAULT;
+    } else {
+        a->req_arg[0] = v;
+        a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
+        a->mode = PULDIR_MODE_PROFILE;
+        a->moving = true;
+        puldir_wake(a);
+    }
     port_unlock();
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "jog", why, 0.0f);
+        return false;
+    }
     return true;
 }
 
 /* Ramped: the plan tick stops the generator from where it is. A pending target
  * or jog is applied first, so the stop is from the motion as commanded. A group
- * member refuses it (5.7): PulDirGroup_stop stops the group along its line. */
+ * member refuses it (5.7): PulDirGroup_stop stops the group along its line. In
+ * HOMING it ends the run (homing IDLE, not homed) and stops at the axis's decel. */
 void PulDir_stop(PulDir* a)
 {
     port_lock();
     const bool group = a->mode == PULDIR_MODE_GROUP;
     if (!group && a->mode != PULDIR_MODE_IDLE) {
+        if (a->mode == PULDIR_MODE_HOMING) {
+            a->home_state = PULDIR_HOME_IDLE;
+            a->req &= (uint16_t)~REQ_HOME;  /* not yet begun: there is nothing to stop */
+        }
         a->req |= REQ_STOP;
         a->mode = PULDIR_MODE_STOPPING;
     }
@@ -303,7 +390,7 @@ void PulDir_stop(PulDir* a)
 
 /* Immediate (D17): no rising edge after the tick this is called in. The target
  * is where the pulses stopped; isMoving clears once the plan tick sees the pin low.
- * A group member's halt halts the whole group (5.5). */
+ * A group member's halt halts the whole group (5.5). A homing run ends (IDLE). */
 void PulDir_halt(PulDir* a)
 {
     port_lock();
@@ -318,10 +405,35 @@ void PulDir_halt(PulDir* a)
         puldir_pulse_read(a->slot, &s);
         a->target = (uint64_t)(uint32_t)s.count << 32;
     }
-    a->req = (uint16_t)((a->req & ~(REQ_MOTION | REQ_STREAM_BEGIN)) | REQ_HALT);
+    if (a->mode == PULDIR_MODE_HOMING)
+        a->home_state = PULDIR_HOME_IDLE;
+    a->req = (uint16_t)((a->req & ~REQ_COURSE) | REQ_HALT);
     a->mode = PULDIR_MODE_IDLE;
     a->vel_out = 0.0f;
     port_unlock();
+}
+
+/* 5.8: enabling arms the enable delay; disabling halts first if the axis moves.
+ * Without an enable pin there is nothing to switch: refused. */
+bool PulDir_enable(PulDir* a, bool on)
+{
+    if (!a->has_ena) {
+        puldir_refuse(a, "enable", PULDIR_R_NO_PIN, 0.0f);
+        return false;
+    }
+    if (!on && (a->moving || a->mode != PULDIR_MODE_IDLE))
+        PulDir_halt(a);
+    port_lock();
+    if (on) {
+        puldir_wake(a);
+    } else {
+        port_pin_write(a->ena, a->ena_inverted);
+        a->enabled = false;
+        a->ena_wait = false;
+        a->release_due = false;
+    }
+    port_unlock();
+    return true;
 }
 
 /* ---- stream (5.6) ---------------------------------------------------------- */
@@ -342,6 +454,7 @@ bool PulDir_streamBegin(PulDir* a)
         a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_STREAM_BEGIN);
         a->mode = PULDIR_MODE_STREAM;
         a->moving = true;
+        puldir_wake(a);
         a->stream_timed_out = false;
         a->stream_err = 0.0f;
         a->sp_tick = PulDir_ticks();        /* the timeout runs from here until a setpoint */
@@ -418,6 +531,131 @@ bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
     }
     if (why != PULDIR_R_NONE) {
         puldir_refuse(a, "setStreamCatchup", why, 0.0f);
+        return false;
+    }
+    return true;
+}
+
+/* ---- homing and fault (5.8) -------------------------------------------------- */
+
+/* The homing values, checked at the conversion they will run under: the speed
+ * below the tick ceiling, the adjust and the datum whole pulses inside int32. */
+static PulDirRefusal home_values(const PulDir* a, float speed, float adjust, float zero, float* cap)
+{
+    const float c = a->conv;
+    const float z = roundf(zero * c), d = roundf(adjust * c);
+    *cap = (float)(PULDIR_TICK_HZ / 2u) / c;
+    if (!(speed < *cap))
+        return PULDIR_R_RATE;
+    if (!(z >= -PULSES_MAX && z < PULSES_MAX && d > -PULSES_MAX && d < PULSES_MAX))
+        return PULDIR_R_ARG;
+    return PULDIR_R_NONE;
+}
+
+/* D16: direction +-1, a finite positive speed under the ceiling, a switch, a
+ * timeout of at least one tick and at most half the counter; refused while homing. */
+bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
+                      const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms)
+{
+    PulDirRefusal why = PULDIR_R_NONE;
+    float cap = 0.0f;
+    if ((direction != 1 && direction != -1) || !(isfinite(speed) && speed > 0.0f)
+        || switch_ptr == NULL || PULDIR_MS_TICKS(phase_timeout_ms) == 0u || !ms_fits(phase_timeout_ms)
+        || !isfinite(adjust) || !isfinite(zero_pos))
+        why = PULDIR_R_ARG;
+    else
+        why = home_values(a, speed, adjust, zero_pos, &cap);
+    if (why == PULDIR_R_NONE) {
+        port_lock();
+        if (a->mode == PULDIR_MODE_HOMING) {
+            why = PULDIR_R_BUSY;
+        } else {
+            a->home_dir = (int8_t)direction;
+            a->home_speed = speed;
+            a->home_adjust = adjust;
+            a->home_zero = zero_pos;
+            a->home_switch = switch_ptr;
+            a->home_timeout_ms = phase_timeout_ms;
+            a->home_timeout_ticks = PULDIR_MS_TICKS(phase_timeout_ms);
+        }
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "setHoming", why, why == PULDIR_R_RATE ? cap : 0.0f);
+        return false;
+    }
+    return true;
+}
+
+/* 5.5: IDLE and at rest, not faulted, homing configured. The values are checked
+ * again: the conversion may have changed since setHoming. The plan tick runs the
+ * phases (5.8); the caller reads HOMING, isMoving and the first phase at once. */
+bool PulDir_homeStart(PulDir* a)
+{
+    PulDirRefusal why = PULDIR_R_NONE;
+    float cap = 0.0f;
+    if (a->home_dir == 0)
+        why = PULDIR_R_NO_HOMING;
+    else
+        why = home_values(a, a->home_speed, a->home_adjust, a->home_zero, &cap);
+    if (why == PULDIR_R_NONE) {
+        port_lock();
+        if (a->fault) {
+            why = PULDIR_R_FAULT;
+        } else if (a->mode != PULDIR_MODE_IDLE) {
+            why = PULDIR_R_MODE;
+        } else if (a->moving) {
+            why = PULDIR_R_NOT_IDLE;
+        } else {
+            a->homed = false;
+            a->req |= REQ_HOME;
+            a->mode = PULDIR_MODE_HOMING;
+            a->moving = true;
+            a->home_state = PULDIR_HOME_MOVE_TOWARDS_LIMIT;
+            puldir_wake(a);
+        }
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "homeStart", why, why == PULDIR_R_RATE ? cap : 0.0f);
+        return false;
+    }
+    return true;
+}
+
+/* Halts a run in progress; the homing state goes IDLE either way (it clears ERROR). */
+void PulDir_homeStop(PulDir* a)
+{
+    if (a->mode == PULDIR_MODE_HOMING)
+        PulDir_halt(a);
+    port_lock();
+    a->home_state = PULDIR_HOME_IDLE;
+    port_unlock();
+}
+
+PulDirHomeState PulDir_homeState(PulDir* a) { return a->home_state; }
+bool PulDir_isHomed(PulDir* a)              { return a->homed; }
+
+/* Raises the clear pin and returns; the plan tick lowers it after
+ * PULDIR_FAULT_CLEAR_MS and lifts the latch (5.8). Nothing blocks. */
+bool PulDir_clearFault(PulDir* a)
+{
+    PulDirRefusal why = PULDIR_R_NONE;
+    if (!a->has_clr) {
+        why = PULDIR_R_NO_PIN;
+    } else {
+        port_lock();
+        if (a->clearing) {
+            why = PULDIR_R_BUSY;
+        } else {
+            port_pin_write(a->clr, !a->clr_inverted);
+            a->clearing = true;
+            a->clr_t0 = PulDir_ticks();
+        }
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "clearFault", why, 0.0f);
         return false;
     }
     return true;

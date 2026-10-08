@@ -195,6 +195,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
             a->arrived = false;                 /* a new course (E17) */
             a->settle = 0;
             a->vel_out = 0.0f;
+            puldir_wake(a);                     /* 5.8: s waits for every member's enable delay */
         }
         g->faulted = false;
         g->moving = true;
@@ -327,12 +328,13 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
 
     if (!g->started) {
         /* The start tick (5.7): a reversal costs the member ticks (E14), so s waits
-         * until every member's pin shows the direction of its travel; until then
-         * every member publishes it with no increment. A stop before the start
-         * moves nothing, so it need not wait. */
+         * until every member's pin shows the direction of its travel, and until
+         * every member's drive is past its enable delay (5.8); until then every
+         * member publishes its direction with no increment. A stop before the
+         * start moves nothing, so it need not wait. */
         bool ready = true;
         for (uint8_t i = 0; i < n; i++)
-            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i);
+            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !g->axes[i]->ena_wait;
         if (!ready && !s->stopping) {
             for (uint8_t i = 0; i < n; i++) {
                 PulDir* a = g->axes[i];

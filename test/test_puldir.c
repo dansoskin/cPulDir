@@ -2692,6 +2692,769 @@ static void t_group_rules(void)
     assert(!PulDirGroup_isMoving(&grp2) && st(2).count == 0 && st(3).count == 50);
 }
 
+/* ---- enable, release, fault and homing (5.8; tests 19 to 22) ------------------------------ */
+
+/* Enable, fault and fault-clear pins of axis i; the axes use 0 to 15. */
+#define ENA(i) ((uint8_t)(32u + (i)))
+#define FLT(i) ((uint8_t)(40u + (i)))
+#define CLR(i) ((uint8_t)(48u + (i)))
+#define WRAP_START ((uint32_t)PULDIR_TICK_START)
+
+/* The pin-write log and the edge counters together. */
+static void both_write(uint32_t tick, uint8_t id, bool level)
+{
+    on_write(tick, id, level);
+    group_write(tick, id, level);
+}
+
+/* The tick of the first write of id at level from log index from. */
+static bool find_write(size_t from, uint8_t id, bool level, uint32_t* tick)
+{
+    for (size_t i = from; i < nw; i++)
+        if (wlog[i].id == id && wlog[i].level == level) {
+            *tick = wlog[i].tick;
+            return true;
+        }
+    return false;
+}
+
+/* Test 21 and the enable rows of 19: no pulse before enable_ms after the enable
+ * pin goes active; the pin goes inactive release_ms after the last pulse, never
+ * while pulses remain; enable(false) halts first. */
+static void t_enable_release(void)
+{
+    add_axis(0, false, false);
+    add_axis(1, false, false);
+    PulDir* a = &ax[0];
+    PulDir_attachEnable(a, fake_pin(ENA(0)), false);
+    assert(!fake_level(ENA(0)));                  /* parked inactive */
+    PulDir_attachEnable(&ax[1], fake_pin(ENA(1)), true);
+    assert(fake_level(ENA(1)));                   /* inverted: inactive is high */
+    start();
+    fake_on_write(both_write);
+    for (uint8_t i = 0; i < 2; i++)
+        assert(PulDir_setDefaults(&ax[i], 5000.0f, 1.0e5f, 1.0e5f, 0.0f));
+    assert(PulDir_setDelays(a, 50u, 200u));
+    PulDir_setAutoRelease(a, true);
+    fake_run(N);
+    assert(PulDir_status(a) == PULDIR_IDLE && !a->enabled && !PulDir_isMoving(a));
+
+    /* refused: a delay beyond half the tick counter, and enable without a pin */
+    assert(!PulDir_setDelays(a, 0xFFFFFFFFu, 0u) && a->refusal == PULDIR_R_ARG);
+    assert(!PulDir_setDelays(a, 0u, 0xFFFFFFFFu) && a->enable_ms == 50u && a->release_ms == 200u);
+    PulDir b;
+    PulDir_init(&b, "b");
+    assert(!PulDir_enable(&b, true) && b.refusal == PULDIR_R_NO_PIN && !b.enabled);
+
+    /* a move on a disabled drive: the pin and isMoving at once, the first pulse enable_ms later */
+    size_t w = nw;
+    uint32_t t_cmd = PulDir_ticks(), t;
+    assert(PulDir_moveTo(a, 1000.0f));
+    assert(fake_level(ENA(0)) && a->enabled && PulDir_isMoving(a) && PulDir_status(a) == PULDIR_MOVING);
+    assert(find_write(w, ENA(0), true, &t) && t == t_cmd);
+    nrise = nfall = 0;
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(st(0).count == 1000 && nrise == 1000 && nfall == 1000);
+    assert(rise[0] - t_cmd >= 50u * MS && rise[0] - t_cmd <= 60u * MS);   /* the ramp's first pulse: 4.5 ms */
+    assert(PulDir_status(a) == PULDIR_ENABLED && fake_level(ENA(0)));
+
+    /* released release_ms after the last falling edge, within one plan interval */
+    uint32_t f = fall[nfall - 1u];
+    w = nw;
+    while (fake_level(ENA(0))) {
+        fake_run(1);
+        assert(PulDir_ticks() - f <= 200u * MS + N);
+    }
+    assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + N);
+    assert(nrise == 1000 && !high(0) && !a->enabled && PulDir_status(a) == PULDIR_IDLE);
+    printf("  enable_release: first edge %.2f ms after enable, released %.2f ms after the last fall\n",
+           (double)(rise[0] - t_cmd) * 1000.0 / PULDIR_TICK_HZ, (double)(t - f) * 1000.0 / PULDIR_TICK_HZ);
+
+    /* a move 100 ms after landing cancels the pending release */
+    assert(PulDir_moveTo(a, 0.0f));
+    run_until_idle(a, PULDIR_TICK_HZ);
+    fake_run(100u * MS);
+    assert(fake_level(ENA(0)) && a->release_due);
+    w = nw;
+    t_cmd = PulDir_ticks();
+    const size_t r1 = nrise;
+    assert(PulDir_moveTo(a, 500.0f) && !a->release_due);
+    assert(!find_write(w, ENA(0), true, &t));     /* enabled already: no write, no delay */
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(rise[r1] - t_cmd < 10u * MS);
+    f = fall[nfall - 1u];
+    while (fake_level(ENA(0)))
+        fake_run(1);
+    assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + N);
+    assert(st(0).count == 500 && nrise == r1 + 500u);
+
+    /* an explicit enable holds the drive: no release without a move */
+    assert(PulDir_enable(a, true) && fake_level(ENA(0)) && PulDir_status(a) == PULDIR_ENABLED);
+    fake_run(300u * MS);
+    assert(fake_level(ENA(0)) && a->enabled);
+
+    /* enable(false) while moving: halts first (no rising edge after), then the pin goes inactive */
+    assert(PulDir_jog(a, 3000.0f));
+    fake_run(100u * MS);
+    while (!high(0))
+        fake_run(1);
+    const size_t r2 = nrise;
+    const int32_t ch = st(0).count;
+    w = nw;
+    t_cmd = PulDir_ticks();
+    assert(PulDir_enable(a, false));
+    assert(!fake_level(ENA(0)) && !a->enabled && a->mode == PULDIR_MODE_IDLE);
+    assert(find_write(w, ENA(0), false, &t) && t == t_cmd);
+    fake_run(3u * N);
+    assert(nrise == r2 && st(0).count == ch && !PulDir_isMoving(a) && PulDir_status(a) == PULDIR_IDLE);
+    assert(PulDir_target(a) == (float)ch);
+
+    /* a group waits for the slowest enable delay; the final edges still share one tick */
+    assert(PulDir_setDelays(&ax[1], 20u, 0u));
+    PulDir* m[2] = { &ax[0], &ax[1] };
+    assert(PulDirGroup_init(&grp, m, 2));
+    const float tg[2] = { (float)(ch + 800), -300.0f };
+    rose[0] = rose[1] = false;
+    t_cmd = PulDir_ticks();
+    assert(PulDirGroup_moveTo(&grp, tg));
+    assert(!fake_level(ENA(1)) && fake_level(ENA(0)));   /* inverted: active is low */
+    run_until_idle(&ax[0], PULDIR_TICK_HZ);
+    assert(!PulDirGroup_isMoving(&grp) && st(0).count == ch + 800 && st(1).count == -300);
+    assert(first_rise[0] - t_cmd >= 50u * MS && first_rise[1] - t_cmd >= 50u * MS);
+    assert(last_rise[0] == last_rise[1]);
+}
+
+/* A plan tick that runs on main's next lock, before the mask. */
+static bool plan_on_lock;
+static void lock_hook(void)
+{
+    if (plan_on_lock) {
+        plan_on_lock = false;
+        fake_plan();
+    }
+}
+
+/* The fault rows of 19 and 5.8: debounce, latch, refusals, the clear pulse. */
+static void t_fault(void)
+{
+    add_axis(0, false, false);
+    add_axis(1, false, false);
+    PulDir* a = &ax[0];
+    PulDir_attachEnable(a, fake_pin(ENA(0)), false);
+    PulDir_attachFault(a, fake_pin(FLT(0)), false);
+    PulDir_attachFaultClear(a, fake_pin(CLR(0)), false);
+    assert(!fake_level(CLR(0)));
+    PulDir_attachFault(&ax[1], fake_pin(FLT(1)), true);   /* inverted: low is active */
+    fake_set_input(FLT(1), true);
+    start();
+    fake_on_write(both_write);
+    PulDir_attachLogger(logger);
+    assert(PulDir_setDefaults(a, 5000.0f, 5.0e4f, 5.0e4f, 0.0f));
+    static uint8_t never;
+    assert(PulDir_setHoming(a, 1, 100.0f, 0.0f, &never, 0.0f, 1000u));
+    assert(PulDir_setDelays(a, 0u, 2u));
+    PulDir_setAutoRelease(a, true);           /* released 2 ms after a move, never after a latch */
+
+    /* Every pin read may be preempted by pulse ticks: the plan tick samples the
+     * fault pins before its snapshot, so moves still land exactly (D6). */
+    fake_preempt = 3;
+    for (int k = 0; k < 3; k++) {
+        fake_plan_phase = (uint32_t)k * (N / 3u);
+        const int32_t want = k % 2 ? 0 : 2000;
+        assert(PulDir_moveTo(a, (float)want));
+        run_until_idle(a, PULDIR_TICK_HZ);
+        assert(st(0).count == want && (last_rise[0] - WRAP_START) % N == N - 1u);
+    }
+    assert(!ax[1].fault && ax[1].fault_count == 0);
+    PulDir_loop(a);
+
+    /* active for 1 ms: no latch */
+    assert(PulDir_jog(a, 4000.0f));
+    fake_run(100u * N);
+    fake_set_input(FLT(0), true);
+    fake_run(MS);
+    fake_set_input(FLT(0), false);
+    fake_run(5u * MS);
+    assert(!a->fault && a->fault_count == 0 && PulDir_isMoving(a) && PulDir_velocity(a) == 4000.0f);
+
+    /* held: latched 2 ms after onset, within one plan interval; the axis halts */
+    a->homed = true;
+    const uint32_t on = PulDir_ticks();
+    fake_set_input(FLT(0), true);
+    while (!a->fault) {
+        fake_run(1);
+        assert(PulDir_ticks() - on <= 2u * MS + N + 8u);
+    }
+    const size_t r0 = nrise;
+    const int32_t ch = st(0).count;
+    assert(a->last_fault_tick - on >= 2u * MS && a->last_fault_tick - on <= 2u * MS + N);
+    assert(a->fault_count == 1 && PulDir_status(a) == PULDIR_FAULT && !a->homed);
+    assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
+    fake_run(10u * MS);
+    assert(nrise == r0 && st(0).count == ch && !PulDir_isMoving(a) && PulDir_target(a) == (float)ch);
+    assert(fake_level(ENA(0)) && a->enabled);    /* D12: not released, auto-release or not */
+    assert(PulDir_status(a) == PULDIR_FAULT);
+
+    /* motion refused while latched */
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_moveTo(a, 0.0f) && a->refusal == PULDIR_R_FAULT);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_moveBy(a, 10.0f) && a->refusal == PULDIR_R_FAULT);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_jog(a, 100.0f) && a->refusal == PULDIR_R_FAULT);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_FAULT);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_FAULT);
+    assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && a->req == 0);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 2 && strcmp(lines[0], "[a0] fault latched, count 1") == 0);   /* then the refusal */
+
+    /* no clear pin: refused */
+    ax[1].refusal = PULDIR_R_NONE;
+    assert(!PulDir_clearFault(&ax[1]) && ax[1].refusal == PULDIR_R_NO_PIN);
+
+    /* the input gone: the latch holds until clearFault, whose pulse is 10 ms and does not block */
+    fake_set_input(FLT(0), false);
+    fake_run(10u * N);
+    assert(a->fault);
+    size_t w = nw;
+    const uint32_t tc = PulDir_ticks();
+    assert(PulDir_clearFault(a) && PulDir_ticks() == tc && fake_level(CLR(0)));
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_clearFault(a) && a->refusal == PULDIR_R_BUSY);
+    while (fake_level(CLR(0))) {
+        assert(a->fault);
+        fake_run(1);
+        assert(PulDir_ticks() - tc <= 10u * MS + N);
+    }
+    uint32_t tl;
+    assert(find_write(w, CLR(0), false, &tl) && tl - tc >= 10u * MS && tl - tc <= 10u * MS + N);
+    assert(!a->fault && PulDir_status(a) == PULDIR_ENABLED && a->fault_count == 1);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 2 && strcmp(lines[0], "[a0] fault cleared") == 0);   /* then the busy refusal */
+    assert(PulDir_moveTo(a, (float)(ch + 300)));
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(st(0).count == ch + 300 && nrise == r0 + 300u);
+
+    /* still in alarm: the clear lifts the latch and the debounce latches again */
+    fake_set_input(FLT(0), true);
+    fake_run(4u * MS);
+    assert(a->fault && a->fault_count == 2);
+    w = nw;
+    assert(PulDir_clearFault(a));
+    while (fake_level(CLR(0)))
+        fake_run(1);
+    assert(find_write(w, CLR(0), false, &tl) && !a->fault);
+    while (!a->fault) {
+        fake_run(1);
+        assert(PulDir_ticks() - tl <= 2u * MS + N);
+    }
+    assert(a->last_fault_tick - tl >= 2u * MS && a->fault_count == 3);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 3 && strcmp(lines[0], "[a0] fault latched, count 3") == 0);
+    assert(strcmp(lines[1], "[a0] fault cleared") == 0);   /* the bits, in PulDir_loop's order */
+
+    /* a move accepted just before the latch is discarded with the plan */
+    fake_set_input(FLT(0), false);
+    assert(PulDir_clearFault(a));
+    while (a->clearing)
+        fake_run(1);
+    assert(!a->fault);
+    fake_set_input(FLT(0), true);
+    while (!a->flt_seen)
+        fake_run(1);
+    while (PulDir_ticks() - a->flt_since < 2u * MS - N / 2u)
+        fake_run(1);
+    assert(!a->fault);
+    const int32_t c1 = st(0).count;
+    const size_t r1 = nrise;
+    assert(PulDir_moveTo(a, (float)(c1 + 5000)) && PulDir_isMoving(a));
+    while (!a->fault)
+        fake_run(1);
+    fake_run(3u * N);
+    assert(nrise == r1 && st(0).count == c1 && !PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
+    assert(PulDir_target(a) == (float)c1 && a->prof.done);
+
+    /* the latch closing between a command's check and its lock: refused all the same */
+    fake_set_input(FLT(0), false);
+    assert(PulDir_clearFault(a));
+    while (a->clearing)
+        fake_run(1);
+    fake_set_input(FLT(0), true);
+    while (!a->flt_seen)
+        fake_run(1);
+    pulse(2u * MS);                           /* no plan tick: the next one latches */
+    assert(!a->fault);
+    fake_on_lock(lock_hook);
+    plan_on_lock = true;
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_moveTo(a, (float)(c1 + 5000)) && a->refusal == PULDIR_R_FAULT && a->fault);
+    fake_set_input(FLT(0), false);            /* and once more for jog */
+    assert(PulDir_clearFault(a));
+    while (a->clearing)
+        fake_run(1);
+    fake_set_input(FLT(0), true);
+    while (!a->flt_seen)
+        fake_run(1);
+    pulse(2u * MS);
+    plan_on_lock = true;
+    assert(!PulDir_jog(a, 100.0f) && a->refusal == PULDIR_R_FAULT && a->fault);
+    fake_on_lock(NULL);
+    fake_run(3u * N);
+    assert(nrise == r1 && st(0).count == c1 && !PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
+
+    /* the inverted pin: high is inactive, low latches */
+    assert(!ax[1].fault);
+    fake_set_input(FLT(1), false);
+    fake_run(4u * MS);
+    assert(ax[1].fault && ax[1].fault_count == 1);
+    fake_preempt = 0;
+}
+
+/* A member's fault halts the whole group and marks it faulted (test 19). */
+static void t_group_fault(void)
+{
+    for (uint8_t i = 0; i < 3; i++)
+        add_axis(i, false, false);
+    PulDir_attachFault(&ax[1], fake_pin(FLT(1)), false);
+    PulDir_attachFaultClear(&ax[1], fake_pin(CLR(1)), false);
+    start();
+    fake_on_write(group_write);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(PulDir_setDefaults(&ax[i], 4000.0f + 1000.0f * (float)i, 40000.0f, 30000.0f, 0.0f));
+    PulDir* m[3] = { &ax[0], &ax[1], &ax[2] };
+    assert(PulDirGroup_init(&grp, m, 3));
+    float tg[3] = { 3000.0f, -2000.0f, 1500.0f };
+    assert(PulDirGroup_moveTo(&grp, tg));
+    fake_run(150u * N);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(st(i).count != 0);             /* every member under way */
+
+    fake_set_input(FLT(1), true);
+    for (uint32_t t = 0; !ax[1].fault; t++) {
+        assert(t < 3u * MS + N);
+        fake_run(1);
+    }
+    uint64_t e0[3];
+    int32_t ch[3];
+    for (uint8_t i = 0; i < 3; i++) {
+        PulDir* a = &ax[i];
+        e0[i] = edges[i];
+        ch[i] = st(i).count;
+        assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f && a->group == NULL);
+        assert(PulDir_target(a) == PulDir_position(a));
+    }
+    assert(PulDirGroup_faulted(&grp) && !ax[0].fault && !ax[2].fault);
+    for (uint32_t t = 0; PulDirGroup_isMoving(&grp); t++) {
+        assert(t < 3u * N);
+        fake_run(1);
+    }
+    fake_run(3u * N);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(edges[i] == e0[i] && st(i).count == ch[i] && !PulDir_isMoving(&ax[i]) && !high(i));
+
+    /* the group is refused while a member is latched */
+    ax[1].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_moveTo(&grp, tg) && ax[1].refusal == PULDIR_R_FAULT && PulDirGroup_faulted(&grp));
+
+    /* the others' generators are where their pulses stopped: their own moves land exactly */
+    for (uint8_t i = 0; i < 3; i += 2) {
+        assert(PulDir_moveTo(&ax[i], (float)(ch[i] + 100)));
+        run_until_idle(&ax[i], PULDIR_TICK_HZ);
+        assert(st(i).count == ch[i] + 100 && edges[i] == e0[i] + 100u);
+    }
+
+    /* cleared, the group moves again */
+    fake_set_input(FLT(1), false);
+    assert(PulDir_clearFault(&ax[1]));
+    while (ax[1].clearing)
+        fake_run(1);
+    assert(!ax[1].fault);
+    for (uint8_t i = 0; i < 3; i++)
+        tg[i] = (float)(st(i).count + 200 * (i + 1));
+    assert(PulDirGroup_moveTo(&grp, tg) && !PulDirGroup_faulted(&grp));
+    run_until_idle(&ax[0], 2u * PULDIR_TICK_HZ);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(st(i).count == (int32_t)tg[i]);
+}
+
+/* The switch byte the test owns: 1 at or below sw_at, 0 from sw_at + 20 up,
+ * unchanged in between, updated from axis 0's pulse writes unless frozen. */
+static uint8_t sw;
+static int32_t sw_pos, sw_at;
+static bool sw_frozen;
+static void home_write(uint32_t tick, uint8_t id, bool level)
+{
+    both_write(tick, id, level);
+    if (id == 0u && level) {
+        sw_pos += fake_level(1) ? 1 : -1;
+        if (!sw_frozen) {
+            if (sw_pos <= sw_at)
+                sw = 1;
+            else if (sw_pos >= sw_at + 20)
+                sw = 0;
+        }
+    }
+}
+
+/* The phases axis 0 passes through, with the tick and count at each entry. */
+static PulDirHomeState seen[16];
+static uint32_t seen_tick[16];
+static int32_t seen_count[16];
+static int nseen;
+static float v_towards, v_away;               /* the fastest velocity in either moving phase */
+static int64_t adj_inc;                       /* the largest |live increment| during ADJUST_POSITION */
+static bool freeze_at_delay1;
+static void home_plan(bool after)
+{
+    check_published(after);
+    if (!after)
+        return;
+    const PulDir* a = &ax[0];
+    const PulDirHomeState h = a->home_state;
+    if (nseen == 0 || seen[nseen - 1] != h) {
+        assert(nseen < 16);
+        seen[nseen] = h;
+        seen_tick[nseen] = PulDir_ticks();
+        seen_count[nseen] = st(0).count;
+        nseen++;
+    }
+    if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT && fabsf(a->vel_out) > fabsf(v_towards))
+        v_towards = a->vel_out;
+    if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && fabsf(a->vel_out) > fabsf(v_away))
+        v_away = a->vel_out;
+    if (h == PULDIR_HOME_ADJUST_POSITION) {
+        const int64_t i = st(0).inc;
+        adj_inc = (i < 0 ? -i : i) > adj_inc ? (i < 0 ? -i : i) : adj_inc;
+    }
+    if (freeze_at_delay1 && h == PULDIR_HOME_DELAY1)
+        sw_frozen = true;
+}
+
+/* homeStart with the switch at sw_at; runs until the axis leaves HOMING. */
+static void home_run(PulDir* a, int32_t at, uint32_t max_ms)
+{
+    sw_at = at;
+    sw_pos = st(0).count;
+    sw = sw_pos <= sw_at ? 1 : 0;
+    sw_frozen = false;
+    nseen = 0;
+    v_towards = v_away = 0.0f;
+    assert(PulDir_homeStart(a));
+    assert(a->mode == PULDIR_MODE_HOMING && PulDir_isMoving(a) && !PulDir_isHomed(a));
+    assert(PulDir_homeState(a) == PULDIR_HOME_MOVE_TOWARDS_LIMIT);
+    for (uint32_t t = 0; a->mode == PULDIR_MODE_HOMING; t++) {
+        assert(t < max_ms * MS);
+        fake_run(1);
+    }
+}
+
+static void t_homing(void)
+{
+    add_axis(0, false, false);
+    add_axis(1, false, false);
+    PulDir* a = &ax[0];
+    PulDir_attachFault(a, fake_pin(FLT(0)), false);
+    PulDir_attachFaultClear(a, fake_pin(CLR(0)), false);
+    start();
+    fake_on_write(home_write);
+    fake_on_plan(home_plan);
+    PulDir_attachLogger(logger);
+    assert(PulDir_setDefaults(a, 4000.0f, 40000.0f, 40000.0f, 0.0f));
+    assert(PulDir_setDefaults(&ax[1], 4000.0f, 40000.0f, 40000.0f, 0.0f));
+    assert(PulDir_setSpeed(a, 3000.0f));
+    fake_run(N);                              /* the limits applied: no request pending */
+
+    /* setHoming refuses bad input and changes nothing; homeStart needs it */
+    const float cap = (float)(PULDIR_TICK_HZ / 2u);
+    assert(!PulDir_setHoming(a, 0, 2000.0f, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, 2, 2000.0f, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, 0.0f, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, -5.0f, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, NAN, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, INFINITY, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, 2000.0f, 50.0f, NULL, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 0u));
+    assert(!PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 0xFFFFFFFFu));
+    assert(!PulDir_setHoming(a, -1, 2000.0f, NAN, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, INFINITY, 3000u));
+    assert(!PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 3.0e9f, 3000u));
+    assert(a->refusal == PULDIR_R_ARG);
+    assert(!PulDir_setHoming(a, -1, cap, 50.0f, &sw, 100.0f, 3000u) && a->refusal == PULDIR_R_RATE);
+    assert(a->home_dir == 0 && a->home_switch == NULL);
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_NO_HOMING);
+    assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && a->req == 0);
+    assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 3000u));
+
+    /* the success path: every phase in order, the datum at zero_pos */
+    nlines = 0;
+    sw_at = -1000;
+    sw_pos = 0;
+    sw = 0;
+    nseen = 0;
+    assert(PulDir_homeStart(a) && a->mode == PULDIR_MODE_HOMING && PulDir_isMoving(a));
+    assert(PulDir_homeState(a) == PULDIR_HOME_MOVE_TOWARDS_LIMIT && !PulDir_isHomed(a));
+    /* refused while homing (5.5) */
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_moveTo(a, 0.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_jog(a, 10.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setHoming(a, 1, 10.0f, 0.0f, &sw, 0.0f, 10u) && a->refusal == PULDIR_R_BUSY);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setPosition(a, 0.0f) && a->refusal == PULDIR_R_NOT_IDLE);
+    assert(a->home_dir == -1 && a->mode == PULDIR_MODE_HOMING);
+    PulDir_loop(a);
+    nlines = 0;
+    for (uint32_t t = 0; a->mode == PULDIR_MODE_HOMING; t++) {
+        assert(t < 6000u * MS);
+        fake_run(1);
+    }
+    const PulDirHomeState order[7] = {
+        PULDIR_HOME_MOVE_TOWARDS_LIMIT, PULDIR_HOME_DELAY1, PULDIR_HOME_MOVE_AWAY_FROM_LIMIT,
+        PULDIR_HOME_DELAY2, PULDIR_HOME_ADJUST_POSITION, PULDIR_HOME_DELAY3, PULDIR_HOME_IDLE
+    };
+    assert(nseen == 7);
+    for (int k = 0; k < 7; k++)
+        assert(seen[k] == order[k]);
+    const uint32_t D = PULDIR_HOMING_DELAY_MS * MS;
+    assert(seen_tick[2] - seen_tick[1] >= D && seen_tick[2] - seen_tick[1] <= D + N);
+    assert(seen_tick[4] - seen_tick[3] >= D && seen_tick[4] - seen_tick[3] <= D + N);
+    assert(seen_tick[6] - seen_tick[5] >= D && seen_tick[6] - seen_tick[5] <= D + N);
+    assert(v_towards == -2000.0f && v_away == 400.0f);          /* home speed, then 0.2x of it back */
+    assert(seen_count[1] <= -1000 && seen_count[2] >= -1000 - 10);   /* stopped within an interval */
+    assert(seen_count[3] >= -1000 + 20 && seen_count[3] <= -1000 + 22);
+    assert(seen_count[5] - seen_count[4] == 50);                  /* the adjust, whole pulses from rest */
+    assert(PulDir_speed(a) == 4000.0f);                           /* the defaults, restored for the adjust */
+    /* the adjust follows its generator: never faster than the default speed */
+    assert(adj_inc > 0 && adj_inc <= (int64_t)(4000.0 / PULDIR_TICK_HZ * 4294967296.0 * 1.01));
+    assert(PulDir_isHomed(a) && PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
+    assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && PulDir_homeState(a) == PULDIR_HOME_IDLE);
+    assert(st(0).P == (uint64_t)100 << 32 && !high(0));
+    PulDir_loop(a);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] homed at 100.0000") == 0);
+
+    /* the next move is relative to the datum */
+    uint64_t e0 = edges[0];
+    assert(PulDir_moveTo(a, 150.0f));
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(st(0).count == 150 && edges[0] - e0 == 50u);
+
+    /* homeStart clears homed at once; homeStop halts (no rising edge after) and ends it */
+    assert(PulDir_isHomed(a));
+    sw_at = -1000000;
+    sw_pos = st(0).count;
+    sw = 0;
+    assert(PulDir_homeStart(a) && !PulDir_isHomed(a));
+    fake_run(200u * MS);
+    for (int k = 0; k < 3; k++) {
+        while (!high(0))
+            fake_run(1);
+        e0 = edges[0];
+        const int32_t ch = st(0).count;
+        if (k == 0)
+            PulDir_homeStop(a);
+        else if (k == 1)
+            PulDir_halt(a);
+        else
+            PulDir_stop(a);
+        assert(PulDir_homeState(a) == PULDIR_HOME_IDLE && !PulDir_isHomed(a));
+        if (k < 2) {
+            assert(a->mode == PULDIR_MODE_IDLE && PulDir_target(a) == (float)ch);
+            fake_run(3u * N);
+            assert(edges[0] == e0 && st(0).count == ch && !PulDir_isMoving(a));
+        } else {                              /* stop: ramped, at the axis's decel */
+            assert(a->mode == PULDIR_MODE_STOPPING);
+            run_until_idle(a, PULDIR_TICK_HZ);
+            assert(st(0).count < ch - 10 && PulDir_target(a) == PulDir_position(a));
+        }
+        assert(PulDir_homeState(a) == PULDIR_HOME_IDLE && a->mode == PULDIR_MODE_IDLE);
+        if (k < 2) {
+            assert(PulDir_homeStart(a));
+            fake_run(200u * MS);
+        }
+    }
+
+    /* a switch that never reads 1: the phase times out, the axis halts, ERROR */
+    assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 300u));
+    uint32_t t0 = PulDir_ticks();
+    PulDir_loop(a);
+    nlines = 0;
+    home_run(a, -1000000, 400u);
+    uint32_t tf = PulDir_ticks();
+    e0 = edges[0];
+    int32_t ch = st(0).count;
+    assert(tf - t0 >= 300u * MS && tf - t0 <= 300u * MS + 2u * N);
+    assert(PulDir_homeState(a) == PULDIR_HOME_ERROR && !PulDir_isHomed(a) && a->mode == PULDIR_MODE_IDLE);
+    assert(PulDir_target(a) == (float)ch && PulDir_velocity(a) == 0.0f);
+    fake_run(3u * N);
+    assert(edges[0] == e0 && st(0).count == ch && !PulDir_isMoving(a));
+    PulDir_loop(a);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] homing failed in MOVE_TOWARDS_LIMIT") == 0);
+    printf("  homing: the 300 ms phase timed out after %.2f ms\n", (double)(tf - t0) * 1000.0 / PULDIR_TICK_HZ);
+
+    /* a switch byte that stops being updated (stuck at 1 after the limit): a timeout halt */
+    assert(PulDir_setHoming(a, -1, 4000.0f, 50.0f, &sw, 100.0f, 400u));
+    assert(PulDir_setSpeed(a, 4000.0f));
+    freeze_at_delay1 = true;
+    nlines = 0;
+    home_run(a, st(0).count - 300, 3000u);
+    freeze_at_delay1 = false;
+    e0 = edges[0];
+    ch = st(0).count;
+    assert(nseen == 4 && seen[2] == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && seen[3] == PULDIR_HOME_ERROR);
+    tf = PulDir_ticks();
+    assert(tf - seen_tick[2] >= 400u * MS && tf - seen_tick[2] <= 400u * MS + N);
+    fake_run(3u * N);
+    assert(edges[0] == e0 && st(0).count == ch && !PulDir_isMoving(a) && !PulDir_isHomed(a));
+    PulDir_loop(a);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] homing failed in MOVE_AWAY_FROM_LIMIT") == 0);
+
+    /* homed clears on a fault latch, and a fault during homing ends it in ERROR */
+    assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, -7.0f, 3000u));
+    home_run(a, st(0).count - 500, 6000u);
+    assert(PulDir_isHomed(a) && PulDir_position(a) == -7.0f);
+    fake_set_input(FLT(0), true);
+    fake_run(4u * MS);
+    assert(a->fault && !PulDir_isHomed(a));
+    fake_set_input(FLT(0), false);
+    assert(PulDir_clearFault(a));
+    fake_run(12u * MS);
+    assert(!a->fault);
+    PulDir_loop(a);
+    nlines = 0;
+    sw_at = -1000000;
+    sw = 0;
+    assert(PulDir_homeStart(a));
+    fake_run(100u * MS);
+    fake_set_input(FLT(0), true);
+    while (!a->fault)
+        fake_run(1);
+    assert(PulDir_homeState(a) == PULDIR_HOME_ERROR && a->mode == PULDIR_MODE_IDLE && !PulDir_isHomed(a));
+    e0 = edges[0];
+    fake_run(3u * N);
+    assert(edges[0] == e0 && !PulDir_isMoving(a));
+    PulDir_loop(a);
+    assert(nlines == 2 && strcmp(lines[0], "[a0] fault latched, count 2") == 0);
+    assert(strcmp(lines[1], "[a0] homing failed in MOVE_TOWARDS_LIMIT") == 0);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_FAULT);
+    fake_set_input(FLT(0), false);
+    assert(PulDir_clearFault(a));
+    fake_run(12u * MS);
+    assert(!a->fault);
+
+    /* homed clears on setPosition */
+    home_run(a, st(0).count - 500, 6000u);
+    assert(PulDir_isHomed(a));
+    assert(PulDir_setPosition(a, 3.0f) && !PulDir_isHomed(a));
+
+    /* refused outside IDLE: in STREAM (test 19), in GROUP, and while moving */
+    assert(PulDir_streamBegin(a));
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_STREAM);
+    PulDir_streamEnd(a);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    PulDir* m[2] = { &ax[0], &ax[1] };
+    assert(PulDirGroup_init(&grp, m, 2));
+    const float tg[2] = { (float)(st(0).count + 2000), 1000.0f };
+    assert(PulDirGroup_moveTo(&grp, tg));
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_GROUP);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(PulDir_moveBy(a, 2000.0f));
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_PROFILE);
+    assert(!PulDir_isHomed(a));
+}
+
+/* Test 22: with the counter started 1,000 ticks below its wrap, every timed
+ * event that starts before the wrap and ends after it measures correctly. */
+static void t_rollover(void)
+{
+#if PULDIR_TICK_START != 0
+    add_axis(0, false, false);                /* the stream timeout */
+    add_axis(1, false, false);                /* a homing phase timeout */
+    add_axis(2, false, false);                /* the fault clear pulse */
+    add_axis(3, false, false);                /* the fault debounce */
+    add_axis(4, false, false);                /* the enable delay */
+    PulDir_attachFaultClear(&ax[2], fake_pin(CLR(2)), false);
+    PulDir_attachFault(&ax[3], fake_pin(FLT(3)), false);
+    PulDir_attachEnable(&ax[4], fake_pin(ENA(4)), false);
+    start();
+    fake_on_write(both_write);
+    const uint32_t wrap = 0u - WRAP_START;    /* ticks from the start to the wrap */
+    assert(wrap == 1000u && PulDir_ticks() == WRAP_START);
+    for (uint8_t i = 0; i < 5; i++)
+        assert(PulDir_setDefaults(&ax[i], 5000.0f, 1.0e5f, 1.0e5f, 0.0f));
+    static uint8_t never;
+    assert(PulDir_setHoming(&ax[1], 1, 1000.0f, 0.0f, &never, 0.0f, 30u));
+    assert(PulDir_setDelays(&ax[4], 5u, 0u));
+
+    /* streamBegin and homeStart at once; setpoints until 400 ticks before the wrap */
+    assert(PulDir_streamBegin(&ax[0]) && PulDir_homeStart(&ax[1]));
+    const uint32_t t_home = PulDir_ticks();
+    uint32_t t_sp = 0, t_clr = 0, t_on = 0, t_ena = 0;
+    uint32_t t_to = 0, t_fail = 0, t_low = 0, t_latch = 0;
+    for (uint32_t k = 0; k < 200u * MS; k++) {
+        const uint32_t since = PulDir_ticks() - WRAP_START;
+        if (since < wrap - 400u && since % N == 7u) {
+            PulDir_stream(&ax[0], 0.0f, 0.0f);
+            t_sp = PulDir_ticks();
+        }
+        if (since == wrap - 300u) {           /* 10 ms is 500 ticks at 50 kHz: start late enough */
+            assert(PulDir_clearFault(&ax[2]));
+            t_clr = PulDir_ticks();
+        }
+        if (since == wrap - 110u) {           /* samples before the wrap, the latch after it */
+            fake_set_input(FLT(3), true);
+            t_on = PulDir_ticks();
+        }
+        if (since == wrap - 100u) {
+            assert(PulDir_moveTo(&ax[4], 100.0f));
+            t_ena = PulDir_ticks();
+        }
+        fake_run(1);
+        if (t_to == 0u && ax[0].mode != PULDIR_MODE_STREAM)
+            t_to = PulDir_ticks();
+        if (t_fail == 0u && ax[1].mode != PULDIR_MODE_HOMING)
+            t_fail = PulDir_ticks();
+        if (t_low == 0u && t_clr != 0u && !fake_level(CLR(2)))
+            t_low = PulDir_ticks();
+        if (t_latch == 0u && ax[3].fault)
+            t_latch = ax[3].last_fault_tick;
+    }
+    /* every start before the wrap, every end after it */
+    const uint32_t starts[5] = { t_sp, t_home, t_clr, t_on, t_ena };
+    const uint32_t ends[4] = { t_to, t_fail, t_low, t_latch };
+    for (int k = 0; k < 5; k++)
+        assert(starts[k] >= WRAP_START);
+    for (int k = 0; k < 4; k++)
+        assert(ends[k] != 0u && ends[k] < 0x80000000u);
+    assert(t_to - t_sp >= PULDIR_STREAM_TIMEOUT_MS * MS && t_to - t_sp <= PULDIR_STREAM_TIMEOUT_MS * MS + N);
+    assert(PulDir_streamTimedOut(&ax[0]));
+    assert(t_fail - t_home >= 30u * MS && t_fail - t_home <= 30u * MS + 2u * N);
+    assert(ax[1].home_state == PULDIR_HOME_ERROR);
+    assert(t_low - t_clr >= PULDIR_FAULT_CLEAR_MS * MS && t_low - t_clr <= PULDIR_FAULT_CLEAR_MS * MS + N);
+    assert(t_latch - t_on >= PULDIR_FAULT_DEBOUNCE_MS * MS && t_latch - t_on <= PULDIR_FAULT_DEBOUNCE_MS * MS + N);
+    assert(first_rise[4] < 0x80000000u && first_rise[4] - t_ena >= 5u * MS);
+    assert(st(4).count == 100);
+    printf("  rollover: stream timeout %.2f ms, homing timeout %.2f ms, clear pulse %.2f ms, "
+           "debounce %.2f ms, first edge %.2f ms after enable\n",
+           (double)(t_to - t_sp) * 1000.0 / PULDIR_TICK_HZ, (double)(t_fail - t_home) * 1000.0 / PULDIR_TICK_HZ,
+           (double)(t_low - t_clr) * 1000.0 / PULDIR_TICK_HZ, (double)(t_latch - t_on) * 1000.0 / PULDIR_TICK_HZ,
+           (double)(first_rise[4] - t_ena) * 1000.0 / PULDIR_TICK_HZ);
+#endif
+}
+
 /* ---- the case table ------------------------------------------------------------------------ */
 
 static const struct { const char* name; void (*fn)(void); } cases[] = {
@@ -2737,6 +3500,11 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "group_rules", t_group_rules },
     { "group_twice", t_group_twice },
     { "group_creep", t_group_creep },
+    { "enable_release", t_enable_release },
+    { "fault", t_fault },
+    { "group_fault", t_group_fault },
+    { "homing", t_homing },
+    { "rollover", t_rollover },
 };
 
 int main(int argc, char** argv)

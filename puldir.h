@@ -75,11 +75,12 @@ typedef struct PulDir {
     float def[4];                        /* default speed, accel, decel, jerk, user units */
     float lim[4];                        /* current speed, accel, decel, jerk, user units */
     uint32_t enable_ms, release_ms, catchup_ms;
+    uint32_t enable_ticks, release_ticks; /* the same delays in pulse ticks */
     bool  auto_release, log_on;
     int8_t home_dir;                     /* +1, -1, 0 = not configured */
     float home_speed, home_adjust, home_zero;
     const uint8_t* home_switch;
-    uint32_t home_timeout_ms;
+    uint32_t home_timeout_ms, home_timeout_ticks;
     uint8_t slot;                        /* index in the axis table, PULDIR_MAX_AXES if unregistered */
 
     /* main -> plan requests (D17), written under the lock */
@@ -93,6 +94,9 @@ typedef struct PulDir {
     int32_t  origin;
     volatile bool moving, enabled, homed, fault;
     uint32_t enabled_at;                 /* tick of the enable edge */
+    bool     ena_wait;                   /* enable_ms has not yet passed since enabled_at: hold */
+    bool     release_due;                /* auto-release: the axis went IDLE at idle_at */
+    uint32_t idle_at;
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
@@ -110,8 +114,10 @@ typedef struct PulDir {
 
     /* homing and fault */
     volatile PulDirHomeState home_state;
-    uint32_t home_t0;
-    uint32_t flt_since, fault_count, last_fault_tick, clr_t0;
+    PulDirHomeState home_fail;           /* the phase the last failed run was in */
+    uint32_t home_t0;                    /* the tick the current phase began */
+    uint32_t flt_since;                  /* the first sample of the current active run */
+    uint32_t fault_count, last_fault_tick, clr_t0;
     bool flt_seen, clearing;
 
     struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
@@ -156,8 +162,12 @@ void  PulDir_attachFaultClear(PulDir*, puldir_pin_t, bool inverted);
 bool  PulDir_setConversion(PulDir*, float pulses_per_unit);
 bool  PulDir_setDefaults(PulDir*, float speed, float accel, float decel, float jerk);
 bool  PulDir_restoreDefaults(PulDir*);
-void  PulDir_setDelays(PulDir*, uint32_t enable_ms, uint32_t release_ms);
+/* D16: refuses a delay past half the tick counter's range (about 3 h at 200 kHz). */
+bool  PulDir_setDelays(PulDir*, uint32_t enable_ms, uint32_t release_ms);
 void  PulDir_setAutoRelease(PulDir*, bool);
+/* D16: refuses a direction other than +-1, a speed not finite, not positive or at the
+ * tick ceiling, a null switch, a zero timeout or one past half the counter, and a
+ * call while homing. A timeout covers each moving phase; the delays are fixed. */
 bool  PulDir_setHoming(PulDir*, int direction, float speed, float adjust,
                        const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms);
 bool  PulDir_setStreamCatchup(PulDir*, uint32_t ms);
@@ -175,7 +185,7 @@ bool  PulDir_moveBy(PulDir*, float distance);
 bool  PulDir_jog(PulDir*, float speed);
 void  PulDir_stop(PulDir*);
 void  PulDir_halt(PulDir*);
-bool  PulDir_enable(PulDir*, bool);
+bool  PulDir_enable(PulDir*, bool);              /* refused without an enable pin; false halts first */
 
 /* stream */
 bool  PulDir_streamBegin(PulDir*);
@@ -187,7 +197,7 @@ float PulDir_streamError(PulDir*);
 
 /* homing */
 bool  PulDir_homeStart(PulDir*);
-void  PulDir_homeStop(PulDir*);
+void  PulDir_homeStop(PulDir*);                  /* halts a run; the homing state goes IDLE */
 PulDirHomeState PulDir_homeState(PulDir*);
 bool  PulDir_isHomed(PulDir*);
 

@@ -21,4 +21,5 @@ build_axis() {   # $1 = output name, rest = extra flags
 }
 build_axis test_puldir
 build_axis test_puldir_200k -DPULDIR_TICK_HZ=200000u
+build_axis test_puldir_wrap -DPULDIR_TICK_START=0xFFFFFC18u   # 1,000 ticks below the wrap (D9, test 22)
 echo "axis: all ok"

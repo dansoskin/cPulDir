@@ -12,6 +12,7 @@ static bool level[FAKE_PINS];
 static bool motion[FAKE_PINS];
 static fake_write_fn on_write;
 static fake_plan_fn on_plan;
+static void (*on_lock)(void);
 static void (*pulse_cb)(bool overrun);
 static void (*plan_cb)(void);
 static uint32_t since_start;            /* pulse ticks run since port_start */
@@ -31,6 +32,7 @@ void fake_set_input(uint8_t id, bool lvl)    { assert(id < FAKE_PINS); level[id]
 void fake_mark_motion_pin(uint8_t id)        { assert(id < FAKE_PINS); motion[id] = true; }
 void fake_on_write(fake_write_fn fn)         { on_write = fn; }
 void fake_on_plan(fake_plan_fn fn)           { on_plan = fn; }
+void fake_on_lock(void (*fn)(void))          { on_lock = fn; }
 
 void port_pin_init_output(puldir_pin_t p, bool lvl) { assert(p.id < FAKE_PINS); level[p.id] = lvl; }
 void port_pin_init_input(puldir_pin_t p, bool pullup) { assert(p.id < FAKE_PINS); (void)pullup; }
@@ -65,6 +67,8 @@ void port_start(void (*pulse_tick)(bool overrun), void (*plan_tick)(void))
 
 void port_lock(void)
 {
+    if (on_lock && lock_depth == 0 && tick_depth == 0)   /* main context only */
+        on_lock();
     assert(lock_depth == 0);
     lock_depth++;
 }
