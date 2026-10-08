@@ -12,12 +12,19 @@
 #define DT_MIN 0.00025f    /* 2 kHz plan tick (D14) */
 #define DT_MAX 0.01f
 
+/* The acceleration span the window must cover: a reversal puts +amax and -amax (or the larger of
+ * amax and dmax, both ways) one window apart, so it is twice the larger, not amax + dmax (E31). */
+static float acc_span(float amax, float dmax)
+{
+    return 2.0f * fmaxf(amax, dmax);
+}
+
 /* Jerk filter length for these limits; 0 when it would not fit the ring. */
 static uint16_t window(MotionLimits L, float dt)
 {
     if (L.jmax == 0.0f)
         return 1;
-    const float n = ceilf((L.amax + L.dmax) / (L.jmax * dt));
+    const float n = ceilf(acc_span(L.amax, L.dmax) / (L.jmax * dt));
     if (!(n <= (float)MOTION_PROFILE_MAX_TAPS))
         return 0;
     return (uint16_t)n;
@@ -63,7 +70,7 @@ MotionLimitsCheck MotionProfile_checkLimits(MotionLimits L, float dt, uint16_t f
     if (window(L, dt) == 0)
         return MOTION_LIMITS_TAPS;
     /* A window frozen in flight would not bound this jerk. */
-    if (frozen_n != 0 && L.jmax != 0.0f && (L.amax + L.dmax) / (L.jmax * dt) > (float)frozen_n)
+    if (frozen_n != 0 && L.jmax != 0.0f && acc_span(L.amax, L.dmax) / (L.jmax * dt) > (float)frozen_n)
         return MOTION_LIMITS_WINDOW;
     return MOTION_LIMITS_OK;
 }
@@ -342,5 +349,5 @@ bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
 
 float MotionProfile_minJerk(float amax, float dmax, float dt)
 {
-    return (amax + dmax) / ((float)MOTION_PROFILE_MAX_TAPS * dt);
+    return acc_span(amax, dmax) / ((float)MOTION_PROFILE_MAX_TAPS * dt);
 }

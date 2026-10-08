@@ -134,7 +134,7 @@ MotionProfile_setEndless(&tilt, -5.0f);   /* run at -5 deg/s with no target */
 MotionProfile_stop(&tilt);                /* ramp down at the decel limit; done once at rest */
 ```
 
-The profile measures no time itself. `dt` is fixed at init, and each `advance` assumes exactly `dt` has passed. Call it late and the motion runs slow; call it twice and it runs fast. The limits are speed, acceleration, deceleration and jerk; a jerk of 0 means no jerk limit. Setters return false and change nothing if given a bad value. The jerk filter holds at most `MOTION_PROFILE_MAX_TAPS` (256) samples, so (accel + decel) / (jerk × dt) must be 256 or less: at these limits the jerk must be at least 234.4 deg/s³. Each profile is about 1 KB. `pos` is a float, so keep coordinates within about seven significant digits.
+The profile measures no time itself. `dt` is fixed at init, and each `advance` assumes exactly `dt` has passed. Call it late and the motion runs slow; call it twice and it runs fast. The limits are speed, acceleration, deceleration and jerk; a jerk of 0 means no jerk limit. Setters return false and change nothing if given a bad value. The jerk filter holds at most `MOTION_PROFILE_MAX_TAPS` (256) samples, so 2 × max(accel, decel) / (jerk × dt) must be 256 or less (a reversal puts both signs of the larger ramp one window apart): at these limits the jerk must be at least 234.4 deg/s³. Each profile is about 1 KB. `pos` is a float, so keep coordinates within about seven significant digits.
 
 ### 2. One motor
 

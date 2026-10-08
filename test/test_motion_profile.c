@@ -583,8 +583,8 @@ static void test_frozen_window(void)
         { { 15, 20, 30, 290 }, true },        /* lower amax */
         { { 15, 30, 20, 290 }, true },        /* lower dmax */
         { { 15, 30, 30, 600 }, true },        /* raise jmax */
-        { { 15, 30.02f, 30, 290 }, true },    /* inside the slack: 206.97 taps */
-        { { 15, 30.1f, 30, 290 }, false },    /* beyond it: 207.2 */
+        { { 15, 30.01f, 30, 290 }, true },    /* inside the slack: 2 * 30.01 / 0.29 = 206.97 taps */
+        { { 15, 30.02f, 30, 290 }, false },   /* just beyond it: 207.03 */
         { { 15, 30, 30, 250 }, false },       /* lower jmax: 240 */
         { { 15, 30, 30, 0 }, true },          /* jerk off; the window stays */
     };
@@ -602,7 +602,7 @@ static void test_frozen_window(void)
     }
 
     /* Run to done. The window still bounds the jerk with jmax now 0. */
-    const float jerk = (30.0f + 30.0f) / (207.0f * dt);
+    const float jerk = 2.0f * 30.0f / (207.0f * dt);
     for (int calls_ = 0; !p.done; calls_++) {
         assert(calls_ < 10000);
         const float a0 = p.acc;
@@ -810,6 +810,35 @@ static void test_drain_mixed(void)
            positive, (unsigned)p.n, (double)worst);
 }
 
+/* A reversal with amax well above dmax (review, E31): the first ramp's +amax taps are still in
+ * the ring when the reversal's -amax enters, one window apart, so the window must cover
+ * 2 max(amax, dmax), not amax + dmax. The hold is sized so the two ramps meet exactly. */
+static void test_reversal_asymmetric(void)
+{
+    const MotionLimits L = { 15, 90, 20, 720 };   /* 2 * 90 / 0.72 = 250 taps */
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setEndless(&p, 1.0f));
+    int up = 0;
+    while (p.v_t != 1.0f) {                   /* the trapezoid's own ramp, through the step checker */
+        step(&p);
+        up++;
+    }
+    const int down = (int)ceilf(1.0f / (L.dmax * p.dt));   /* 50 calls back to rest */
+    for (int i = 0; i < (int)p.n - up - down; i++)
+        step(&p);
+    assert(MotionProfile_setEndless(&p, -1.0f));
+    float peak = 0.0f;
+    for (int i = 0; i < 2 * (int)p.n; i++) {
+        const float a0 = p.acc;
+        step(&p);
+        peak = fmaxf(peak, fabsf(p.acc - a0) / p.dt);
+    }
+    assert(peak >= 0.9f * L.jmax);            /* the ramps did meet: the bound was exercised */
+    assert(p.vel == -1.0f);
+    printf("ok reversal_asymmetric (peak jerk %.1f of %.0f, n %u)\n", (double)peak, (double)L.jmax,
+           (unsigned)p.n);
+}
+
 /* D1: seeding the idle generator into motion, as the axis leaves a stream. */
 static void test_seed(void)
 {
@@ -875,6 +904,7 @@ int main(void)
     test_rebase();
     test_retarget_draining();
     test_drain_mixed();
+    test_reversal_asymmetric();
     test_seed();
     return 0;
 }
