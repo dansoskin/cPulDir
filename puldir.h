@@ -16,6 +16,9 @@ extern "C" {
 #ifndef PULDIR_MAX_AXES
 #define PULDIR_MAX_AXES 8u
 #endif
+#ifndef PULDIR_MAX_GROUPS
+#define PULDIR_MAX_GROUPS 4u
+#endif
 #ifndef PULDIR_CATCHUP_MS
 #define PULDIR_CATCHUP_MS 50u
 #endif
@@ -111,7 +114,7 @@ typedef struct PulDir {
     uint32_t flt_since, fault_count, last_fault_tick, clr_t0;
     bool flt_seen, clearing;
 
-    struct PulDirGroup* group;
+    struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
 
     /* the pulse tick's state lives in puldir_pulse.c, by slot */
 
@@ -129,7 +132,10 @@ typedef struct PulDirGroup {
     uint64_t start[PULDIR_MAX_AXES];     /* 32.32 */
     int32_t  delta[PULDIR_MAX_AXES];     /* whole pulses (D4) */
     volatile bool moving, faulted;
-    bool started;
+    volatile bool active;                /* the plan tick runs s: from an accepted move to its end or a halt */
+    volatile uint8_t req;                /* main -> plan requests, under the lock */
+    bool started;                        /* every member's direction was set; s advances */
+    bool still;                          /* every delta is zero */
 } PulDirGroup;
 
 /* library-wide */
@@ -199,7 +205,7 @@ void  PulDir_loop(PulDir*);
 void  PulDir_console(PulDir*, char cmd, const char* arg);
 
 /* group */
-void  PulDirGroup_init(PulDirGroup*, PulDir** axes, uint8_t count);
+bool  PulDirGroup_init(PulDirGroup*, PulDir** axes, uint8_t count);   /* D16: refuses */
 bool  PulDirGroup_moveTo(PulDirGroup*, const float* targets);
 void  PulDirGroup_stop(PulDirGroup*);
 void  PulDirGroup_halt(PulDirGroup*);

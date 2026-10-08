@@ -32,6 +32,7 @@ static void on_write(uint32_t tick, uint8_t id, bool level)
 /* ---- axes on fake pins: pulse pin 2i, direction pin 2i+1 ------------------- */
 
 static PulDir ax[PULDIR_MAX_AXES];
+static PulDirGroup grp, grp2;
 
 static void add_axis(uint8_t i, bool pul_active_low, bool dir_inverted)
 {
@@ -1951,8 +1952,12 @@ static void t_stream_transitions(void)
     a->fault = true;
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_FAULT);
     a->fault = false;
-    a->mode = PULDIR_MODE_GROUP;
+    PulDir* members[1] = { a };
+    const float here[1] = { 0.0f };               /* a real group move, of zero travel */
+    assert(PulDirGroup_init(&grp, members, 1) && PulDirGroup_moveTo(&grp, here));
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_GROUP);
+    run_until_idle(a, 3u * N);
+    assert(!PulDirGroup_isMoving(&grp) && a->mode == PULDIR_MODE_IDLE);
     a->mode = PULDIR_MODE_HOMING;
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_HOMING);
     a->mode = PULDIR_MODE_IDLE;
@@ -2255,6 +2260,438 @@ static void t_stream_end_begin(void)
     check_rest(0, 1);
 }
 
+/* ---- groups (5.7, test 18 and the group rows of 19) ---------------------------------------- */
+
+static uint32_t first_rise[PULDIR_MAX_AXES], last_dir_tick[PULDIR_MAX_AXES];
+static bool rose[PULDIR_MAX_AXES];
+
+static void group_write(uint32_t tick, uint8_t id, bool level)
+{
+    count_write(tick, id, level);
+    const uint8_t i = (uint8_t)(id / 2u);
+    if (i >= PULDIR_MAX_AXES)
+        return;
+    if (id % 2u != 0u)
+        last_dir_tick[i] = tick;
+    else if (level && !rose[i]) {
+        rose[i] = true;
+        first_rise[i] = tick;
+    }
+}
+
+/* Member i's aim at path parameter s, absolute 32.32, as the plan tick computes it. */
+static uint64_t group_aim(const PulDirGroup* g, uint8_t i, float s)
+{
+    return g->start[i] + (uint64_t)((int64_t)g->delta[i] * (int64_t)(s * FIX));
+}
+
+/* Test 18's tracking. A plan tick publishes a set aimed at start + delta * s; when
+ * that set's interval ends, each member is checked against the same s. The pulse
+ * position P must be within one pulse of the aim. The count is P's last whole pulse
+ * in the direction of travel, so it trails P by up to a pulse: it is held to one
+ * pulse plus the truncation the aim allows (N units, D5), and measured. */
+static float gs_next, gs_cur;
+static bool gs_next_valid, gs_cur_valid;
+static int64_t g_worst_P, g_worst_count;
+static uint32_t g_first_inc;                  /* the first tick any member ran a non-zero increment */
+static bool g_inc_seen;
+/* Extra plan runs (D19 for the group): 1 runs the plan tick again in the interval
+ * where the members arrive, overwriting the final set before it latches; 2 runs it
+ * again in the next interval, while the final set still runs. */
+static int g_twice, g_twice_stage;
+static float g_peak;                          /* the largest |velocity| / speed limit of any member */
+
+static void group_track(PulDirGroup* g, uint32_t ticks)
+{
+    for (uint32_t k = 0; k < ticks; k++) {
+        if (left() == N) {                    /* this tick latches: the running set has finished */
+            if (gs_cur_valid)
+                for (uint8_t i = 0; i < g->count; i++) {
+                    const PulDirPulse s = st(g->axes[i]->slot);
+                    const uint64_t aim = group_aim(g, i, gs_cur);
+                    int64_t e = (int64_t)(s.P - aim);
+                    int64_t c = (int64_t)(((uint64_t)(uint32_t)s.count << 32) - aim);
+                    e = e < 0 ? -e : e;
+                    c = c < 0 ? -c : c;
+                    g_worst_P = e > g_worst_P ? e : g_worst_P;
+                    g_worst_count = c > g_worst_count ? c : g_worst_count;
+                    assert(e <= (int64_t)PULDIR_ONE);
+                    assert(c <= (int64_t)PULDIR_ONE + (int64_t)N);
+                }
+            gs_cur = gs_next;
+            gs_cur_valid = gs_next_valid;
+        }
+        fake_pulse(false);
+        for (uint8_t i = 0; i < g->count && !g_inc_seen; i++)
+            if (st(g->axes[i]->slot).inc != 0) {
+                g_inc_seen = true;
+                g_first_inc = PulDir_ticks() - 1u;
+            }
+        if (left() == plan_left()) {
+            fake_plan();
+            if (g_twice != 0 && g_twice_stage < 2) {
+                if (g_twice_stage == 1 || (g_twice == 1 && g->axes[0]->arrived)) {
+                    fake_plan();
+                    g_twice_stage = 2;
+                } else if (g->axes[0]->arrived) {
+                    g_twice_stage = 1;
+                }
+            }
+            gs_next = g->s.pos;
+            gs_next_valid = true;
+        }
+    }
+}
+
+/* One group move of travel[i] pulses from where the members are (conv 1). */
+static void group_move_sync(PulDirGroup* g, const int32_t* travel)
+{
+    const uint8_t n = g->count;
+    int32_t c0[PULDIR_MAX_AXES];
+    uint64_t e0[PULDIR_MAX_AXES];
+    int64_t n0[PULDIR_MAX_AXES];
+    uint32_t d0[PULDIR_MAX_AXES];
+    float tg[PULDIR_MAX_AXES];
+    for (uint8_t i = 0; i < n; i++) {
+        c0[i] = st(i).count;
+        tg[i] = (float)(c0[i] + travel[i]);
+        e0[i] = edges[i];
+        n0[i] = net[i];
+        d0[i] = dirw[i];
+        rose[i] = false;
+    }
+    g_inc_seen = false;
+    g_twice_stage = 0;
+    assert(PulDirGroup_moveTo(g, tg));
+    assert(PulDirGroup_isMoving(g));
+    for (uint8_t i = 0; i < n; i++)
+        assert(ax[i].mode == PULDIR_MODE_GROUP && PulDir_isMoving(&ax[i]));
+    gs_next_valid = gs_cur_valid = false;
+    for (uint32_t t = 0; PulDirGroup_isMoving(g); t++) {
+        assert(t < 10u * PULDIR_TICK_HZ);
+        group_track(g, 1);
+        const bool moving = PulDirGroup_isMoving(g);
+        for (uint8_t i = 0; i < n; i++) {     /* the zero-travel member too, throughout */
+            assert(PulDir_isMoving(&ax[i]) == moving
+                   && ax[i].mode == (moving ? PULDIR_MODE_GROUP : PULDIR_MODE_IDLE));
+            /* each member's velocity is its share of the path's (conv 1) */
+            const float vi = PulDir_velocity(&ax[i]);
+            assert(vi == (float)travel[i] * g->s.vel || (vi == 0.0f && g->s.vel == 0.0f));
+            const float m = fabsf(vi) / ax[i].lim[0];
+            g_peak = m > g_peak ? m : g_peak;
+        }
+    }
+
+    assert(g_twice == 0 || g_twice_stage == 2);
+    uint32_t last = 0;
+    bool have = false;
+    for (uint8_t i = 0; i < n; i++) {
+        const int32_t mag = travel[i] < 0 ? -travel[i] : travel[i];
+        assert(st(i).count == c0[i] + travel[i] && !high(i));
+        /* the generator rests on the target, the origin on the count, as after an axis's landing */
+        assert(ax[i].origin == st(i).count && ax[i].prof.done && ax[i].prof.pos == 0.0f);
+        assert(edges[i] - e0[i] == (uint64_t)mag && net[i] - n0[i] == travel[i]);
+        assert(PulDir_target(&ax[i]) == (float)(c0[i] + travel[i]) && PulDir_velocity(&ax[i]) == 0.0f);
+        if (travel[i] == 0) {
+            assert(dirw[i] == d0[i]);         /* emits nothing, turns nothing */
+            continue;
+        }
+        if (!have)
+            last = last_rise[i];
+        have = true;
+        assert(last_rise[i] == last);         /* every final rising edge on one tick */
+    }
+    assert(have && (last - PULDIR_TICK_START) % N == N - 1u);   /* the arrival interval's last tick */
+    /* The start tick (5.7): every direction pin was set before the first set with
+     * an increment latched, so no member loses ticks to a reversal (E14). */
+    assert(g_inc_seen);
+    for (uint8_t i = 0; i < n; i++)
+        if (dirw[i] != d0[i])
+            assert(last_dir_tick[i] < g_first_inc);
+}
+
+static void t_group_sync(void)
+{
+    setup(5);
+    fake_on_write(group_write);
+    const float v[5] = { 20000.0f, 5000.0f, 24000.0f, 1000.0f, 1000.0f };
+    const float acc[5] = { 100000.0f, 20000.0f, 50000.0f, 5000.0f, 3000.0f };
+    const float dec[5] = { 80000.0f, 30000.0f, 40000.0f, 5000.0f, 4000.0f };
+    const float jerk[5] = { 2.0e7f, 5.0e6f, 5.0e6f, 0.0f, 0.0f };
+    PulDir* m[5];
+    for (uint8_t i = 0; i < 5; i++) {
+        assert(PulDir_setDefaults(&ax[i], v[i], acc[i], dec[i], 0.0f));
+        m[i] = &ax[i];
+    }
+    assert(PulDirGroup_init(&grp, m, 5));
+    const int32_t go[5] = { 1000, 250, -60000, 0, 1 }, back[5] = { -1000, -250, 60000, 0, -1 };
+    const uint32_t phases[4] = { N / 2u, 0u, N - 1u, N / 3u };
+    for (int k = 0; k < 4; k++) {             /* back reverses every moving member */
+        fake_plan_phase = phases[k];
+        if (k == 2)
+            for (uint8_t i = 0; i < 3; i++)
+                assert(PulDir_setJerk(&ax[i], jerk[i]));
+        group_move_sync(&grp, k % 2 ? back : go);
+    }
+    assert(grp.s.n > 1);                      /* the jerk runs had a window */
+    assert(g_peak > 0.999f && g_peak < 1.0001f);   /* the tightest member reached its own speed, no more */
+    printf("  group_sync: worst |P - aim| = %.2e pulses, |count - aim| = %.4f pulses (N = %u)\n",
+           (double)g_worst_P / 4294967296.0, (double)g_worst_count / 4294967296.0, (unsigned)N);
+}
+
+/* D19 for the group: the plan tick run twice where the members arrive (the final
+ * set overwritten before it latches) and twice while the final set runs. Every
+ * final edge still falls on one tick, and the group stops moving only once the
+ * last pulse is lowered. */
+static void t_group_twice(void)
+{
+    setup(3);
+    fake_on_write(group_write);
+    const float v[3] = { 3000.0f, 2000.0f, 1000.0f };
+    PulDir* m[3];
+    for (uint8_t i = 0; i < 3; i++) {
+        assert(PulDir_setDefaults(&ax[i], v[i], 30000.0f, 20000.0f, 0.0f));
+        m[i] = &ax[i];
+    }
+    assert(PulDirGroup_init(&grp, m, 3));
+    const int32_t go[3] = { 300, -170, 1 }, back[3] = { -300, 170, -1 };
+    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    for (int k = 0; k < 12; k++) {
+        fake_plan_phase = phases[k % 3];
+        g_twice = k < 6 ? 1 : 2;
+        if (k == 3 || k == 9)
+            for (uint8_t i = 0; i < 2; i++)
+                assert(PulDir_setJerk(&ax[i], 3.0e6f));
+        if (k == 6)
+            for (uint8_t i = 0; i < 2; i++)
+                assert(PulDir_setJerk(&ax[i], 0.0f));
+        group_move_sync(&grp, k % 2 ? back : go);
+        const uint64_t e = edges[0] + edges[1] + edges[2];
+        fake_run(3u * N);
+        assert(edges[0] + edges[1] + edges[2] == e);
+    }
+    g_twice = 0;
+}
+
+/* D6 for the group: a soft decel through a long jerk window creeps s to within
+ * an ulp of 1; the small members' final edges must still be the arrival
+ * interval's last tick, with the others'. */
+static void t_group_creep(void)
+{
+    setup(3);
+    fake_on_write(group_write);
+    const float jerk = 40.0f / (250.0f / (float)PULDIR_PLAN_HZ);   /* a 250-tap window */
+    assert(PulDir_setDefaults(&ax[0], 50.0f, 20.0f, 20.0f, jerk));
+    assert(PulDir_setDefaults(&ax[1], 1000.0f, 1.0e4f, 1.0e4f, 0.0f));
+    assert(PulDir_setDefaults(&ax[2], 1000.0f, 1.0e4f, 1.0e4f, 0.0f));
+    PulDir* m[3] = { &ax[0], &ax[1], &ax[2] };
+    assert(PulDirGroup_init(&grp, m, 3));
+    const int32_t steps[4][3] = { { 3, 1, 1 }, { -1, 2, -1 }, { 2, -1, 1 }, { -4, -2, 2 } };
+    for (int k = 0; k < 8; k++) {
+        fake_plan_phase = (uint32_t)k * (N / 8u);
+        group_move_sync(&grp, steps[k % 4]);
+    }
+}
+
+/* The group rows of test 19. */
+static void t_group_rules(void)
+{
+    setup(4);
+    fake_on_write(group_write);
+    for (uint8_t i = 0; i < 4; i++)
+        assert(PulDir_setDefaults(&ax[i], 4000.0f + 1000.0f * (float)i, 40000.0f, 30000.0f, 0.0f));
+    fake_run(N);                              /* the limits applied: no request pending */
+    PulDir* m3[3] = { &ax[0], &ax[1], &ax[2] };
+    PulDir* m2[2] = { &ax[2], &ax[3] };
+
+    /* init: refused for no member, a missing, unregistered or repeated one, and a full table */
+    PulDir loose;
+    PulDir_init(&loose, "loose");
+    PulDir* bad1[2] = { &ax[0], &loose };
+    PulDir* bad2[2] = { &ax[0], &ax[0] };
+    PulDir* bad3[2] = { &ax[0], NULL };
+    assert(!PulDirGroup_init(&grp, m3, 0));
+    ax[0].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_init(&grp, bad1, 2) && ax[0].refusal == PULDIR_R_ARG);
+    ax[0].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_init(&grp, bad2, 2) && ax[0].refusal == PULDIR_R_ARG);
+    ax[0].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_init(&grp, bad3, 2) && ax[0].refusal == PULDIR_R_ARG);
+    assert(PulDirGroup_init(&grp, m3, 3) && PulDirGroup_init(&grp2, m2, 2));
+    static PulDirGroup more[PULDIR_MAX_GROUPS];
+    PulDir* m1[1] = { &ax[3] };
+    for (uint32_t k = 0; k + 2u < PULDIR_MAX_GROUPS; k++)
+        assert(PulDirGroup_init(&more[k], m1, 1));
+    ax[3].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_init(&more[PULDIR_MAX_GROUPS - 2u], m1, 1) && ax[3].refusal == PULDIR_R_FULL);
+    assert(PulDirGroup_init(&grp, m3, 3));    /* already in the table: initialised again */
+    assert(!PulDirGroup_isMoving(&grp) && !PulDirGroup_faulted(&grp));
+
+    /* a bad target: refused, nothing changes */
+    float tg[3] = { 500.0f, NAN, -300.0f };
+    assert(!PulDirGroup_moveTo(&grp, tg) && ax[1].refusal == PULDIR_R_ARG);
+    tg[1] = 3.0e9f;
+    assert(!PulDirGroup_moveTo(&grp, tg) && ax[1].refusal == PULDIR_R_ARG);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(ax[i].mode == PULDIR_MODE_IDLE && !PulDir_isMoving(&ax[i]) && ax[i].req == 0);
+    assert(!PulDirGroup_isMoving(&grp));
+
+    /* a member not IDLE (jogging): refused, the others untouched */
+    assert(PulDir_jog(&ax[1], 1000.0f));
+    tg[1] = 700.0f;
+    assert(!PulDirGroup_moveTo(&grp, tg) && ax[1].refusal == PULDIR_R_NOT_IDLE);
+    assert(!PulDirGroup_isMoving(&grp) && ax[1].mode == PULDIR_MODE_PROFILE);
+    assert(ax[0].mode == PULDIR_MODE_IDLE && ax[2].mode == PULDIR_MODE_IDLE && !PulDir_isMoving(&ax[0]));
+    /* halted, until its last pulse is lowered: not yet at rest, refused */
+    while (!high(1))
+        fake_run(1);
+    PulDir_halt(&ax[1]);
+    assert(ax[1].mode == PULDIR_MODE_IDLE && PulDir_isMoving(&ax[1]));
+    ax[1].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_moveTo(&grp, tg) && ax[1].refusal == PULDIR_R_NOT_IDLE);
+    assert(!PulDirGroup_isMoving(&grp) && ax[0].mode == PULDIR_MODE_IDLE);
+    run_until_idle(&ax[1], PULDIR_TICK_HZ);
+
+    /* accepted: members refuse their own commands, except halt */
+    int32_t c[4];
+    for (uint8_t i = 0; i < 4; i++)
+        c[i] = st(i).count;
+    tg[0] = (float)(c[0] + 3000);
+    tg[1] = (float)(c[1] - 2000);
+    tg[2] = (float)(c[2] + 1500);
+    assert(PulDirGroup_moveTo(&grp, tg) && PulDirGroup_isMoving(&grp));
+    for (uint8_t i = 0; i < 3; i++) {
+        PulDir* a = &ax[i];
+        assert(a->mode == PULDIR_MODE_GROUP && PulDir_isMoving(a) && PulDir_target(a) == tg[i]);
+        a->refusal = PULDIR_R_NONE;
+        assert(!PulDir_moveTo(a, 0.0f) && a->refusal == PULDIR_R_MODE);
+        a->refusal = PULDIR_R_NONE;
+        assert(!PulDir_moveBy(a, 10.0f) && a->refusal == PULDIR_R_MODE);
+        a->refusal = PULDIR_R_NONE;
+        assert(!PulDir_jog(a, 100.0f) && a->refusal == PULDIR_R_MODE);
+        a->refusal = PULDIR_R_NONE;
+        assert(!PulDir_jog(a, 0.0f) && a->refusal == PULDIR_R_MODE);
+        a->refusal = PULDIR_R_NONE;
+        PulDir_stop(a);
+        assert(a->refusal == PULDIR_R_MODE);
+        a->refusal = PULDIR_R_NONE;
+        assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE);
+        a->refusal = PULDIR_R_NONE;
+        assert(!PulDir_setPosition(a, 0.0f) && a->refusal == PULDIR_R_NOT_IDLE);
+        assert(a->mode == PULDIR_MODE_GROUP && a->req == 0);
+    }
+    /* the group again, or a group sharing a member: refused */
+    ax[0].refusal = PULDIR_R_NONE;
+    assert(!PulDirGroup_moveTo(&grp, tg) && ax[0].refusal == PULDIR_R_BUSY);
+    const float t2[2] = { 0.0f, 50.0f };
+    assert(!PulDirGroup_moveTo(&grp2, t2) && ax[2].refusal == PULDIR_R_BUSY);
+    assert(ax[3].mode == PULDIR_MODE_IDLE && !PulDir_isMoving(&ax[3]) && !PulDirGroup_isMoving(&grp2));
+
+    /* a member's halt halts every member on that tick */
+    for (int k = 0; k < 2; k++) {
+        if (k == 1) {
+            for (uint8_t i = 0; i < 3; i++)
+                c[i] = st(i).count;
+            tg[0] = (float)(c[0] - 2500);
+            tg[1] = (float)(c[1] + 1000);
+            tg[2] = (float)(c[2] - 2000);
+            assert(PulDirGroup_moveTo(&grp, tg));
+        }
+        fake_run(150u * N);
+        while (!high(1))                      /* just after a rising edge of member 1 */
+            fake_run(1);
+        uint64_t e0[3];
+        int32_t ch[3];
+        for (uint8_t i = 0; i < 3; i++) {
+            e0[i] = edges[i];
+            ch[i] = st(i).count;
+            assert(ch[i] != c[i]);            /* every member was under way */
+        }
+        if (k == 0)
+            PulDir_halt(&ax[1]);
+        else
+            PulDirGroup_halt(&grp);
+        for (uint8_t i = 0; i < 3; i++) {
+            PulDir* a = &ax[i];
+            assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
+            assert(PulDir_target(a) == (float)ch[i] && PulDir_position(a) == (float)ch[i]);
+        }
+        assert(PulDirGroup_isMoving(&grp) && PulDir_isMoving(&ax[1]));   /* until the pin is low */
+        for (uint32_t t = 0; PulDirGroup_isMoving(&grp); t++) {
+            assert(t < 3u * N);
+            fake_run(1);
+        }
+        for (uint8_t i = 0; i < 3; i++)
+            assert(!PulDir_isMoving(&ax[i]) && !high(i));
+        fake_run(3u * N);
+        for (uint8_t i = 0; i < 3; i++)
+            assert(edges[i] == e0[i] && st(i).count == ch[i] && st(i).inc == 0);   /* no rising edge since */
+    }
+
+    /* after a halt, a member's own move lands exactly: its generator is where the pulses stopped */
+    for (uint8_t i = 0; i < 3; i++)
+        c[i] = st(i).count;
+    const uint64_t eh = edges[0];
+    assert(PulDir_moveTo(&ax[0], (float)(c[0] + 100)));
+    run_until_idle(&ax[0], PULDIR_TICK_HZ);
+    assert(st(0).count == c[0] + 100 && edges[0] - eh == 100);   /* straight there */
+    c[0] += 100;
+
+    /* stop: every member comes to rest on the line, for one common s, short of its target */
+    tg[0] = (float)(c[0] + 6000);
+    tg[1] = (float)(c[1] - 9000);
+    tg[2] = (float)(c[2] + 3000);
+    assert(PulDirGroup_moveTo(&grp, tg));
+    fake_run(400u * N);
+    PulDirGroup_stop(&grp);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(ax[i].mode == PULDIR_MODE_GROUP && PulDir_isMoving(&ax[i]));
+    run_until_idle(&ax[0], 2u * PULDIR_TICK_HZ);
+    assert(!PulDirGroup_isMoving(&grp));
+    const float s = grp.s.pos;
+    assert(grp.s.done && s > 0.1f && s < 0.9f);
+    for (uint8_t i = 0; i < 3; i++) {
+        PulDir* a = &ax[i];
+        const float want = (float)c[i] + (float)grp.delta[i] * s;
+        assert(fabsf((float)st(i).count - want) <= 1.0f);
+        assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && PulDir_velocity(a) == 0.0f);
+        assert(PulDir_target(a) == PulDir_position(a));
+        check_rest(i, grp.delta[i]);
+        /* the generator rests on the line, as an axis's rests where its stop ended */
+        const double line = (double)c[i] + (double)grp.delta[i] * (double)s;
+        assert(a->origin == st(i).count && fabs((double)a->origin + (double)a->prof.pos - line) < 1e-4);
+    }
+
+    /* and the next group move from there lands exactly */
+    for (uint8_t i = 0; i < 3; i++) {
+        c[i] = st(i).count;
+        tg[i] = (float)(c[i] + (i == 1 ? 321 : -123));
+    }
+    assert(PulDirGroup_moveTo(&grp, tg));
+    run_until_idle(&ax[0], 2u * PULDIR_TICK_HZ);
+    assert(!PulDirGroup_isMoving(&grp));
+    for (uint8_t i = 0; i < 3; i++)
+        assert(st(i).count == (int32_t)tg[i]);
+
+    /* every travel zero: accepted, done at the next plan tick, no pulse */
+    uint64_t e1[3];
+    for (uint8_t i = 0; i < 3; i++) {
+        e1[i] = edges[i];
+        tg[i] = (float)st(i).count;
+    }
+    assert(PulDirGroup_moveTo(&grp, tg) && PulDirGroup_isMoving(&grp) && ax[2].mode == PULDIR_MODE_GROUP);
+    while (!tick1())
+        ;
+    assert(!PulDirGroup_isMoving(&grp));
+    for (uint8_t i = 0; i < 3; i++)
+        assert(ax[i].mode == PULDIR_MODE_IDLE && !PulDir_isMoving(&ax[i]) && edges[i] == e1[i]);
+
+    /* the second group, now free */
+    assert(PulDirGroup_moveTo(&grp2, t2));
+    run_until_idle(&ax[3], 2u * PULDIR_TICK_HZ);
+    assert(!PulDirGroup_isMoving(&grp2) && st(2).count == 0 && st(3).count == 50);
+}
+
 /* ---- the case table ------------------------------------------------------------------------ */
 
 static const struct { const char* name; void (*fn)(void); } cases[] = {
@@ -2296,6 +2733,10 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "stream_end_begin", t_stream_end_begin },
     { "jerk_floor", t_jerk_floor },
     { "request_order", t_request_order },
+    { "group_sync", t_group_sync },
+    { "group_rules", t_group_rules },
+    { "group_twice", t_group_twice },
+    { "group_creep", t_group_creep },
 };
 
 int main(int argc, char** argv)

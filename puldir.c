@@ -286,22 +286,32 @@ bool PulDir_jog(PulDir* a, float speed)
 }
 
 /* Ramped: the plan tick stops the generator from where it is. A pending target
- * or jog is applied first, so the stop is from the motion as commanded. */
+ * or jog is applied first, so the stop is from the motion as commanded. A group
+ * member refuses it (5.7): PulDirGroup_stop stops the group along its line. */
 void PulDir_stop(PulDir* a)
 {
     port_lock();
-    if (a->mode != PULDIR_MODE_IDLE) {
+    const bool group = a->mode == PULDIR_MODE_GROUP;
+    if (!group && a->mode != PULDIR_MODE_IDLE) {
         a->req |= REQ_STOP;
         a->mode = PULDIR_MODE_STOPPING;
     }
     port_unlock();
+    if (group)
+        puldir_refuse(a, "stop", PULDIR_R_MODE, 0.0f);
 }
 
 /* Immediate (D17): no rising edge after the tick this is called in. The target
- * is where the pulses stopped; isMoving clears once the plan tick sees the pin low. */
+ * is where the pulses stopped; isMoving clears once the plan tick sees the pin low.
+ * A group member's halt halts the whole group (5.5). */
 void PulDir_halt(PulDir* a)
 {
     port_lock();
+    if (a->mode == PULDIR_MODE_GROUP && a->group != NULL) {
+        puldir_group_halt(a->group, NULL);
+        port_unlock();
+        return;
+    }
     if (a->slot < PULDIR_MAX_AXES) {
         PulDirPulse s;
         puldir_kill(a->slot);

@@ -38,9 +38,7 @@ static int32_t div_away(int64_t d)
     return sat(q);
 }
 
-/* A non-zero inc carries its own sign as the direction; zero keeps the last one,
- * so a pause never writes the direction pin. */
-static void publish(PulDir* a, PulDirInc* out, int32_t inc)
+void puldir_set_inc(PulDir* a, PulDirInc* out, int32_t inc)
 {
     if (inc != 0)
         a->dir_out = inc > 0 ? 1 : -1;
@@ -48,26 +46,9 @@ static void publish(PulDir* a, PulDirInc* out, int32_t inc)
     out->dir = a->dir_out;
 }
 
-/* PROFILE and STOPPING: aim this interval's end at the generator's position.
- * T, pb and end are 32.32 relative to base; live is the running increment. */
-static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
-                        bool pul_high)
+bool puldir_steer(PulDir* a, PulDirInc* out, int64_t T, int64_t end, int64_t pb, bool arrival, bool hold)
 {
-    MotionProfile* p = &a->prof;
-    MotionProfile_advance(p);
-    int64_t end = to_fix(p->pos);
-    if (!a->arrived) {
-        /* At rest the trapezoid's target is final, fractional after a stop (D4); a
-         * jog or a stop in progress has none, so it reads the profile. */
-        if (p->landed)
-            a->target = base + (uint64_t)to_fix(p->target);
-        else if (p->endless || p->stopping)
-            a->target = base + (uint64_t)end;
-    }
-    const int64_t T = (int64_t)(a->target - base);
-    a->vel_out = p->vel;
-
-    if (!a->arrived && p->landed && end == T) {
+    if (!a->arrived && arrival) {
         /* Arrival: round away from zero so the target's integer is crossed (5.4
          * step 5). D6 kept the last interval M short, so this one moves more than
          * N(N-1) and the final edge falls on its last tick. */
@@ -80,35 +61,59 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
         a->arrived = true;
         a->approach = inc > 0 ? 1 : inc < 0 ? -1 : 0;
         a->settle = 2;
-        publish(a, out, inc);
+        puldir_set_inc(a, out, inc);
     } else if (!a->arrived) {
         /* D6: hold the end M short of the target on the approach side until
          * arrival. Only toward a target: a jog or a stop in progress has none. */
         const int64_t gap = T - end;
-        if (!p->endless && !p->stopping && gap < M && gap > -M && T != pb)
+        if (hold && gap < M && gap > -M && T != pb)
             end = T > pb ? T - M : T + M;
-        publish(a, out, div_trunc(end - pb));
+        puldir_set_inc(a, out, div_trunc(end - pb));
     } else {
         /* Settling (D19): the final interval runs after publication and its last
          * pulse is lowered on the tick after it. If the final set latched late or
          * was overwritten, the boundary is still short of the target: steer again. */
         const bool short_of = (a->approach > 0 && pb < T) || (a->approach < 0 && pb > T);
         if (short_of) {
-            publish(a, out, div_away(T - pb));
+            puldir_set_inc(a, out, div_away(T - pb));
             a->settle = 2;
         } else {
-            publish(a, out, 0);
+            puldir_set_inc(a, out, 0);
             if (a->settle > 0)
                 a->settle--;
         }
-        /* The live increment too: a plan tick run twice in an interval can see
-         * the zeros published before the final set has run out. */
-        if (a->settle == 0 && p->done && !pul_high && live == 0) {
-            a->target = base;                   /* the target, or the last integer a stop reached */
-            a->mode = PULDIR_MODE_IDLE;
-            a->moving = false;
-            a->events |= PULDIR_EV_LANDED;
-        }
+    }
+    return a->arrived && a->settle == 0;
+}
+
+/* PROFILE and STOPPING: aim this interval's end at the generator's position.
+ * T, pb and end are 32.32 relative to base; live is the running increment. */
+static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
+                        bool pul_high)
+{
+    MotionProfile* p = &a->prof;
+    MotionProfile_advance(p);
+    const int64_t end = to_fix(p->pos);
+    if (!a->arrived) {
+        /* At rest the trapezoid's target is final, fractional after a stop (D4); a
+         * jog or a stop in progress has none, so it reads the profile. */
+        if (p->landed)
+            a->target = base + (uint64_t)to_fix(p->target);
+        else if (p->endless || p->stopping)
+            a->target = base + (uint64_t)end;
+    }
+    const int64_t T = (int64_t)(a->target - base);
+    a->vel_out = p->vel;
+
+    const bool settled = puldir_steer(a, out, T, end, pb, p->landed && end == T,
+                                      !p->endless && !p->stopping);
+    /* The live increment too: a plan tick run twice in an interval can see the
+     * zeros published before the final set has run out. */
+    if (settled && p->done && !pul_high && live == 0) {
+        a->target = base;                       /* the target, or the last integer a stop reached */
+        a->mode = PULDIR_MODE_IDLE;
+        a->moving = false;
+        a->events |= PULDIR_EV_LANDED;
     }
 }
 
@@ -153,7 +158,7 @@ static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
         a->v_cmd = -vmax;
 
     const int32_t inc = div_trunc(to_fix(a->v_cmd * DT));
-    publish(a, out, inc);
+    puldir_set_inc(a, out, inc);
     a->vel_out = a->v_cmd;
     a->target = base + (uint64_t)(pb + (int64_t)inc * N);   /* the aim, as a jog reads it */
     (void)MotionProfile_setPosition(&a->prof, frac);        /* the idle generator follows the pulses */
@@ -235,13 +240,13 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
         run_stream(a, out, base, pb, count, now + ahead);
         break;
     case PULDIR_MODE_IDLE:
-        publish(a, out, 0);
+        puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
         if (a->moving && !pul_high && live == 0)    /* after a halt: the last pulse is lowered */
             a->moving = false;
         break;
     default:
-        publish(a, out, 0);
+        puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
         break;
     }
@@ -264,10 +269,21 @@ void puldir_plan_tick(void)
     }
     port_unlock();
 
-    PulDirInc* out = puldir_shadow();
+    PulDirSnap snap[PULDIR_MAX_AXES];
     for (uint8_t i = 0; i < n; i++) {
-        const uint64_t Pb = s[i].P + (uint64_t)((int64_t)s[i].inc * ahead);   /* D5 prediction */
-        run_axis(puldir_axes[i], &out[i], Pb, s[i].count, s[i].inc, high[i], now, ahead);
+        snap[i].Pb = s[i].P + (uint64_t)((int64_t)s[i].inc * ahead);   /* D5 prediction */
+        snap[i].count = s[i].count;
+        snap[i].live = s[i].inc;
+        snap[i].dir = s[i].dir;
+        snap[i].high = high[i];
+    }
+
+    PulDirInc* out = puldir_shadow();
+    puldir_group_tick(snap, out);               /* the groups write their members' entries */
+    for (uint8_t i = 0; i < n; i++) {
+        PulDir* a = puldir_axes[i];
+        if (a->mode != PULDIR_MODE_GROUP)
+            run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].live, snap[i].high, now, ahead);
     }
     puldir_publish();
 }

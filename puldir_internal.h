@@ -24,6 +24,18 @@ enum {
     REQ_HOME = 1u << 8, REQ_HOME_STOP = 1u << 9
 };
 
+/* main -> plan requests on a group */
+enum { GROUP_REQ_STOP = 1u << 0 };
+
+/* One axis at the plan tick's instant, read under one lock with every other. */
+typedef struct {
+    uint64_t Pb;                              /* the pulse position predicted at the next boundary (D5, E11) */
+    int32_t  count;                           /* edges emitted */
+    int32_t  live;                            /* the running increment */
+    int8_t   dir;                             /* the direction the pin shows */
+    bool     high;                            /* the pulse pin is high */
+} PulDirSnap;
+
 /* event bits */
 enum {
     PULDIR_EV_REFUSED = 1u << 0, PULDIR_EV_LANDED = 1u << 1, PULDIR_EV_STREAM_TIMEOUT = 1u << 2,
@@ -53,6 +65,22 @@ void       puldir_set_datum(uint8_t slot, int32_t count);
 
 /* plan tick (puldir_plan.c) */
 void puldir_plan_tick(void);
+/* Write one entry of the set being built. A non-zero inc carries its sign as the
+ * direction; zero keeps the last one, so a pause never turns the pin. */
+void puldir_set_inc(PulDir*, PulDirInc* out, int32_t inc);
+/* One interval of an axis or a group member heading for T. T, end (this
+ * interval's aim) and pb are 32.32 relative to the axis's whole-pulse base.
+ * Before arrival: D6 holds end M short of T when hold. arrival: the generator has
+ * landed with end on T; the final increment is published, rounded away (E13).
+ * After: settle steering. Returns true once settling has elapsed. */
+bool puldir_steer(PulDir*, PulDirInc* out, int64_t T, int64_t end, int64_t pb, bool arrival, bool hold);
+
+/* groups (puldir_group.c) */
+void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group, before the axes */
+/* Under the lock, from main or from inside the plan tick: no rising edge on any
+ * member after this tick, every member IDLE, the move abandoned. shadow is the set
+ * the plan tick is writing, whose members' entries are zeroed too; NULL from main. */
+void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
 
 /* events (puldir_loop.c) */
 void puldir_refuse(PulDir*, const char* call, PulDirRefusal why, float value);
