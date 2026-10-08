@@ -56,7 +56,7 @@ void app_loop(void)
 }
 ```
 
-`PIN_X_PUL` and the others are `puldir_pin_t` values. On STM32 that is `{ GPIOC, GPIO_PIN_12 }`. Configure the pins as outputs (and inputs for fault) in CubeMX. The pulse pin idles at its inactive level.
+`PIN_X_PUL` and the others are `puldir_pin_t` values. On STM32 that is `(puldir_pin_t){ GPIOC, GPIO_PIN_12 }`. Configure the pins as outputs (and inputs for fault) in CubeMX. The pulse pin idles at its inactive level.
 
 Then move it from the main context:
 
@@ -64,9 +64,11 @@ Then move it from the main context:
 PulDir_moveBy(&x, 1.0f);          /* also moveTo, jog, stop, halt */
 ```
 
-Calls validate and refuse bad input, they never clamp. A refusal returns false and logs one line from `PulDir_loop` through the logger set with `PulDir_attachLogger`. `PulDir_loop` also logs landings and faults, so call it for every axis. Setup calls (`setConversion`, `setDefaults`, `setDelays`, `setHoming`) return false on refusal too. Check them. `PulDir_init` returns false for a NULL name or one longer than 15 characters, and then writes nothing, so it has nothing to log through.
+Calls validate and refuse bad input, they never clamp. A refusal returns false and logs one line from `PulDir_loop` through the logger set with `PulDir_attachLogger`. `PulDir_loop` also logs landings and faults, so call it for every axis. It logs `[name] pulse tick overrun, total N` once for each new batch of pulse-tick overruns, on the first axis whose loop sees it; an overrun is a bug to fix, and `PulDir_overruns()` gives the total. Setup calls (`setConversion`, `setDefaults`, `setDelays`, `setHoming`) return false on refusal too. Check them. `PulDir_init` returns false for a NULL name or one longer than 15 characters, and then writes nothing, so it has nothing to log through.
 
-Targets from `moveTo` and `moveBy` are rounded to whole pulses. `PulDir_stop` ramps down; `PulDir_halt` stops at once and leaves the drive enabled. A fault input latch halts and does not release the drive. `PulDir_console(&x, cmd, arg)` is a one-letter command console for a UART; `PulDir_consoleMenu` prints the verbs.
+Targets from `moveTo` and `moveBy` are rounded to whole pulses. `PulDir_stop` ramps down; `PulDir_halt` stops at once. With auto-release off the drive stays enabled after either; with it on, the drive is released after the release delay, as after any move. Only a fault input latch always holds the drive enabled: it halts and never releases it, auto-release or not. `PulDir_console(&x, cmd, arg)` is a one-letter command console for a UART; `PulDir_consoleMenu` prints the verbs.
+
+Homing (`PulDir_setHoming`, then `PulDir_homeStart`) runs cFlexyStepper's phases from the plan tick. The moving phases use the homing speed as the speed limit, so the limit setters, `setDefaults` and `restoreDefaults` are refused while the run lasts. A run that homes ends on the defaults, which its final adjust ran on. A run that ends any other way (halt, stop, `homeStop`, a phase timeout or a fault) puts back the limits in force at `homeStart`.
 
 ## The port
 
@@ -80,7 +82,23 @@ Targets from `moveTo` and `moveBy` are rounded to whole pulses. `PulDir_stop` ra
 PulDir_stm32_bind(&htim6, TIM6_DAC_IRQn, &htim7, TIM7_DAC_IRQn);   /* pulse timer, plan timer */
 ```
 
-Call the two raw IRQ entries from your own handlers. Do not go through `HAL_TIM_IRQHandler`. Its flag checks cost more than the tick at 200 kHz. Put the calls in the CubeMX user sections, or untick "Call HAL handler" for these two timers, because regeneration overwrites the rest.
+Call the two raw IRQ entries, not `HAL_TIM_IRQHandler`: its flag checks cost more than the tick at 200 kHz. CubeMX already generates `TIM6_DAC_IRQHandler` and `TIM7_DAC_IRQHandler` in `stm32g4xx_it.c`, so do not define them a second time. Either put the call in the generated handler's first user section and return before the HAL call (regeneration keeps only the user sections):
+
+```c
+void TIM6_DAC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM6_DAC_IRQn 0 */
+  PulDir_stm32_pulseIrq();
+  return;                       /* skip the generated HAL_TIM_IRQHandler(&htim6) */
+  /* USER CODE END TIM6_DAC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim6);
+  /* USER CODE BEGIN TIM6_DAC_IRQn 1 */
+
+  /* USER CODE END TIM6_DAC_IRQn 1 */
+}
+```
+
+and the same with `PulDir_stm32_planIrq()` in `TIM7_DAC_IRQn 0`, as `docs/bench-step4.md` section 3.2 does; or untick "Generate IRQ handler" for these two interrupts (NVIC, Code generation) and define the handlers yourself:
 
 ```c
 void TIM6_DAC_IRQHandler(void) { PulDir_stm32_pulseIrq(); }
@@ -92,13 +110,13 @@ Timer setup, in CubeMX:
 - Both timers count up, same clock, update interrupt enabled, no output.
 - The pulse timer period is one tick: at a 144 MHz timer clock, 2880 clocks for 50 kHz, 720 for 200 kHz.
 - The plan timer period must be exactly N pulse periods, where N = `PULDIR_TICK_HZ / PULDIR_PLAN_HZ` (50 or 200 here). 144,000 clocks gives 1 kHz. If you change one period, change the other.
-- `port_start` zeroes both counters and starts the pulse timer, then the plan timer. The plan tick then fires just after each interval boundary and has the whole interval to publish. This only holds if the clocks match and the periods divide exactly.
+- `port_start` zeroes both counters and starts the pulse timer, then the plan timer, so that the plan tick fires just after each interval boundary and has the whole interval to publish. This needs matching clocks and periods that divide exactly, and it depends on whether HAL leaves the update flag set when the timers start: step 6 of `docs/bench-step4.md` checks it.
 
 Priorities (CubeMX, NVIC):
 
 - Pulse timer: the highest priority in the system, 0. Nothing at that level may run long.
 - Plan timer: next, 1.
-- Everything else (UART, DMA, USB, CAN): 2 or lower urgency. Any interrupt left at 0 adds its duration to the pulse jitter. That includes SysTick, which CubeMX sets to 0 by default.
+- Everything else (UART, DMA, USB, CAN): 2 or lower urgency. Any interrupt left at 0 adds its duration to the pulse jitter. CubeMX leaves SysTick at 15, the lowest, but application code may raise it: the 164-race firmware's `functions.c` sets it to 0.
 
 `port_lock` disables exactly those two IRQ numbers in the NVIC. A tick that comes due inside the lock fires on unlock, late by the lock's duration. Before `PulDir_stm32_bind` the lock does nothing.
 
@@ -128,7 +146,7 @@ PulDir_stream(&x, position, velocity);      /* each setpoint, user units and uni
 PulDir_streamEnd(&x);                       /* ramps to rest */
 ```
 
-If no setpoint arrives for `PULDIR_STREAM_TIMEOUT_MS`, the axis ramps to a stop at its deceleration and `PulDir_streamTimedOut` reports it. `PulDir_streamError` gives the tracking error in pulses. `PulDir_setStreamCatchup` sets the catch-up time per axis.
+If no setpoint arrives for `PULDIR_STREAM_TIMEOUT_MS`, the axis ramps to a stop at its deceleration and `PulDir_streamTimedOut` reports it. `PulDir_streamError` gives the tracking error in user units. `PulDir_setStreamCatchup` sets the catch-up time per axis.
 
 ## Configuration macros
 
