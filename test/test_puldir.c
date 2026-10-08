@@ -111,22 +111,17 @@ static uint32_t left(void)
     return l;
 }
 
-static PulDirPulse st(uint8_t slot)
+/* The pulse tick's state, at ahead 0: Pb is the position itself. */
+static PulDirSnap st(uint8_t slot)
 {
-    PulDirPulse s;
+    PulDirSnap s;
     port_lock();
-    puldir_pulse_read(slot, &s);
+    puldir_pulse_read(slot, 0u, &s);
     port_unlock();
     return s;
 }
 
-static bool high(uint8_t slot)
-{
-    port_lock();
-    const bool h = puldir_pul_high(slot);
-    port_unlock();
-    return h;
-}
+static bool high(uint8_t slot) { return st(slot).high; }
 
 /* Write every registered axis's shadow entry, then publish. */
 static void publish_all(const int32_t* inc, const int8_t* dir)
@@ -234,8 +229,8 @@ static void t_setup(void)
     pulse(3u * N);
     assert(nw == 0);
     for (uint8_t i = 0; i < PULDIR_MAX_AXES; i++) {
-        const PulDirPulse s = st(i);
-        assert(s.P == 0 && s.count == 0 && s.inc == 0 && s.dir == 1 && !high(i));
+        const PulDirSnap s = st(i);
+        assert(s.Pb == 0 && s.count == 0 && s.inc == 0 && s.dir == 1 && !high(i));
     }
 }
 
@@ -473,9 +468,9 @@ static size_t interval(int32_t inc, int8_t dir)
     size_t edges = 0;
     for (uint32_t i = 0; i < N; i++) {
         const uint32_t c = (uint32_t)st(0).count;
-        const uint64_t before = st(0).P;
+        const uint64_t before = st(0).Pb;
         fake_pulse(false);
-        const uint64_t after = st(0).P;
+        const uint64_t after = st(0).Pb;
         if ((uint32_t)st(0).count != c) {
             assert((uint32_t)st(0).count == c + (uint32_t)(int32_t)dir);   /* wraps like the count */
             const uint64_t at = (uint64_t)(uint32_t)st(0).count << 32;
@@ -497,13 +492,13 @@ static void t_hysteresis(void)
     const int32_t inc_up = (int32_t)((41 * one / 4) / N);
     assert(inc_up <= PULDIR_INC_MAX);
     assert(interval(inc_up, 1) == 10);
-    assert(st(0).count == 10 && (int64_t)st(0).P > 10 * one);
+    assert(st(0).count == 10 && (int64_t)st(0).Pb > 10 * one);
 
     /* down 1.5: through 10.0 with no edge, one edge at 9.0. The first tick of a
      * reversal writes the direction and does not move. */
     const int32_t inc_down = (int32_t)((3 * one / 2) / (N - 1));
     assert(interval(-inc_down, -1) == 1);
-    assert(st(0).count == 9 && (int64_t)st(0).P < 9 * one && (int64_t)st(0).P > 8 * one);
+    assert(st(0).count == 9 && (int64_t)st(0).Pb < 9 * one && (int64_t)st(0).Pb > 8 * one);
 
     /* dither across 9.0 and 9.5, between 8.75 and 9.75, for at least 1,000 ticks: no edges */
     const size_t from = nw;
@@ -511,9 +506,9 @@ static void t_hysteresis(void)
     const uint32_t cycles = (1000u + 2u * N - 1u) / (2u * N);
     for (uint32_t k = 0; k < cycles; k++) {
         assert(interval(inc_d, 1) == 0);
-        assert((int64_t)st(0).P > 9 * one + one / 2);
+        assert((int64_t)st(0).Pb > 9 * one + one / 2);
         assert(interval(-inc_d, -1) == 0);
-        assert((int64_t)st(0).P < 9 * one);
+        assert((int64_t)st(0).Pb < 9 * one);
     }
     assert(st(0).count == 9);
     for (size_t i = from; i < nw; i++)
@@ -533,13 +528,13 @@ static void t_kill(void)
     port_lock();
     puldir_kill(0);
     port_unlock();
-    const uint64_t P0 = st(0).P;
+    const uint64_t P0 = st(0).Pb;
     const size_t from = nw;
     assert(st(0).inc == 0 && st(1).inc == q);
     to_boundary();
     pulse(2u * N);
     assert(st(0).inc == 0 && st(1).inc == q2);   /* the pending set lost axis 0's inc only */
-    assert(st(0).P == P0);
+    assert(st(0).Pb == P0);
     assert(writes(from, 0, true, rise, MAX_EDGES) == 0);    /* no edge after the kill */
     assert(writes(from, 2, true, rise, MAX_EDGES) > 0);
 }
@@ -551,8 +546,8 @@ static void t_datum(void)
     port_lock();
     puldir_set_datum(0, -5);
     port_unlock();
-    PulDirPulse s = st(0);
-    assert(s.count == -5 && s.P == (uint64_t)(int64_t)-5 << 32 && s.dir == 1);
+    PulDirSnap s = st(0);
+    assert(s.count == -5 && s.Pb == (uint64_t)(int64_t)-5 << 32 && s.dir == 1);
     assert(interval(q, 1) == N / 4u);     /* first edge at -4.0 */
     assert(st(0).count == -5 + (int32_t)(N / 4u));
 
@@ -562,7 +557,7 @@ static void t_datum(void)
     puldir_set_datum(0, 3);
     port_unlock();
     s = st(0);
-    assert(s.count == 3 && s.P == (uint64_t)3 << 32 && s.dir == -1);
+    assert(s.count == 3 && s.Pb == (uint64_t)3 << 32 && s.dir == -1);
     assert(interval(-q, -1) == N / 4u);   /* first edge at 2.0 */
     assert(st(0).count == 3 - (int32_t)(N / 4u));
 
@@ -573,7 +568,7 @@ static void t_datum(void)
     puldir_set_datum(0, INT32_MAX - 2);
     port_unlock();
     s = st(0);
-    assert(s.count == INT32_MAX - 2 && s.P == (uint64_t)(INT32_MAX - 2) << 32 && s.dir == 1);
+    assert(s.count == INT32_MAX - 2 && s.Pb == (uint64_t)(INT32_MAX - 2) << 32 && s.dir == 1);
     assert(interval(q, 1) == N / 4u);     /* every edge at its crossing, across the wrap */
     assert(st(0).count == (int32_t)((uint32_t)(INT32_MAX - 2) + N / 4u));
     assert(st(0).count < 0);
@@ -649,9 +644,9 @@ static void track_run(PulDir* a, uint32_t ticks)
     const uint32_t plan_left = fake_plan_phase == 0u ? N : N - fake_plan_phase;
     for (uint32_t k = 0; k < ticks; k++) {
         if (left() == N) {                    /* this tick latches: the running set has finished */
-            const PulDirPulse s = st(0);
+            const PulDirSnap s = st(0);
             if (aim_cur.valid) {
-                int64_t err = (int64_t)(s.P - aim_cur.aim);
+                int64_t err = (int64_t)(s.Pb - aim_cur.aim);
                 if (err < 0)
                     err = -err;
                 const int64_t inc = s.inc < 0 ? -(int64_t)s.inc : s.inc;
@@ -758,7 +753,7 @@ static void t_move_exact(void)
             }
         }
         track_until_idle(a, 60u * TICK_HZ);
-        const PulDirPulse s = st(0);
+        const PulDirSnap s = st(0);
         assert(s.count == final);
         assert(!PulDir_isMoving(a));
         assert(PulDir_velocity(a) == 0.0f);
@@ -1060,8 +1055,8 @@ static void check_ramps(bool after)
  * hysteresis leaves it (D3) for the direction of travel, when there is one. */
 static void check_rest(uint8_t i, int travel)
 {
-    const PulDirPulse s = st(i);
-    const int64_t off = (int64_t)(s.P - ((uint64_t)(uint32_t)s.count << 32));
+    const PulDirSnap s = st(i);
+    const int64_t off = (int64_t)(s.Pb - ((uint64_t)(uint32_t)s.count << 32));
     assert(off < (int64_t)PULDIR_ONE && off > -(int64_t)PULDIR_ONE);
     assert(travel <= 0 || off >= 0);
     assert(travel >= 0 || off <= 0);
@@ -1314,7 +1309,7 @@ static void t_halt(void)
         assert(edges[0] == e0 && st(0).count == ch && st(0).inc == 0);   /* no rising edge since */
         assert(PulDir_target(a) == (float)ch && PulDir_velocity(a) == 0.0f && a->mode == PULDIR_MODE_IDLE);
         /* the generator is at rest where the pulses stopped, not where it was aiming */
-        const float frac = (float)(int64_t)(st(0).P - ((uint64_t)(uint32_t)a->origin << 32)) / PULDIR_FIX;
+        const float frac = (float)(int64_t)(st(0).Pb - ((uint64_t)(uint32_t)a->origin << 32)) / PULDIR_FIX;
         assert(a->prof.done && a->prof.vel == 0.0f && fabsf(a->prof.pos - frac) < 1e-6f);
         assert(a->origin == ch && fabsf(frac) < 1.0f);
 
@@ -1515,12 +1510,12 @@ static void t_setpos(void)
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_isMoving(a));
     assert(!PulDir_setPosition(a, 7.0f) && a->refusal == PULDIR_R_NOT_IDLE && a->homed);
     run_until_idle(a, 3u * N);
-    assert(st(0).P != (uint64_t)(uint32_t)st(0).count << 32);   /* halted between pulses */
+    assert(st(0).Pb != (uint64_t)(uint32_t)st(0).count << 32);   /* halted between pulses */
 
     /* accepted in IDLE: count, pulse position, target and generator move together */
     assert(PulDir_setPosition(a, -3.0f));
-    PulDirPulse s = st(0);
-    assert(s.count == -300 && s.P == (uint64_t)(int64_t)-300 << 32);
+    PulDirSnap s = st(0);
+    assert(s.count == -300 && s.Pb == (uint64_t)(int64_t)-300 << 32);
     assert(PulDir_position(a) == -3.0f && PulDir_target(a) == -3.0f && !a->homed);
     fake_run(N);
     assert(a->origin == -300 && a->prof.pos == 0.0f && a->prof.target == 0.0f && a->prof.done);
@@ -1766,9 +1761,9 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
             if (started) {
                 const double t = (double)(uint32_t)(PulDir_ticks() - t0) / (double)TICK_HZ;
                 const double p = A * (1.0 - cos(w * t)) * conv;
-                const PulDirPulse s = st(0);
+                const PulDirSnap s = st(0);
                 const double e = fabs((double)s.count - p);
-                const double ep = fabs((double)(int64_t)s.P / (double)PULDIR_FIX - p);
+                const double ep = fabs((double)(int64_t)s.Pb / (double)PULDIR_FIX - p);
                 if (t > 0.5) {
                     worst = fmax(worst, e);
                     worst_p = fmax(worst_p, ep);
@@ -2367,9 +2362,9 @@ static void group_track(PulDirGroup* g, uint32_t ticks)
         if (left() == N) {                    /* this tick latches: the running set has finished */
             if (gs_cur_valid)
                 for (uint8_t i = 0; i < g->count; i++) {
-                    const PulDirPulse s = st(g->axes[i]->slot);
+                    const PulDirSnap s = st(g->axes[i]->slot);
                     const uint64_t aim = group_aim(g, i, gs_cur);
-                    int64_t e = (int64_t)(s.P - aim);
+                    int64_t e = (int64_t)(s.Pb - aim);
                     int64_t c = (int64_t)(((uint64_t)(uint32_t)s.count << 32) - aim);
                     e = e < 0 ? -e : e;
                     c = c < 0 ? -c : c;
@@ -3565,7 +3560,7 @@ static void t_homing(void)
     assert(adj_inc > 0 && adj_inc <= (int64_t)(4000.0 / TICK_HZ * 4294967296.0 * 1.01));
     assert(PulDir_isHomed(a) && PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
     assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && PulDir_homeState(a) == PULDIR_HOME_IDLE);
-    assert(st(0).P == (uint64_t)100 << 32 && !high(0));
+    assert(st(0).Pb == (uint64_t)100 << 32 && !high(0));
     PulDir_loop(a);
     assert(nlines == 1 && strcmp(lines[0], "[a0] homed at 100.0000") == 0);
 

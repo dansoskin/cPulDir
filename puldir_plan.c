@@ -183,10 +183,10 @@ static void home_jog(PulDir* a, bool away)
 static bool home_datum(PulDir* a, PulDirInc* out)
 {
     const int32_t c = (int32_t)roundf(a->home_zero * a->conv);   /* checked by homeStart */
-    PulDirPulse s;
+    PulDirSnap s;
     port_lock();
-    puldir_pulse_read(a->slot, &s);
-    const bool rest = s.inc == 0 && !puldir_pul_high(a->slot);
+    puldir_pulse_read(a->slot, 0u, &s);
+    const bool rest = s.inc == 0 && !s.high;
     if (rest)
         puldir_set_datum(a->slot, c);
     port_unlock();
@@ -422,20 +422,8 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
 /* ---- fault, enable delay and release (5.8), for every axis, group members too ---- */
 
-/* Under the lock, after a kill: slot k's snapshot again, as the loop in puldir_plan_tick takes it. */
-static void refresh(uint8_t k, uint32_t ahead, PulDirSnap* snap)
-{
-    PulDirPulse s;
-    puldir_pulse_read(k, &s);
-    snap[k].Pb = s.P + (uint64_t)((int64_t)s.inc * ahead);
-    snap[k].count = s.count;
-    snap[k].live = s.inc;
-    snap[k].dir = s.dir;
-    snap[k].high = puldir_pul_high(k);
-}
-
 /* Before the groups and axes run. A latch halts under the lock, the axis or its whole group, and
- * refreshes the snapshots of what it stopped; run_axis then reads the halt's requests. */
+ * reads the snapshots of what it stopped again; run_axis then reads the halt's requests. */
 static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t ahead,
                     PulDirSnap* snap, PulDirInc* out)
 {
@@ -491,11 +479,11 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         g->faulted = true;
         for (uint8_t i = 0; i < g->count; i++) {
             g->axes[i]->held = true;
-            refresh(g->axes[i]->slot, ahead, snap);
+            puldir_pulse_read(g->axes[i]->slot, ahead, &snap[g->axes[i]->slot]);
         }
     } else {
         puldir_halt_locked(a);
-        refresh(a->slot, ahead, snap);
+        puldir_pulse_read(a->slot, ahead, &snap[a->slot]);
     }
     port_unlock();
 }
@@ -525,8 +513,6 @@ void puldir_plan_tick(void)
 {
     if (!puldir_timing.set)
         return;                                 /* started with no valid timing, so with no axis */
-    PulDirPulse s[PULDIR_MAX_AXES];
-    bool high[PULDIR_MAX_AXES];
     const uint8_t n = puldir_naxes;
 
     /* The pins first. A pin read can be preempted by pulse ticks, and one that ran
@@ -538,25 +524,15 @@ void puldir_plan_tick(void)
         flt[i] = a->has_flt && port_pin_read(a->flt) != a->flt_inverted;
     }
 
+    PulDirSnap snap[PULDIR_MAX_AXES];
     port_lock();                                /* one consistent instant for every axis */
     /* Ticks the live increments still run before the next latch. At a boundary
      * (left == N) the set published below latches on the very next tick, so none. */
     const uint32_t ahead = puldir_left() % (uint32_t)N;
-    const uint32_t now = PulDir_ticks();        /* the tick count P was read at */
-    for (uint8_t i = 0; i < n; i++) {
-        puldir_pulse_read(i, &s[i]);
-        high[i] = puldir_pul_high(i);
-    }
+    const uint32_t now = PulDir_ticks();        /* the tick count the positions were read at */
+    for (uint8_t i = 0; i < n; i++)
+        puldir_pulse_read(i, ahead, &snap[i]);  /* D5 prediction */
     port_unlock();
-
-    PulDirSnap snap[PULDIR_MAX_AXES];
-    for (uint8_t i = 0; i < n; i++) {
-        snap[i].Pb = s[i].P + (uint64_t)((int64_t)s[i].inc * ahead);   /* D5 prediction */
-        snap[i].count = s[i].count;
-        snap[i].live = s[i].inc;
-        snap[i].dir = s[i].dir;
-        snap[i].high = high[i];
-    }
 
     PulDirInc* out = puldir_shadow();
     bool was[PULDIR_MAX_AXES];
@@ -568,7 +544,7 @@ void puldir_plan_tick(void)
     for (uint8_t i = 0; i < n; i++) {
         PulDir* a = puldir_axes[i];
         if (a->mode != PULDIR_MODE_GROUP)
-            run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].live, snap[i].high, now, ahead);
+            run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].inc, snap[i].high, now, ahead);
         release(a, was[i], now);
     }
     puldir_publish();

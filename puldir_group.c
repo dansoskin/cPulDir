@@ -119,8 +119,8 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
     if (why == PULDIR_R_NONE) {
         port_lock();                            /* at rest: the counts do not move */
         for (uint8_t i = 0; i < n; i++) {
-            PulDirPulse p;
-            puldir_pulse_read(g->axes[i]->slot, &p);
+            PulDirSnap p;
+            puldir_pulse_read(g->axes[i]->slot, 0u, &p);
             count[i] = p.count;
         }
         port_unlock();
@@ -227,11 +227,11 @@ void puldir_group_halt(PulDirGroup* g, PulDirInc* shadow)
         return;
     for (uint8_t i = 0; i < g->count; i++) {
         PulDir* a = g->axes[i];
-        PulDirPulse p;
+        PulDirSnap p;
         puldir_kill(a->slot);
         if (shadow != NULL)
             shadow[a->slot].inc = 0;
-        puldir_pulse_read(a->slot, &p);
+        puldir_pulse_read(a->slot, 0u, &p);
         a->target = (uint64_t)(uint32_t)p.count << 32;
         /* The member's generator sat at rest through the move; the plan tick puts
          * it where the pulses stopped. Motion is already over without it. */
@@ -358,7 +358,7 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
         a->vel_out = s->vel == 0.0f ? 0.0f : (float)d * s->vel;
         const bool done = puldir_steer(a, &out[a->slot], T, end, pb, arrival, !s->stopping);
         settled = settled && done;
-        rest = rest && !q->high && q->live == 0;
+        rest = rest && !q->high && q->inc == 0;
     }
     if (settled && s->done && rest)
         finish(g, sn);

@@ -179,16 +179,15 @@ void puldir_kill(uint8_t slot)
 
 uint32_t puldir_left(void) { return left; }
 
-void puldir_pulse_read(uint8_t slot, PulDirPulse* out)
+void puldir_pulse_read(uint8_t slot, uint32_t ahead, PulDirSnap* out)
 {
     const Axis* a = &ax[slot];
-    out->P = pos(a);
+    out->Pb = pos(a) + (uint64_t)((int64_t)a->inc * ahead);
     out->count = (int32_t)a->count;
     out->inc = a->inc;
     out->dir = a->dir_now;
+    out->high = a->pul_high;
 }
-
-bool puldir_pul_high(uint8_t slot) { return ax[slot].pul_high; }
 
 void puldir_set_datum(uint8_t slot, int32_t count)
 {

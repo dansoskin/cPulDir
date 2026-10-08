@@ -10,14 +10,15 @@
 
 typedef struct { int32_t inc; int8_t dir; } PulDirInc;   /* D3: dir is +1 or -1 */
 
-/* The pulse tick's state for one slot, read under the lock. */
+/* One axis's pulse state, read under the lock: the plan tick takes every axis's at one instant. */
 typedef struct {
-    uint64_t P;                               /* 32.32 pulse position */
+    uint64_t Pb;                              /* the 32.32 pulse position, predicted ahead ticks on (D5, E11) */
     int32_t  count;                           /* edges emitted, signed (D18) */
-    int32_t  inc;                             /* live increment */
-    int8_t   dir;                             /* the pin's current direction, not the last published
+    int32_t  inc;                             /* the live increment */
+    int8_t   dir;                             /* the direction the pin shows, not the last published
                                                  one: the plan tick keeps that per axis (dir_out) */
-} PulDirPulse;
+    bool     high;                            /* the pulse pin is high */
+} PulDirSnap;
 
 /* main -> plan requests (D17): set under the lock, applied by the next plan tick */
 enum {
@@ -52,15 +53,6 @@ uint32_t puldir_ms_ticks(uint32_t ms);
 /* main -> plan requests on a group */
 enum { GROUP_REQ_STOP = 1u << 0 };
 
-/* One axis at the plan tick's instant, read under one lock with every other. */
-typedef struct {
-    uint64_t Pb;                              /* the pulse position predicted at the next boundary (D5, E11) */
-    int32_t  count;                           /* edges emitted */
-    int32_t  live;                            /* the running increment */
-    int8_t   dir;                             /* the direction the pin shows */
-    bool     high;                            /* the pulse pin is high */
-} PulDirSnap;
-
 /* event bits */
 enum {
     PULDIR_EV_REFUSED = 1u << 0, PULDIR_EV_LANDED = 1u << 1, PULDIR_EV_STREAM_TIMEOUT = 1u << 2,
@@ -82,8 +74,8 @@ void       puldir_kill(uint8_t slot);         /* under the lock: zero live and p
 /* Under the lock: ticks left in this interval, N when the next tick is the
  * boundary that latches. The live inc runs left % N more ticks. */
 uint32_t   puldir_left(void);
-void       puldir_pulse_read(uint8_t slot, PulDirPulse* out);   /* under the lock */
-bool       puldir_pul_high(uint8_t slot);     /* under the lock */
+/* Under the lock: the slot's state, its position predicted ahead ticks on (0: the position itself). */
+void       puldir_pulse_read(uint8_t slot, uint32_t ahead, PulDirSnap* out);
 /* Under the lock: count, P and edge to a whole pulse. The caller guarantees the
  * axis is at rest, its live inc 0 and its pulse pin low. */
 void       puldir_set_datum(uint8_t slot, int32_t count);

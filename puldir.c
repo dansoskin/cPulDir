@@ -395,9 +395,9 @@ void PulDir_stop(PulDir* a)
 void puldir_halt_locked(PulDir* a)
 {
     if (a->slot < PULDIR_MAX_AXES) {
-        PulDirPulse s;
+        PulDirSnap s;
         puldir_kill(a->slot);
-        puldir_pulse_read(a->slot, &s);
+        puldir_pulse_read(a->slot, 0u, &s);
         a->target = (uint64_t)(uint32_t)s.count << 32;
     }
     if (a->mode == PULDIR_MODE_HOMING)
@@ -437,8 +437,10 @@ bool PulDir_enable(PulDir* a, bool on)
     if (on) {
         puldir_wake(a);
     } else {
-        const bool pulse_high = a->slot < PULDIR_MAX_AXES && puldir_pul_high(a->slot);
-        if (pulse_high)
+        PulDirSnap s = { 0, 0, 0, 1, false };
+        if (a->slot < PULDIR_MAX_AXES)
+            puldir_pulse_read(a->slot, 0u, &s);
+        if (s.high)
             a->ena_off = true;
         else
             port_pin_write(a->ena, a->ena_inverted);
@@ -665,9 +667,9 @@ static int32_t emitted(const PulDir* a)
 {
     if (a->slot >= PULDIR_MAX_AXES)
         return 0;
-    PulDirPulse s;
+    PulDirSnap s;
     port_lock();
-    puldir_pulse_read(a->slot, &s);
+    puldir_pulse_read(a->slot, 0u, &s);
     port_unlock();
     return s.count;
 }
@@ -697,12 +699,12 @@ bool PulDir_setPosition(PulDir* a, float pos)
         const int32_t c = (int32_t)x;
         const bool reg = a->slot < PULDIR_MAX_AXES;
         port_lock();
-        PulDirPulse s = { 0, 0, 0, 1 };
+        PulDirSnap s = { 0, 0, 0, 1, false };
         if (reg)
-            puldir_pulse_read(a->slot, &s);
+            puldir_pulse_read(a->slot, 0u, &s);
         /* IDLE and not moving imply no increment left and the pin low, which
          * puldir_set_datum needs; checked anyway, it is two loads. */
-        if (a->mode != PULDIR_MODE_IDLE || a->moving || s.inc != 0 || (reg && puldir_pul_high(a->slot))) {
+        if (a->mode != PULDIR_MODE_IDLE || a->moving || s.inc != 0 || s.high) {
             why = PULDIR_R_NOT_IDLE;
         } else {
             if (reg)
