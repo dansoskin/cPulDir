@@ -176,36 +176,38 @@ static bool limits_busy(PulDirMode m)
 }
 
 /* Checks four limits (user units) as MotionProfile_setLimits will see them, the rate cap being the
- * axis's own, then stores them, and def too, under the lock that reads the frozen window (D17). */
+ * axis's own, then stores them, and def too (D17). The check reads the profile's frozen window and
+ * the acceleration its ring may still hold (E32), so it runs under the lock: a few compares, a ceilf
+ * and two divisions, about 100 cycles. */
 static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const char* call)
 {
-    const float conv = a->conv, dt = puldir_timing.dt;
+    const float conv = a->conv, cap = rate_cap(conv);
     const MotionLimits L = { lim[0] * conv, lim[1] * conv, lim[2] * conv, lim[3] * conv };
-    const MotionLimitsCheck check = MotionProfile_checkLimits(L, dt, 0);
     PulDirRefusal why = PULDIR_R_NONE;
     float value = 0.0f;
-    if (check == MOTION_LIMITS_INVALID) {
+    port_lock();
+    const MotionLimitsCheck check = MotionProfile_checkLimits(&a->prof, L);
+    if (check == MOTION_LIMITS_INVALID)
         why = PULDIR_R_ARG;
-    } else if (!(lim[0] < rate_cap(conv))) {
+    else if (!(lim[0] < cap))
         why = PULDIR_R_RATE;
-        value = rate_cap(conv);
-    } else if (check == MOTION_LIMITS_TAPS) {
+    else if (check == MOTION_LIMITS_TAPS)
         why = PULDIR_R_TAPS;
-        value = MotionProfile_minJerk(L.amax, L.dmax, dt) / conv;   /* the log rounds it up to fit */
-    } else {
-        port_lock();
-        if (limits_busy(a->mode))
-            why = PULDIR_R_MODE;
-        else if (MotionProfile_checkLimits(L, dt, a->prof.done ? 0 : a->prof.n) == MOTION_LIMITS_WINDOW)
-            why = PULDIR_R_WINDOW;          /* the window is frozen in flight (5.2) */
-        else {
-            memcpy(a->lim, lim, sizeof a->lim);
-            if (defaults)
-                memcpy(a->def, lim, sizeof a->def);
-            a->req |= REQ_LIMITS;
-        }
-        port_unlock();
+    else if (limits_busy(a->mode))
+        why = PULDIR_R_MODE;
+    else if (check == MOTION_LIMITS_WINDOW)
+        why = PULDIR_R_WINDOW;              /* the window is frozen in flight (5.2) */
+    else {
+        memcpy(a->lim, lim, sizeof a->lim);
+        if (defaults)
+            memcpy(a->def, lim, sizeof a->def);
+        a->req |= REQ_LIMITS;
     }
+    port_unlock();
+    if (why == PULDIR_R_RATE)
+        value = cap;
+    else if (why == PULDIR_R_TAPS)          /* the log rounds the floor up to fit */
+        value = MotionProfile_minJerk(L.amax, L.dmax, puldir_timing.dt) / conv;
     if (why != PULDIR_R_NONE) {
         puldir_refuse(a, call, why, value);
         return false;

@@ -63,7 +63,8 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
         && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
         && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c
-        && a->run == b->run && a->run_sign == b->run_sign;
+        && a->run == b->run && a->run_sign == b->run_sign
+        && a->hist_acc == b->hist_acc && a->hist_left == b->hist_left;
 }
 
 static void test_setup(void)
@@ -839,6 +840,60 @@ static void test_reversal_asymmetric(void)
            (unsigned)p.n);
 }
 
+/* A live limit change meets a ring still holding motion under the old limits (review, E32): the
+ * frozen window must bound a step from the largest acceleration retained to the largest the new
+ * limits allow. Lowering amax and dmax under the same jerk always fits. */
+static void test_live_limits_history(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setEndless(&p, 15.0f));
+    for (int i = 0; i < 250; i++)
+        step(&p);
+    assert(p.acc > 29.0f);                    /* the ring holds the amax 30 ramp */
+    {
+        /* the reviewer's case: on the frozen window alone it was accepted, and the next jerk was 144 */
+        const MotionProfile before = p;
+        const MotionLimits soft = { 15, 1, 1, 10 };
+        assert(MotionProfile_checkLimits(&p, soft) == MOTION_LIMITS_WINDOW);
+        assert(!MotionProfile_setLimits(&p, soft));
+        assert(!MotionProfile_setLimits(&p, (MotionLimits){ 15, 1, 1, 150 }));   /* (1 + 30) / 0.15 = 206.7 taps */
+        assert(profiles_equal(&before, &p));
+    }
+    /* a jerk the history allows, (1 + 30) / 0.16 = 193.8 taps: the bound holds through the turnover */
+    assert(MotionProfile_setLimits(&p, (MotionLimits){ 15, 1, 1, 160 }));
+    assert(p.hist_acc == 30.0f && p.hist_left == 200);
+    g_amax_carried = 30.0f;
+    float peak = 0.0f;
+    for (int i = 0; i < 2 * (int)p.n; i++) {
+        const float a0 = p.acc;
+        step(&p);
+        peak = fmaxf(peak, fabsf(p.acc - a0) / p.dt);
+    }
+    g_amax_carried = 0.0f;
+    assert(peak >= 100.0f && p.hist_left == 0 && p.hist_acc == 0.0f);   /* the retained ramp did leave */
+
+    /* lowering amax and dmax alone; then every field at once, both ways, and beyond the slack */
+    MotionProfile q = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setEndless(&q, 15.0f));
+    for (int i = 0; i < 250; i++)
+        step(&q);
+    assert(MotionProfile_setLimits(&q, (MotionLimits){ 15, 1, 1, 300 }));
+    assert(MotionProfile_setLimits(&q, (MotionLimits){ 10, 20, 25, 400 }));   /* (25 + 30) / 0.4 = 137.5 */
+    g_amax_carried = 30.0f;
+    for (int i = 0; i < 100; i++)
+        step(&q);
+    assert(!MotionProfile_setLimits(&q, (MotionLimits){ 20, 40, 35, 390 }));  /* (40 + 40) / 0.39 = 205 */
+    assert(MotionProfile_setLimits(&q, (MotionLimits){ 20, 30, 30, 300 }));   /* (30 + 30) / 0.3 = 200 */
+    for (int i = 0; i < 400; i++)
+        step(&q);
+    g_amax_carried = 0.0f;
+    assert(q.hist_left == 0 && fabsf(q.vel - 15.0f) <= 1e-3f);   /* at the jog speed again */
+    MotionProfile_stop(&q);
+    run_to_done(&q, 10000);
+    printf("ok live_limits_history (peak jerk %.1f of 160 through the turnover)\n", (double)peak);
+}
+
 /* D1: seeding the idle generator into motion, as the axis leaves a stream. */
 static void test_seed(void)
 {
@@ -905,6 +960,7 @@ int main(void)
     test_retarget_draining();
     test_drain_mixed();
     test_reversal_asymmetric();
+    test_live_limits_history();
     test_seed();
     return 0;
 }

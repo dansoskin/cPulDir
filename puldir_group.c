@@ -143,11 +143,13 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
     if (why == PULDIR_R_NONE) {
         bad = g->axes[0];                       /* a path refusal: reported on the first member */
         any = path_limits(g, delta, &L);
-        /* Invalid is an underflow: limits too small for the travel. Each member's own window fits
-         * and the tightest jerk's member bounds the ratio, so only float rounding at the 256-tap
-         * edge lands on the taps. */
-        const MotionLimitsCheck check = any ? MotionProfile_checkLimits(L, puldir_timing.dt, 0)
-                                            : MOTION_LIMITS_OK;
+        /* Not active: the plan tick leaves s alone, and a halt leaves it in flight, so it is reset
+         * first, at rest, with no frozen window and no history for the check; refused, it stays so,
+         * unread. Invalid is an underflow: limits too small for the travel. Each member's own window
+         * fits and the tightest jerk's member bounds the ratio, so only float rounding at the
+         * 256-tap edge lands on the taps. */
+        (void)MotionProfile_init(&g->s, 0.0f, puldir_timing.dt);   /* set, so in range: cannot refuse */
+        const MotionLimitsCheck check = any ? MotionProfile_checkLimits(&g->s, L) : MOTION_LIMITS_OK;
         if (check == MOTION_LIMITS_INVALID)
             why = PULDIR_R_ARG;
         else if (check == MOTION_LIMITS_TAPS)
@@ -161,7 +163,6 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     /* Not active: the plan tick leaves s and these fields alone. */
     if (any) {
-        (void)MotionProfile_init(&g->s, 0.0f, puldir_timing.dt);
         (void)MotionProfile_setLimits(&g->s, L);   /* checked above as the generator checks */
         (void)MotionProfile_setTarget(&g->s, 1.0f);
     } else {

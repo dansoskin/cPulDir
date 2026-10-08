@@ -1208,6 +1208,20 @@ static void check_ramps(bool after)
     assert(dv <= fmaxf(L.amax, L.dmax) * (DT) * 1.0001f + 1e-3f);
 }
 
+/* After every plan tick: axis 0's acceleration steps within its jerk (pulses/s^2 per interval). */
+static float aprev;
+static void check_jerk(bool after)
+{
+    check_published(after);
+    if (!after) {
+        aprev = ax[0].prof.acc;
+        return;
+    }
+    const float jmax = ax[0].prof.lim.jmax;
+    if (jmax > 0.0f)
+        assert(fabsf(ax[0].prof.acc - aprev) <= jmax * DT * 1.001f + 1.0f);
+}
+
 /* At rest the pulse position is within a pulse of the count, on the side the
  * hysteresis leaves it (D3) for the direction of travel, when there is one. */
 static void check_rest(uint8_t i, int travel)
@@ -1609,6 +1623,26 @@ static void t_live_limits(void)
     const float logged = strtof(strstr(lines[0], "below ") + 6, NULL);
     assert(logged >= floor_ && logged - floor_ <= 1e-4f + 3e-6f * floor_);
     assert(PulDir_setJerk(a, logged) && PulDir_jerk(a) == logged);   /* the logged value fits */
+
+    /* E32: in flight the ring still holds motion under the limits it was made under. Lowered
+     * accel and decel with a jerk that cannot bound the retained ramp are refused; with one that
+     * can, accepted, and the acceleration steps within it through the turnover. */
+    fake_on_plan(check_jerk);
+    assert(PulDir_setDefaults(a, 20.0f, 30.0f, 30.0f, 300.0f * hz));
+    fake_run(N);
+    assert(a->prof.n == 200);
+    assert(PulDir_moveTo(a, 300.0f));
+    fake_run(20u * N);
+    assert(!a->prof.done && a->prof.lim.amax == 3000.0f);
+    assert(!PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 10.0f * hz) && a->refusal == PULDIR_R_WINDOW);
+    assert(PulDir_acceleration(a) == 30.0f && PulDir_jerk(a) == 300.0f * hz && a->def[1] == 30.0f);
+    assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz));   /* (100 + 3000) / (16000 dt) = 194 taps */
+    fake_run(300u * N);                       /* the ring turns over under the new limits */
+    assert(a->prof.lim.amax == 100.0f && a->prof.lim.jmax == 16000.0f * hz && a->prof.n == 200);
+    assert(a->def[1] == 1.0f && PulDir_jerk(a) == 160.0f * hz);
+    PulDir_stop(a);
+    run_until_idle(a, 30u * TICK_HZ);
+    fake_on_plan(check_published);
 }
 
 /* The refused value of a jerk below the taps is the floor as a plain quotient, and the logged

@@ -35,6 +35,9 @@ typedef struct {
     uint16_t drain;                       /* calls since landing, up to n + 1 */
     uint16_t run;                         /* the newest taps sharing a sign, zeros included, at most n */
     int8_t   run_sign;                    /* that sign; 0 while the run holds only zeros */
+    float    hist_acc;                    /* the largest amax or dmax of limits replaced in flight whose
+                                             motion the ring may still hold (E32) */
+    uint16_t hist_left;                   /* calls until the ring has turned over since; 0: no history */
     float    sum, sum_c;                  /* running sum of the ring, its Kahan compensation */
     float    wsum, wsum_c;                /* the ring weighted n-1 (newest) down to 0; pos = p_t - wsum*dt/n */
 } MotionProfile;
@@ -42,8 +45,9 @@ typedef struct {
 typedef enum { MOTION_LIMITS_OK, MOTION_LIMITS_INVALID, MOTION_LIMITS_TAPS, MOTION_LIMITS_WINDOW } MotionLimitsCheck;
 
 bool  MotionProfile_init(MotionProfile*, float pos, float dt);
-/* What setLimits would answer: frozen_n is the window in flight, 0 when done. */
-MotionLimitsCheck MotionProfile_checkLimits(MotionLimits L, float dt, uint16_t frozen_n);
+/* What setLimits would answer for this profile. In flight its window is frozen and must also bound
+ * the acceleration its ring may still hold from the limits being replaced (E32). */
+MotionLimitsCheck MotionProfile_checkLimits(const MotionProfile*, MotionLimits);
 bool  MotionProfile_setLimits(MotionProfile*, MotionLimits);
 bool  MotionProfile_setTarget(MotionProfile*, float target);
 bool  MotionProfile_setEndless(MotionProfile*, float speed);

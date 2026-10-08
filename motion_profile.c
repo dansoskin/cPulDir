@@ -44,6 +44,14 @@ static void clear_ring(MotionProfile* p)
     p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
     p->run = 0;
     p->run_sign = 0;
+    p->hist_acc = 0.0f;
+    p->hist_left = 0;
+}
+
+/* The largest acceleration the ring may hold: the current limits' and any replaced within n calls. */
+static float acc_history(const MotionProfile* p)
+{
+    return fmaxf(p->hist_acc, fmaxf(p->lim.amax, p->lim.dmax));
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -63,25 +71,34 @@ bool MotionProfile_init(MotionProfile* p, float pos, float dt)
     return true;
 }
 
-MotionLimitsCheck MotionProfile_checkLimits(MotionLimits L, float dt, uint16_t frozen_n)
+MotionLimitsCheck MotionProfile_checkLimits(const MotionProfile* p, MotionLimits L)
 {
     if (!limits_valid(L))
         return MOTION_LIMITS_INVALID;
-    if (window(L, dt) == 0)
+    if (window(L, p->dt) == 0)
         return MOTION_LIMITS_TAPS;
-    /* A window frozen in flight would not bound this jerk. */
-    if (frozen_n != 0 && L.jmax != 0.0f && acc_span(L.amax, L.dmax) / (L.jmax * dt) > (float)frozen_n)
-        return MOTION_LIMITS_WINDOW;
+    /* In flight the window is frozen, and the ring may still hold motion under any limits in force
+     * during its last n calls (E32): it must bound a step between the largest of those accelerations
+     * and the largest the new limits allow. New limits larger than the history make this the plain
+     * frozen-window test, 2 max(amax, dmax) over n. */
+    if (!p->done && L.jmax != 0.0f) {
+        const float a_new = fmaxf(L.amax, L.dmax);
+        if ((a_new + fmaxf(a_new, acc_history(p))) / (L.jmax * p->dt) > (float)p->n)
+            return MOTION_LIMITS_WINDOW;
+    }
     return MOTION_LIMITS_OK;
 }
 
 bool MotionProfile_setLimits(MotionProfile* p, MotionLimits L)
 {
-    if (MotionProfile_checkLimits(L, p->dt, p->done ? 0 : p->n) != MOTION_LIMITS_OK)
+    if (MotionProfile_checkLimits(p, L) != MOTION_LIMITS_OK)
         return false;
     if (p->done) {
         p->n = window(L, p->dt);
         clear_ring(p);
+    } else {                              /* the replaced limits' motion stays in the ring for n calls */
+        p->hist_acc = acc_history(p);
+        p->hist_left = p->n;
     }
     p->lim = L;
     return true;
@@ -275,6 +292,8 @@ void MotionProfile_advance(MotionProfile* p)
 {
     if (p->done)
         return;
+    if (p->hist_left > 0 && --p->hist_left == 0)
+        p->hist_acc = 0.0f;               /* the ring has turned over since the limits changed */
     const bool was_landed = p->landed;
     const float u = trapezoid(p);         /* 0 once landed: the ring drains through the same push */
     const float vel0 = p->vel, w0 = p->wsum;
