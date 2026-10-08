@@ -144,6 +144,7 @@ void  PulDir_attachPins(PulDir*, puldir_pin_t pulse, puldir_pin_t dir,
 void  PulDir_attachEnable(PulDir*, puldir_pin_t, bool inverted);
 void  PulDir_attachFault(PulDir*, puldir_pin_t, bool inverted);
 void  PulDir_attachFaultClear(PulDir*, puldir_pin_t, bool inverted);
+/* IDLE only. Limits and defaults are held in pulses, so call setDefaults after it. */
 bool  PulDir_setConversion(PulDir*, float pulses_per_unit);
 bool  PulDir_setDefaults(PulDir*, float speed, float accel, float decel, float jerk);
 bool  PulDir_restoreDefaults(PulDir*);

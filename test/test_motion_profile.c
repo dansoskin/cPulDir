@@ -731,6 +731,40 @@ static void test_retarget_draining(void)
     printf("ok retarget_draining\n");
 }
 
+/* A new course on the call after landing starts from the landing step's velocity,
+ * not from rest: reversing there keeps every limit (the axis does it on arrival). */
+static void test_course_after_landing(float jmax)
+{
+    const MotionLimits L = { 15, 30, 30, jmax };
+    int sizable = 0;
+    for (int k = 0; k < 40; k++) {
+        const float to = 9.0f + 0.0371f * (float)k;
+        MotionProfile p = fresh(0.0f, 0.001f, L);
+        assert(MotionProfile_setTarget(&p, to));
+        while (!p.landed)
+            step(&p);
+        const float u = p.taps[(p.head + p.n - 1u) % p.n];   /* the landing step */
+        if (u > 0.5f * L.dmax * p.dt)
+            sizable++;
+        MotionProfile q = p, r = p;
+        assert(MotionProfile_setEndless(&p, k % 2 ? -15.0f : 15.0f));
+        assert(MotionProfile_setTarget(&q, to - 1.0f));
+        assert(MotionProfile_setTarget(&r, to + 1.0f));
+        for (int i = 0; i < 300; i++) {
+            step(&p);
+            step(&q);
+            step(&r);
+        }
+        MotionProfile_stop(&p);
+        run_to_done(&p, 10000);
+        run_to_done(&q, 10000);
+        run_to_done(&r, 10000);
+        assert(q.pos == to - 1.0f && r.pos == to + 1.0f);
+    }
+    assert(sizable >= 10);
+    printf("ok course_after_landing\n");
+}
+
 /* D1: seeding the idle generator into motion, as the axis leaves a stream. */
 static void test_seed(void)
 {
@@ -790,6 +824,7 @@ int main(void)
         test_lowered_vmax(jmax);
         test_lowered_amax(jmax);
         test_dt_independence(jmax);
+        test_course_after_landing(jmax);
     }
     test_frozen_window();
     test_rebase();

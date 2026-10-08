@@ -46,16 +46,23 @@ static void publish(PulDir* a, PulDirInc* out, int32_t inc)
     out->dir = a->dir_out;
 }
 
-/* PROFILE: advance the generator and aim this interval's end at its position.
- * T, pb and end are 32.32 relative to base. */
-static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, bool pul_high)
+/* PROFILE and STOPPING: aim this interval's end at the generator's position.
+ * T, pb and end are 32.32 relative to base; live is the running increment. */
+static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
+                        bool pul_high)
 {
     MotionProfile* p = &a->prof;
     MotionProfile_advance(p);
-    if (p->landed)                              /* at rest in the trapezoid: its target is final */
-        a->target = base + (uint64_t)to_fix(p->target);
-    const int64_t T = (int64_t)(a->target - base);
     int64_t end = to_fix(p->pos);
+    if (!a->arrived) {
+        /* At rest the trapezoid's target is final, fractional after a stop (D4); a
+         * jog or a stop in progress has none, so it reads the profile. */
+        if (p->landed)
+            a->target = base + (uint64_t)to_fix(p->target);
+        else if (p->endless || p->stopping)
+            a->target = base + (uint64_t)end;
+    }
+    const int64_t T = (int64_t)(a->target - base);
     a->vel_out = p->vel;
 
     if (!a->arrived && p->landed && end == T) {
@@ -67,9 +74,10 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, bo
         a->settle = 2;
         publish(a, out, div_away(T - pb));
     } else if (!a->arrived) {
-        /* D6: hold the end M short of the target on the approach side until arrival. */
+        /* D6: hold the end M short of the target on the approach side until
+         * arrival. Only toward a target: a jog or a stop in progress has none. */
         const int64_t gap = T - end;
-        if (gap < M && gap > -M && T != pb)
+        if (!p->endless && !p->stopping && gap < M && gap > -M && T != pb)
             end = T > pb ? T - M : T + M;
         publish(a, out, div_trunc(end - pb));
     } else {
@@ -85,7 +93,10 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, bo
             if (a->settle > 0)
                 a->settle--;
         }
-        if (a->settle == 0 && p->done && !pul_high) {
+        /* The live increment too: a plan tick run twice in an interval can see
+         * the zeros published before the final set has run out. */
+        if (a->settle == 0 && p->done && !pul_high && live == 0) {
+            a->target = base;                   /* the target, or the last integer a stop reached */
             a->mode = PULDIR_MODE_IDLE;
             a->moving = false;
             a->events |= PULDIR_EV_LANDED;
@@ -93,15 +104,22 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, bo
     }
 }
 
-static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, bool pul_high)
+static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int32_t live,
+                     bool pul_high)
 {
     /* 1. Re-base on the whole pulses emitted. */
     const uint64_t base = (uint64_t)(uint32_t)count << 32;
     const int32_t shift = (int32_t)((uint32_t)count - (uint32_t)a->origin);
+    const int64_t pb = (int64_t)(Pb - base);
     a->origin = count;
 
-    /* 2. Requests. Main writes req only under the lock, which masks this tick,
-     * so reading and clearing it here needs none. */
+    /* 2. Shift the generator onto the new origin. A profile heading for a target
+     * takes the axis's target relative to it. */
+    const float trel = to_pulses((int64_t)(a->target - base));
+    MotionProfile_rebase(&a->prof, (float)shift, trel);
+
+    /* 3. Requests (main writes req under the lock, which masks this tick). Halt
+     * first, so later commands start where the pulses stopped; a stop last. */
     const uint16_t req = a->req;
     a->req = 0;
     if (req & REQ_LIMITS) {
@@ -109,19 +127,36 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, bool
         const MotionLimits L = { a->lim[0] * c, a->lim[1] * c, a->lim[2] * c, a->lim[3] * c };
         (void)MotionProfile_setLimits(&a->prof, L);  /* validated the same way by apply_limits */
     }
-    const float trel = to_pulses((int64_t)(a->target - base));
-    if (req & REQ_TARGET) {
-        (void)MotionProfile_setTarget(&a->prof, trel);   /* trel is finite */
-        a->arrived = false;                     /* so must every request that sets a new target */
+    if (req & REQ_HALT) {
+        /* puldir_kill zeroed the increments, so pb is where the pulses stopped */
+        MotionProfile_halt(&a->prof);
+        (void)MotionProfile_setPosition(&a->prof, to_pulses(pb));
+        a->arrived = false;
         a->settle = 0;
     }
-
-    /* 3. Shift the generator onto the new origin; the target is set relative to it. */
-    MotionProfile_rebase(&a->prof, (float)shift, trel);
+    if (req & REQ_SETPOS)                       /* the datum is count, which is the origin */
+        (void)MotionProfile_setPosition(&a->prof, 0.0f);
+    if (req & (REQ_TARGET | REQ_ENDLESS)) {
+        if (req & REQ_TARGET)
+            (void)MotionProfile_setTarget(&a->prof, trel);
+        else
+            (void)MotionProfile_setEndless(&a->prof, a->req_arg[0]);
+        a->arrived = false;                     /* so must every request that sets a new course */
+        a->settle = 0;
+    }
+    if (req & REQ_STOP)
+        MotionProfile_stop(&a->prof);
 
     switch (a->mode) {
     case PULDIR_MODE_PROFILE:
-        run_profile(a, out, base, (int64_t)(Pb - base), pul_high);
+    case PULDIR_MODE_STOPPING:
+        run_profile(a, out, base, pb, live, pul_high);
+        break;
+    case PULDIR_MODE_IDLE:
+        publish(a, out, 0);
+        a->vel_out = 0.0f;
+        if (a->moving && !pul_high && live == 0)    /* after a halt: the last pulse is lowered */
+            a->moving = false;
         break;
     default:
         publish(a, out, 0);
@@ -149,7 +184,7 @@ void puldir_plan_tick(void)
     PulDirInc* out = puldir_shadow();
     for (uint8_t i = 0; i < n; i++) {
         const uint64_t Pb = s[i].P + (uint64_t)((int64_t)s[i].inc * ahead);   /* D5 prediction */
-        run_axis(puldir_axes[i], &out[i], Pb, s[i].count, high[i]);
+        run_axis(puldir_axes[i], &out[i], Pb, s[i].count, s[i].inc, high[i]);
     }
     puldir_publish();
 }

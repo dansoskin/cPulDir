@@ -187,11 +187,15 @@ static bool motion_refused(PulDir* a, const char* call)
     return true;
 }
 
+/* The motion requests: a newer one replaces any older one still pending, so
+ * the plan tick applies only the latest (a halt is kept: it comes first). */
+#define REQ_MOTION (REQ_TARGET | REQ_ENDLESS | REQ_STOP)
+
 /* Under the lock: what the caller may read back at once is set here (D17). */
 static void take_target(PulDir* a, uint64_t target)
 {
     a->target = target;
-    a->req |= REQ_TARGET;
+    a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_TARGET);
     a->mode = PULDIR_MODE_PROFILE;
     a->moving = true;
 }
@@ -232,6 +236,64 @@ bool PulDir_moveBy(PulDir* a, float distance)
     return ok;
 }
 
+/* D7: run at speed until told otherwise. The count carries on (2.2). */
+bool PulDir_jog(PulDir* a, float speed)
+{
+    if (speed == 0.0f) {
+        PulDir_stop(a);
+        return true;
+    }
+    if (motion_refused(a, "jog"))
+        return false;
+    const float cap = (float)(PULDIR_TICK_HZ / 2u) / a->conv;
+    PulDirRefusal why = PULDIR_R_NONE;
+    if (!isfinite(speed))
+        why = PULDIR_R_ARG;
+    else if (!(fabsf(speed) < cap))
+        why = PULDIR_R_RATE;
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "jog", why, why == PULDIR_R_RATE ? cap : 0.0f);
+        return false;
+    }
+    const float v = speed * a->conv;
+    port_lock();
+    a->req_arg[0] = v;
+    a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
+    a->mode = PULDIR_MODE_PROFILE;
+    a->moving = true;
+    port_unlock();
+    return true;
+}
+
+/* Ramped: the plan tick stops the generator from where it is. A pending target
+ * or jog is applied first, so the stop is from the motion as commanded. */
+void PulDir_stop(PulDir* a)
+{
+    port_lock();
+    if (a->mode != PULDIR_MODE_IDLE) {
+        a->req |= REQ_STOP;
+        a->mode = PULDIR_MODE_STOPPING;
+    }
+    port_unlock();
+}
+
+/* Immediate (D17): no rising edge after the tick this is called in. The target
+ * is where the pulses stopped; isMoving clears once the plan tick sees the pin low. */
+void PulDir_halt(PulDir* a)
+{
+    port_lock();
+    if (a->slot < PULDIR_MAX_AXES) {
+        PulDirPulse s;
+        puldir_kill(a->slot);
+        puldir_pulse_read(a->slot, &s);
+        a->target = (uint64_t)(uint32_t)s.count << 32;
+    }
+    a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_HALT);
+    a->mode = PULDIR_MODE_IDLE;
+    a->vel_out = 0.0f;
+    port_unlock();
+}
+
 /* ---- state ----------------------------------------------------------------- */
 
 static int32_t emitted(const PulDir* a)
@@ -256,6 +318,41 @@ float PulDir_target(PulDir* a)
     port_unlock();
     const int32_t whole = (int32_t)(uint32_t)(t >> 32);
     return ((float)whole + (float)(uint32_t)t * (1.0f / 4294967296.0f)) / a->conv;
+}
+
+/* D18: the datum, in IDLE only. The pulse tick's count, position and edge move
+ * together under the lock; the plan tick moves the generator (REQ_SETPOS). */
+bool PulDir_setPosition(PulDir* a, float pos)
+{
+    const float x = roundf(pos * a->conv);
+    PulDirRefusal why = PULDIR_R_NONE;
+    if (!(x >= -PULSES_MAX && x < PULSES_MAX)) {
+        why = PULDIR_R_ARG;
+    } else {
+        const int32_t c = (int32_t)x;
+        const bool reg = a->slot < PULDIR_MAX_AXES;
+        port_lock();
+        PulDirPulse s = { 0, 0, 0, 1 };
+        if (reg)
+            puldir_pulse_read(a->slot, &s);
+        /* IDLE and not moving imply no increment left and the pin low, which
+         * puldir_set_datum needs; checked anyway, it is two loads. */
+        if (a->mode != PULDIR_MODE_IDLE || a->moving || s.inc != 0 || (reg && puldir_pul_high(a->slot))) {
+            why = PULDIR_R_NOT_IDLE;
+        } else {
+            if (reg)
+                puldir_set_datum(a->slot, c);
+            a->target = (uint64_t)(uint32_t)c << 32;
+            a->homed = false;
+            a->req |= REQ_SETPOS;
+        }
+        port_unlock();
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "setPosition", why, 0.0f);
+        return false;
+    }
+    return true;
 }
 
 bool       PulDir_isMoving(PulDir* a) { return a->moving; }

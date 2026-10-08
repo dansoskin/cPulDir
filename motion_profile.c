@@ -174,8 +174,10 @@ static float trapezoid(MotionProfile* p)
 {
     const MotionLimits L = p->lim;
     const float dt = p->dt, dd = L.dmax * dt;
-    if (p->landed)
+    if (p->landed) {
+        p->v_t = 0.0f;                    /* at rest from the call after landing */
         return 0.0f;
+    }
 
     const float rem = p->target - p->p_t;
     if (!p->endless && !p->stopping) {
@@ -187,7 +189,8 @@ static float trapezoid(MotionProfile* p)
         if (fabsf(rem) <= dd * dt && same && fits) {
             p->p_t = p->target;           /* assigned rather than integrated */
             p->p_c = 0.0f;
-            p->v_t = 0.0f;
+            /* A new course on the next call starts from u: from 0 it could step by |u| too much. */
+            p->v_t = u;
             p->landed = true;
             return u;
         }
@@ -334,7 +337,8 @@ void MotionProfile_advance(MotionProfile* p)
 
 float MotionProfile_stopDistance(const MotionProfile* p)
 {
-    return lag(p) + p->v_t * fabsf(p->v_t) / (2.0f * p->lim.dmax);
+    const float v = p->landed ? 0.0f : p->v_t;   /* a landing step's u is not motion to stop */
+    return lag(p) + v * fabsf(v) / (2.0f * p->lim.dmax);
 }
 
 /* D2: shift, never re-sync; the output follows p_t, and the lag stays with it. */
