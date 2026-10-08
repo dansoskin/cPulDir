@@ -3,21 +3,46 @@
 #include <string.h>
 #include "puldir_internal.h"
 
-static bool started;                    /* PulDir_start has run */
-
-bool PulDir_init(PulDir* a, const char* name)
+/* The rate cap in user units: speeds at or above it are refused. */
+static float rate_cap(float conv)
 {
+    return (float)(puldir_timing.tick_hz / 2u) / conv;
+}
+
+/* Init's refusal: no axis holds an event yet, so the line goes out now. */
+static bool init_refused(const char* name, const char* why)
+{
+    char b[PULDIR_LINE];
+    size_t at = puldir_put(b, 0, "[");
+    at = puldir_put(b, at, name);
+    at = puldir_put(b, at, "] init refused: ");
+    (void)puldir_put(b, at, why);
+    puldir_log(NULL, b);
+    return false;
+}
+
+bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
+{
+    const float c = pulses_per_unit;
     size_t len = 0;
     while (name != NULL && len < sizeof a->name && name[len] != '\0')
         len++;
     if (name == NULL || len == sizeof a->name)
-        return false;                   /* nothing to log through: the struct is not ours yet */
+        return init_refused("?", "name NULL or longer than 15 characters");
+    if (!(isfinite(c) && c > 0.0f))
+        return init_refused(name, "conversion not finite and positive");
+    if (!puldir_timing_take())
+        return init_refused(name, puldir_timing.pulse_us == 0u || puldir_timing.plan_us == 0u
+                                  ? "timers not attached"
+                                  : "plan period not 2 to 4096 whole pulse periods");
     memset(a, 0, sizeof *a);
     memcpy(a->name, name, len);
-    a->conv = 1.0f;
+    a->conv = c;
+    /* The starting limits are 200 pulses/s, 200 pulses/s^2, no jerk: under the rate cap at any
+     * timing, whatever the conversion. */
     const float d[4] = { 200.0f, 200.0f, 200.0f, 0.0f };
     for (int k = 0; k < 4; k++)
-        a->def[k] = a->lim[k] = d[k];
+        a->def[k] = a->lim[k] = d[k] / c;
     a->catchup_ms = PULDIR_CATCHUP_MS;
     a->log_on = true;
     a->slot = PULDIR_MAX_AXES;
@@ -25,10 +50,23 @@ bool PulDir_init(PulDir* a, const char* name)
     a->mode = PULDIR_MODE_IDLE;
     a->home_state = PULDIR_HOME_IDLE;
     a->refusal = PULDIR_R_NONE;
-    /* The plan interval is a constant inside MotionProfile_init's range and
-     * the limits are finite and positive, so neither call can refuse. */
-    (void)MotionProfile_init(&a->prof, 0.0f, PULDIR_DT);
+    /* puldir_timing_plan kept dt inside MotionProfile_init's range and the
+     * limits are finite and positive, so neither call can refuse. */
+    (void)MotionProfile_init(&a->prof, 0.0f, puldir_timing.dt);
     (void)MotionProfile_setLimits(&a->prof, (MotionLimits){ d[0], d[1], d[2], d[3] });
+
+    char b[PULDIR_LINE];
+    size_t at = puldir_head(b, a);
+    at = puldir_put(b, at, "max speed ");
+    at = puldir_put_num(b, at, rate_cap(c), false);
+    at = puldir_put(b, at, " units/s, resolution ");
+    at = puldir_put_num(b, at, 1.0f / c, false);
+    at = puldir_put(b, at, " units/pulse (pulse ");
+    at = puldir_put_uint(b, at, puldir_timing.pulse_us, 1);
+    at = puldir_put(b, at, " us, plan ");
+    at = puldir_put_uint(b, at, puldir_timing.plan_us, 1);
+    (void)puldir_put(b, at, " us)");
+    puldir_log(a, b);
     return true;
 }
 
@@ -74,7 +112,7 @@ void PulDir_attachFaultClear(PulDir* a, puldir_pin_t p, bool inverted)
 /* A duration the plan tick can compare by unsigned subtraction. */
 static bool ms_fits(uint32_t ms)
 {
-    return (uint64_t)ms * PULDIR_TICK_HZ / 1000u <= PULDIR_TICKS_MAX;
+    return (uint64_t)ms * puldir_timing.tick_hz / 1000u <= PULDIR_TICKS_MAX;
 }
 
 bool PulDir_setDelays(PulDir* a, uint32_t enable_ms, uint32_t release_ms)
@@ -84,8 +122,8 @@ bool PulDir_setDelays(PulDir* a, uint32_t enable_ms, uint32_t release_ms)
         return false;
     }
     port_lock();
-    a->enable_ticks = PULDIR_MS_TICKS(enable_ms);
-    a->release_ticks = PULDIR_MS_TICKS(release_ms);
+    a->enable_ticks = puldir_ms_ticks(enable_ms);
+    a->release_ticks = puldir_ms_ticks(release_ms);
     port_unlock();
     return true;
 }
@@ -117,8 +155,8 @@ bool PulDir_register(PulDir* a)
     PulDirRefusal why = PULDIR_R_NONE;
     if (!a->has_pins)
         why = PULDIR_R_NO_PIN;
-    else if (a->slot != PULDIR_MAX_AXES || started)
-        why = PULDIR_R_BUSY;            /* already registered, or the ticks are running */
+    else if (a->slot != PULDIR_MAX_AXES || puldir_timing.started)
+        why = PULDIR_R_BUSY;            /* already registered (or never initialised), or the ticks run */
     else if (puldir_naxes >= PULDIR_MAX_AXES)
         why = PULDIR_R_FULL;
     if (why != PULDIR_R_NONE) {
@@ -129,25 +167,19 @@ bool PulDir_register(PulDir* a)
     return true;
 }
 
-void PulDir_start(void)
-{
-    started = true;
-    port_start(puldir_pulse_tick, puldir_plan_tick);
-}
-
 /* ---- limits ---------------------------------------------------------------- */
 
 /* The generator's window() test, on the same float products as apply_limits. */
 static bool taps_fit(float acc, float dec, float j)
 {
-    return ceilf((acc + dec) / (j * PULDIR_DT)) <= (float)MOTION_PROFILE_MAX_TAPS;
+    return ceilf((acc + dec) / (j * puldir_timing.dt)) <= (float)MOTION_PROFILE_MAX_TAPS;
 }
 
 /* The smallest jerk in user units that fits: minJerk's quotient and the
  * conversion each round, so step to the exact float boundary. */
 static float jerk_floor(float acc, float dec, float conv)
 {
-    float j = MotionProfile_minJerk(acc, dec, PULDIR_DT) / conv;
+    float j = MotionProfile_minJerk(acc, dec, puldir_timing.dt) / conv;
     while (!taps_fit(acc, dec, j * conv))
         j = nextafterf(j, INFINITY);
     for (float d = nextafterf(j, 0.0f); taps_fit(acc, dec, d * conv); d = nextafterf(d, 0.0f))
@@ -168,15 +200,15 @@ static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const cha
 {
     const float conv = a->conv;
     const float v = lim[0] * conv, acc = lim[1] * conv, dec = lim[2] * conv, j = lim[3] * conv;
-    const float ratio = j > 0.0f ? (acc + dec) / (j * PULDIR_DT) : 0.0f;    /* generator's window() */
+    const float ratio = j > 0.0f ? (acc + dec) / (j * puldir_timing.dt) : 0.0f;    /* generator's window() */
     PulDirRefusal why = PULDIR_R_NONE;
     float value = 0.0f;
     if (!(isfinite(v) && isfinite(acc) && isfinite(dec) && isfinite(j))
         || !(v > 0.0f && acc > 0.0f && dec > 0.0f && j >= 0.0f)) {
         why = PULDIR_R_ARG;
-    } else if (!(lim[0] < (float)(PULDIR_TICK_HZ / 2u) / conv)) {
+    } else if (!(lim[0] < rate_cap(conv))) {
         why = PULDIR_R_RATE;
-        value = (float)(PULDIR_TICK_HZ / 2u) / conv;
+        value = rate_cap(conv);
     } else if (j > 0.0f && !taps_fit(acc, dec, j)) {
         why = PULDIR_R_TAPS;
         value = jerk_floor(acc, dec, conv);
@@ -216,40 +248,6 @@ static bool set_limit(PulDir* a, int k, float x, const char* call)
     }
     l[k] = x;
     return apply_limits(a, l, false, call);
-}
-
-/* Limits and defaults stay fixed in pulses, as in cFlexyStepper: the user-unit
- * values are rescaled, so the generator's limits are untouched. */
-bool PulDir_setConversion(PulDir* a, float pulses_per_unit)
-{
-    const float c = pulses_per_unit;
-    PulDirRefusal why = PULDIR_R_NONE;
-    float lim[4], def[4];
-    port_lock();                                /* the plan tick writes lim, but never in IDLE */
-    const bool idle = a->mode == PULDIR_MODE_IDLE && !a->moving;
-    memcpy(lim, a->lim, sizeof lim);
-    memcpy(def, a->def, sizeof def);
-    port_unlock();
-    if (!(isfinite(c) && c > 0.0f)) {
-        why = PULDIR_R_ARG;
-    } else if (!idle) {
-        why = PULDIR_R_NOT_IDLE;
-    } else {
-        for (int k = 0; k < 4; k++) {
-            lim[k] = lim[k] * a->conv / c;
-            def[k] = def[k] * a->conv / c;
-        }
-        port_lock();                            /* only main context leaves IDLE */
-        a->conv = c;
-        memcpy(a->lim, lim, sizeof lim);
-        memcpy(a->def, def, sizeof def);
-        port_unlock();
-    }
-    if (why != PULDIR_R_NONE) {
-        puldir_refuse(a, "setConversion", why, 0.0f);
-        return false;
-    }
-    return true;
 }
 
 bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float jerk)
@@ -356,7 +354,7 @@ bool PulDir_jog(PulDir* a, float speed)
         PulDir_stop(a);
         return true;
     }
-    const float cap = (float)(PULDIR_TICK_HZ / 2u) / a->conv;
+    const float cap = rate_cap(a->conv);
     PulDirRefusal why = PULDIR_R_NONE;
     if (!isfinite(speed))
         why = PULDIR_R_ARG;
@@ -522,7 +520,7 @@ void PulDir_streamEnd(PulDir* a)
 {
     port_lock();
     if (a->mode == PULDIR_MODE_STREAM) {
-        memcpy(a->lim, a->def, sizeof a->lim);   /* validated when set; fixed in pulses since */
+        memcpy(a->lim, a->def, sizeof a->lim);   /* validated when set, at the one conversion */
         a->req |= REQ_LIMITS;                 /* the plan tick sees STOPPING and leaves */
         a->mode = PULDIR_MODE_STOPPING;
     }
@@ -537,7 +535,7 @@ float PulDir_streamError(PulDir* a)    { return a->stream_err / a->conv; }
 bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
 {
     PulDirRefusal why = PULDIR_R_NONE;
-    if ((uint64_t)ms * PULDIR_PLAN_HZ < 5000u) {
+    if ((uint64_t)ms * 1000u < 5u * (uint64_t)puldir_timing.plan_us) {
         why = PULDIR_R_ARG;
     } else {
         port_lock();
@@ -562,7 +560,7 @@ static PulDirRefusal home_values(const PulDir* a, float speed, float adjust, flo
 {
     const float c = a->conv;
     const float z = roundf(zero * c), d = roundf(adjust * c);
-    *cap = (float)(PULDIR_TICK_HZ / 2u) / c;
+    *cap = rate_cap(c);
     if (!(speed < *cap))
         return PULDIR_R_RATE;
     if (!(z >= -PULDIR_PULSES_MAX && z < PULDIR_PULSES_MAX && d > -PULDIR_PULSES_MAX && d < PULDIR_PULSES_MAX))
@@ -578,7 +576,7 @@ bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
     PulDirRefusal why = PULDIR_R_NONE;
     float cap = 0.0f;
     if ((direction != 1 && direction != -1) || !(isfinite(speed) && speed > 0.0f)
-        || switch_ptr == NULL || PULDIR_MS_TICKS(phase_timeout_ms) == 0u || !ms_fits(phase_timeout_ms)
+        || switch_ptr == NULL || puldir_ms_ticks(phase_timeout_ms) == 0u || !ms_fits(phase_timeout_ms)
         || !isfinite(adjust) || !isfinite(zero_pos))
         why = PULDIR_R_ARG;
     else
@@ -593,7 +591,7 @@ bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
             a->home_adjust = adjust;
             a->home_zero = zero_pos;
             a->home_switch = switch_ptr;
-            a->home_timeout_ticks = PULDIR_MS_TICKS(phase_timeout_ms);
+            a->home_timeout_ticks = puldir_ms_ticks(phase_timeout_ms);
         }
         port_unlock();
     }
@@ -604,16 +602,11 @@ bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
     return true;
 }
 
-/* 5.5: IDLE and at rest, not faulted, configured. The values are checked again because the
- * conversion may have changed since setHoming; the plan tick runs the phases (5.8). */
+/* 5.5: IDLE and at rest, not faulted, configured. setHoming checked the values at the conversion
+ * and timing they run under, both fixed since init; the plan tick runs the phases (5.8). */
 bool PulDir_homeStart(PulDir* a)
 {
-    PulDirRefusal why = PULDIR_R_NONE;
-    float cap = 0.0f;
-    if (a->home_dir == 0)
-        why = PULDIR_R_NO_HOMING;
-    else
-        why = home_values(a, a->home_speed, a->home_adjust, a->home_zero, &cap);
+    PulDirRefusal why = a->home_dir == 0 ? PULDIR_R_NO_HOMING : PULDIR_R_NONE;
     if (why == PULDIR_R_NONE) {
         port_lock();
         if (a->fault) {
@@ -634,7 +627,7 @@ bool PulDir_homeStart(PulDir* a)
         port_unlock();
     }
     if (why != PULDIR_R_NONE) {
-        puldir_refuse(a, "homeStart", why, why == PULDIR_R_RATE ? cap : 0.0f);
+        puldir_refuse(a, "homeStart", why, 0.0f);
         return false;
     }
     return true;

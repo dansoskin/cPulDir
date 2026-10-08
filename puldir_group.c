@@ -24,8 +24,8 @@ bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
 {
     PulDir* first = (axes != NULL && count > 0u) ? axes[0] : NULL;
     PulDirRefusal why = PULDIR_R_NONE;
-    if (axes == NULL || count == 0u || count > PULDIR_MAX_AXES) {
-        why = PULDIR_R_ARG;
+    if (axes == NULL || count == 0u || count > PULDIR_MAX_AXES || !puldir_timing.set) {
+        why = PULDIR_R_ARG;                     /* the path profile needs the plan interval */
     } else {
         for (uint8_t i = 0; i < count && why == PULDIR_R_NONE; i++) {
             if (axes[i] == NULL || axes[i]->slot >= PULDIR_MAX_AXES)
@@ -57,7 +57,7 @@ bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
         g->start[i] = 0;
         g->delta[i] = 0;
     }
-    (void)MotionProfile_init(&g->s, 0.0f, PULDIR_DT);  /* a constant in range: cannot refuse */
+    (void)MotionProfile_init(&g->s, 0.0f, puldir_timing.dt);  /* set, so in range: cannot refuse */
     if (!known) {
         port_lock();
         groups[ngroups] = g;
@@ -146,7 +146,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
         if (any && !(L.vmax > 0.0f && L.amax > 0.0f && L.dmax > 0.0f)) {
             why = PULDIR_R_ARG;                 /* underflowed: limits too small for the travel */
         } else if (any && L.jmax > 0.0f
-                   && !(ceilf((L.amax + L.dmax) / (L.jmax * PULDIR_DT)) <= (float)MOTION_PROFILE_MAX_TAPS)) {
+                   && !(ceilf((L.amax + L.dmax) / (L.jmax * puldir_timing.dt)) <= (float)MOTION_PROFILE_MAX_TAPS)) {
             /* Each member's own window fits, and the tightest jerk's member bounds the
              * ratio, so only float rounding at the 256-tap edge can land here. */
             why = PULDIR_R_TAPS;
@@ -160,11 +160,11 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     /* Not active: the plan tick leaves s and these fields alone. */
     if (any) {
-        (void)MotionProfile_init(&g->s, 0.0f, PULDIR_DT);
+        (void)MotionProfile_init(&g->s, 0.0f, puldir_timing.dt);
         (void)MotionProfile_setLimits(&g->s, L);   /* checked above as the generator checks */
         (void)MotionProfile_setTarget(&g->s, 1.0f);
     } else {
-        (void)MotionProfile_init(&g->s, 1.0f, PULDIR_DT); /* at rest on the end already */
+        (void)MotionProfile_init(&g->s, 1.0f, puldir_timing.dt); /* at rest on the end already */
     }
     for (uint8_t i = 0; i < n; i++) {
         g->start[i] = (uint64_t)(uint32_t)count[i] << 32;

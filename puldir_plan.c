@@ -3,13 +3,13 @@
 #include <math.h>
 #include "puldir_internal.h"
 
-#define N   ((int64_t)PULDIR_TICKS_PER_PLAN)
+#define N   ((int64_t)puldir_timing.n)          /* fixed before the ticks start */
 #define M   (N * N)                             /* D6 margin, in 2^-32 pulse */
 #define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
-#define TIMEOUT_TICKS  PULDIR_MS_TICKS(PULDIR_STREAM_TIMEOUT_MS)
-#define DEBOUNCE_TICKS PULDIR_MS_TICKS(PULDIR_FAULT_DEBOUNCE_MS)
-#define CLEAR_TICKS    PULDIR_MS_TICKS(PULDIR_FAULT_CLEAR_MS)
-#define DELAY_TICKS    PULDIR_MS_TICKS(PULDIR_HOMING_DELAY_MS)
+#define TIMEOUT_TICKS  puldir_ms_ticks(PULDIR_STREAM_TIMEOUT_MS)
+#define DEBOUNCE_TICKS puldir_ms_ticks(PULDIR_FAULT_DEBOUNCE_MS)
+#define CLEAR_TICKS    puldir_ms_ticks(PULDIR_FAULT_CLEAR_MS)
+#define DELAY_TICKS    puldir_ms_ticks(PULDIR_HOMING_DELAY_MS)
 
 static int64_t to_fix(float pulses) { return (int64_t)(pulses * PULDIR_FIX); }
 
@@ -311,7 +311,7 @@ static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
         /* A setpoint stamped after the snapshot (a caller outside main context)
          * is taken as of now: its age is clamped at zero, never wrapped. */
         const int32_t ticks_old = (int32_t)(t_b - a->sp_tick);
-        const float age = (float)(ticks_old > 0 ? ticks_old : 0) * (1.0f / (float)PULDIR_TICK_HZ);
+        const float age = (float)(ticks_old > 0 ? ticks_old : 0) * (1.0f / (float)puldir_timing.tick_hz);
         const float err = (float)((int64_t)k - (int64_t)count) + (a->sp_pos - (float)k)
                         + a->sp_vel * age - frac;
         a->stream_err = err;
@@ -325,7 +325,7 @@ static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
     else if (a->v_cmd < -vmax)
         a->v_cmd = -vmax;
 
-    const int32_t inc = div_trunc(to_fix(a->v_cmd * PULDIR_DT));
+    const int32_t inc = div_trunc(to_fix(a->v_cmd * puldir_timing.dt));
     puldir_set_inc(a, out, inc);
     a->vel_out = a->v_cmd;
     a->target = base + (uint64_t)(pb + (int64_t)inc * N);   /* the aim, as a jog reads it */
@@ -535,6 +535,8 @@ static void release(PulDir* a, bool was_moving, uint32_t now)
 
 void puldir_plan_tick(void)
 {
+    if (!puldir_timing.set)
+        return;                                 /* started with no valid timing, so with no axis */
     PulDirPulse s[PULDIR_MAX_AXES];
     bool high[PULDIR_MAX_AXES];
     const uint8_t n = puldir_naxes;

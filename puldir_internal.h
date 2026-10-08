@@ -5,7 +5,6 @@
 
 #define PULDIR_ONE     ((uint64_t)1 << 32)    /* one pulse in 32.32 */
 #define PULDIR_FIX     4294967296.0f          /* the same, as a float scale */
-#define PULDIR_DT      (1.0f / (float)PULDIR_PLAN_HZ)   /* every profile's dt: one expression, one float */
 #define PULDIR_PULSES_MAX 2147483648.0f       /* whole-pulse targets lie in [-2^31, 2^31) */
 #define PULDIR_INC_MAX 0x7FFFFFFF             /* just under half a pulse per tick */
 
@@ -32,8 +31,21 @@ enum {
 /* Every request a halt discards. */
 #define REQ_COURSE (REQ_MOTION | REQ_STREAM_BEGIN | REQ_HOME)
 
+/* The timing, from the port's attach calls (puldir_pulse.c writes it, everyone else reads it).
+ * Fixed from the first PulDir_init or PulDir_start on, so the ticks see constants. */
+typedef struct {
+    uint32_t pulse_us, plan_us;               /* 0 until the port hands them over */
+    uint32_t tick_hz;                         /* 1e6 / pulse_us */
+    uint32_t n;                               /* pulse ticks per plan interval, plan_us / pulse_us */
+    float    dt;                              /* the plan interval in s: every profile's dt */
+    bool     set;                             /* the pair passed PulDir_init's check */
+    bool     started;                         /* PulDir_start has run */
+} PulDirTiming;
+extern PulDirTiming puldir_timing;
+bool puldir_timing_take(void);                /* PulDir_init: checks the pair and fixes it; true once set */
+
 /* A duration in pulse ticks; every time is compared by unsigned subtraction (5.9). */
-#define PULDIR_MS_TICKS(ms) ((uint32_t)((uint64_t)(ms) * PULDIR_TICK_HZ / 1000u))
+uint32_t puldir_ms_ticks(uint32_t ms);
 /* The longest delay or timeout a setter accepts, in ticks: half the counter. */
 #define PULDIR_TICKS_MAX 0x7FFFFFFFu
 
@@ -106,5 +118,5 @@ size_t puldir_put_uint(char* b, size_t at, uint64_t v, int min_digits);
 size_t puldir_put_num(char* b, size_t at, float v, bool up);
 size_t puldir_head(char* b, const PulDir* a);             /* "[name] " */
 const char* puldir_phase(PulDirHomeState h);
-void   puldir_log(const PulDir* a, const char* line);     /* through the logger, if the axis logs */
+void   puldir_log(const PulDir* a, const char* line);     /* through the logger, if the axis logs; NULL: no axis yet */
 #endif

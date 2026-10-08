@@ -14,13 +14,17 @@ LIB="motion_profile.c puldir.c puldir_pulse.c puldir_plan.c puldir_loop.c puldir
 build_axis() {   # $1 = output name, rest = extra flags
     local out="$1"; shift
     gcc $CFLAGS -Itest "$@" -o "$OUT/$out" test/test_puldir.c test/fake_port.c $LIB -lm
+}
+run_axis() {     # $1 = build, $2 $3 = pulse_us plan_us; one process per case (D9)
     local cases
-    cases=$("$OUT/$out" list | tr -d '\r')   # one process per case (D9); a failing list stops the script
+    cases=$("$OUT/$1" list | tr -d '\r')   # a failing list stops the script
     [ -n "$cases" ]
-    for c in $cases; do "$OUT/$out" "$c"; done
+    for c in $cases; do "$OUT/$1" "$c" "$2" "$3"; done
 }
 build_axis test_puldir
-build_axis test_puldir_5us -DPULDIR_PULSE_US=5u   # a 200 kHz tick
-build_axis test_puldir_2k -DPULDIR_PULSE_US=10u -DPULDIR_PLAN_HZ=2000u   # the fastest plan rate D14 allows
 build_axis test_puldir_wrap -DPULDIR_TICK_START=0xFFFFFC18u   # 1,000 ticks below the wrap (D9, test 22)
+run_axis test_puldir 20 1000        # a 50 kHz tick, the default
+run_axis test_puldir 5 1000         # a 200 kHz tick
+run_axis test_puldir 10 500         # a 2 kHz plan rate on a 100 kHz tick
+run_axis test_puldir_wrap 20 1000
 echo "axis: all ok"

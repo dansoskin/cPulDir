@@ -5,8 +5,10 @@
 #include "fake_port.h"
 #include "puldir.h"
 
-uint32_t fake_plan_phase = PULDIR_TICKS_PER_PLAN / 2u;
+uint32_t fake_plan_phase;
 uint32_t fake_preempt;
+
+static uint32_t n_ticks;                /* pulse ticks per plan period, as the timers would run them */
 
 static bool level[FAKE_PINS];
 static bool motion[FAKE_PINS];
@@ -19,6 +21,15 @@ static uint32_t since_start;            /* pulse ticks run since port_start */
 static int tick_depth;                  /* tick callbacks in progress (a pulse tick may preempt the plan tick) */
 static int lock_depth;
 static bool in_pulse;                   /* inside the pulse tick callback */
+
+bool fake_attach(uint32_t pulse_us, uint32_t plan_us)
+{
+    if (!puldir_timing_pulse(pulse_us) || !puldir_timing_plan(plan_us))
+        return false;
+    n_ticks = plan_us / pulse_us;
+    fake_plan_phase = n_ticks / 2u;
+    return true;
+}
 
 puldir_pin_t fake_pin(uint8_t id)
 {
@@ -110,7 +121,7 @@ void fake_run(uint32_t ticks)
 {
     for (uint32_t i = 0; i < ticks; i++) {
         fake_pulse(false);
-        if (since_start % PULDIR_TICKS_PER_PLAN == fake_plan_phase)
+        if (since_start % n_ticks == fake_plan_phase)
             fake_plan();
     }
 }

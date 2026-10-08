@@ -4,20 +4,32 @@
 static TIM_HandleTypeDef* pulse_tim;
 static TIM_HandleTypeDef* plan_tim;
 static IRQn_Type pulse_irq, plan_irq;
-static void (*pulse_fn)(bool overrun);
-static void (*plan_fn)(void);
+static uint32_t pulse_counts, plan_counts;     /* the periods, in 1 us counts */
+/* Until port_start, a shared vector seeing a stale update flag on an attached timer calls these. */
+static void no_pulse(bool overrun) { (void)overrun; }
+static void no_plan(void) {}
+static void (*pulse_fn)(bool overrun) = no_pulse;
+static void (*plan_fn)(void) = no_plan;
 static bool late;                       /* the update flag was set again before the last exit */
 
-void PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn)
+bool PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn, uint32_t pulse_us)
 {
+    if (!puldir_timing_pulse(pulse_us))
+        return false;
     pulse_tim = htim;
     pulse_irq = irqn;
+    pulse_counts = pulse_us;
+    return true;
 }
 
-void PulDir_stm32_attachPlanTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn)
+bool PulDir_stm32_attachPlanTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn, uint32_t plan_us)
 {
+    if (!puldir_timing_plan(plan_us))
+        return false;
     plan_tim = htim;
     plan_irq = irqn;
+    plan_counts = plan_us;
+    return true;
 }
 
 /* A period of `counts` 1 us counts, the counter left at its last count so the first update is one count away. */
@@ -37,8 +49,8 @@ void port_start(void (*pulse)(bool), void (*plan)(void))
         Error_Handler();                        /* attach both timers before PulDir_start */
     pulse_fn = pulse;
     plan_fn = plan;
-    set_period(pulse_tim, PULDIR_PULSE_COUNTS);
-    set_period(plan_tim, PULDIR_PLAN_COUNTS);
+    set_period(pulse_tim, pulse_counts);
+    set_period(plan_tim, plan_counts);
     HAL_TIM_Base_Start_IT(pulse_tim);
     HAL_TIM_Base_Start_IT(plan_tim);
 }

@@ -6,6 +6,9 @@
 
 #define FAKE_PINS 64
 
+/* The timer attach calls in one: hands both periods to the library, before PulDir_init. */
+bool  fake_attach(uint32_t pulse_us, uint32_t plan_us);
+
 puldir_pin_t fake_pin(uint8_t id);
 bool  fake_level(uint8_t id);                       /* last level written or set */
 void  fake_set_input(uint8_t id, bool level);       /* fault pins, from the test */
@@ -21,6 +24,6 @@ void  fake_on_plan(fake_plan_fn fn);                /* called before and after e
 void  fake_on_lock(void (*fn)(void));
 /* n pulse ticks; a plan tick runs fake_plan_phase ticks after every interval boundary */
 void  fake_run(uint32_t ticks);
-extern uint32_t fake_plan_phase;                    /* default PULDIR_TICKS_PER_PLAN / 2 */
+extern uint32_t fake_plan_phase;                    /* fake_attach sets N / 2 */
 extern uint32_t fake_preempt;                       /* pulse ticks run inside each port_pin_read */
 #endif

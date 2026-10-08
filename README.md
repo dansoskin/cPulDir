@@ -44,14 +44,27 @@ void PLAN_TIM_IRQHandler(void)
 
 Include `puldir_port_stm32.h` in the file's USER CODE Includes section. The alternative is to untick "Generate IRQ handler" for the two interrupts (NVIC, Code generation) and define the handlers yourself, each with only the one call. Shared vectors (`TIM1_UP_TIM16_IRQHandler` and the like) are fine: each entry returns at once if its own timer's update flag is clear, so call it first and then whatever else the vector serves.
 
-**In code.** Hand the timers over with `PulDir_stm32_attachPulseTimer(&htim_pulse, PULSE_TIM_IRQn)` and `PulDir_stm32_attachPlanTimer(&htim_plan, PLAN_TIM_IRQn)`, after every axis is registered and before `PulDir_start`. Example 2 shows it in place. `PulDir_start` writes both periods, puts each counter one count before its first update and starts them. If either timer was not attached it calls `Error_Handler()`.
+**In code.** Hand the timers over first, before any `PulDir_init`, with their periods in µs:
 
-**Build.** Two macros, on the compiler command line:
+```c
+PulDir_stm32_attachPulseTimer(&htim_pulse, PULSE_TIM_IRQn, 20u);   /* pulse_us: one pulse tick */
+PulDir_stm32_attachPlanTimer(&htim_plan, PLAN_TIM_IRQn, 1000u);    /* plan_us: one plan tick */
+```
 
-- `PULDIR_PULSE_US`, the pulse width and pulse tick in µs. The default 20 gives a 50 kHz tick and up to just under 25,000 pulses/s per axis. 5 gives a 200 kHz tick and up to just under 100,000 pulses/s.
-- `PULDIR_PLAN_HZ`, the plan rate. The default is 1 kHz.
+- `pulse_us` is the pulse width and the pulse tick. 20 gives a 50 kHz tick and up to just under 25,000 pulses/s per axis. 5 gives a 200 kHz tick and up to just under 100,000 pulses/s.
+- `plan_us` is the plan period. 1000 (1 kHz) suits most uses.
 
-The build fails if the two do not fit together. The full rules are under "Configuration macros".
+Each call returns false and keeps nothing if its value is out of range or the timing is already fixed. The rules are under "Timing". Example 2 shows the calls in place. `PulDir_start` writes both periods, puts each counter one count before its first update and starts them. If either timer was not attached it calls `Error_Handler()`.
+
+**Setup order.** Init refuses without the timers, register refuses an axis without init and pins or after start, and a group refuses members that are not registered:
+
+1. Attach both timers, with their periods.
+2. `PulDir_attachLogger`, so init can log.
+3. `PulDir_init` with the conversion, for each axis.
+4. Pins, defaults, delays, homing.
+5. `PulDir_register`.
+6. `PulDirGroup_init`, if you use groups.
+7. `PulDir_start`.
 
 **Main context only.** Call every `PulDir_*` function from the main loop (or one thread), never from an interrupt, the UART's included. Pass commands to the main loop through a flag or a queue. The bench procedure for a first board is `docs/bench-step4.md`.
 
@@ -125,7 +138,7 @@ The profile measures no time itself. `dt` is fixed at init, and each `advance` a
 
 ### 2. One motor
 
-The full setup for one axis, in the order that works. `setConversion` comes before `setDefaults`, because the library holds limits in pulses: a later `setConversion` keeps the limits fixed in pulses and rescales the user-unit values.
+The full setup for one axis, in the order the library requires: the timers, the logger, `PulDir_init` with the conversion, then pins, limits and delays, `PulDir_register`, and `PulDir_start` last. The conversion is fixed at init, so every limit after it is in user units.
 
 ```c
 #include <stdio.h>
@@ -141,16 +154,18 @@ static void log_line(const char* s) { printf("%s\r\n", s); }
 
 void app_setup(void)
 {
-    PulDir_attachLogger(log_line);
-    if (!PulDir_init(&tilt, "tilt"))                  /* name: up to 15 characters */
+    if (!PulDir_stm32_attachPulseTimer(&htim_pulse, PULSE_TIM_IRQn, 20u)   /* first: 20 us pulse */
+        || !PulDir_stm32_attachPlanTimer(&htim_plan, PLAN_TIM_IRQn, 1000u)) /* 1 ms plan tick */
         Error_Handler();
+    PulDir_attachLogger(log_line);                    /* before init, which logs */
+    if (!PulDir_init(&tilt, "tilt", 280.0f))          /* name up to 15 characters; pulses per deg */
+        Error_Handler();                              /* the refusal is already logged */
     PulDir_attachPins(&tilt, PIN_TILT_PUL, PIN_TILT_DIR,
                       false,                          /* pulse active low? */
                       false);                         /* direction inverted? */
     PulDir_attachEnable(&tilt, PIN_TILT_ENA, false);  /* optional; true if active low */
     PulDir_attachFault(&tilt, PIN_TILT_ALM, false);   /* optional; true if active low */
-    bool ok = PulDir_setConversion(&tilt, 280.0f)     /* pulses per deg, first */
-           && PulDir_setDefaults(&tilt, 15.0f, 30.0f, 30.0f, 300.0f)
+    bool ok = PulDir_setDefaults(&tilt, 15.0f, 30.0f, 30.0f, 300.0f)
            && PulDir_setDelays(&tilt, 100u, 1000u);   /* ms: enable to first pulse, idle to release */
     PulDir_setAutoRelease(&tilt, true);               /* release the drive after each move */
     ok = ok && PulDir_register(&tilt);
@@ -158,8 +173,6 @@ void app_setup(void)
         PulDir_loop(&tilt);                           /* logs which call was refused, and why */
         Error_Handler();
     }
-    PulDir_stm32_attachPulseTimer(&htim_pulse, PULSE_TIM_IRQn);
-    PulDir_stm32_attachPlanTimer(&htim_plan, PLAN_TIM_IRQn);
     PulDir_start();                                   /* after every axis is registered */
 }
 
@@ -179,7 +192,7 @@ printf("tilt %s at %.3f deg, %.2f deg/s\r\n", PulDir_isMoving(&tilt) ? "moving" 
        (double)PulDir_position(&tilt), (double)PulDir_velocity(&tilt));
 ```
 
-What happens: the enable pin goes active, the axis waits the 100 ms enable delay, then ramps out 12,600 pulses. `PulDir_loop` logs `[tilt] landed at 45.0000` and `isMoving` goes false, 3.8 s after the call. One second later the drive is released. Targets are rounded to whole pulses. `moveBy` is the relative form. Jog, stop and halt:
+At init the log reads `[tilt] max speed 89.2857 units/s, resolution 0.0036 units/pulse (pulse 20 us, plan 1000 us)`: the rate cap and one pulse, in degrees. What happens on the move: the enable pin goes active, the axis waits the 100 ms enable delay, then ramps out 12,600 pulses. `PulDir_loop` logs `[tilt] landed at 45.0000` and `isMoving` goes false, 3.8 s after the call. One second later the drive is released. Targets are rounded to whole pulses. `moveBy` is the relative form. Jog, stop and halt:
 
 ```c
 PulDir_jog(&tilt, -5.0f);   /* run at -5 deg/s until told otherwise */
@@ -195,7 +208,7 @@ if (!PulDir_jog(&tilt, 100.0f)) {
 }
 ```
 
-The cap is just under half the tick rate: 25,000 pulses/s at the default 20 µs pulse, which is 89.3 deg/s here. Setup calls return false on refusal too, so check them. `PulDir_init` is the exception: it refuses a NULL name or one longer than 15 characters and then writes nothing, so it has nothing to log through.
+The cap is just under half the tick rate: 25,000 pulses/s at a 20 µs pulse, which is 89.3 deg/s here, the "max speed" init logged. Setup calls return false on refusal too, so check them. `PulDir_init` refuses a NULL name or one longer than 15 characters, a conversion that is not finite and positive, and missing or mismatched timing. It then writes nothing and logs the reason at once, for example `[tilt] init refused: timers not attached`. An axis whose init was refused is refused by `PulDir_register` too.
 
 `PulDir_stop` and `PulDir_halt` leave the drive enabled, unless auto-release is on: then it is released after the release delay, as after any move. A fault input latch halts the axis and always keeps the drive enabled; `PulDir_clearFault` and `PulDir_attachFaultClear` handle the clear. Homing is `PulDir_setHoming`, then `PulDir_homeStart`; while it runs the limit setters are refused. `PulDir_console(&tilt, cmd, arg)` is a one-letter command console for a UART, and `PulDir_consoleMenu` prints the verbs.
 
@@ -209,16 +222,18 @@ static PulDir pan, tilt;
 static bool axis_setup(PulDir* a, const char* name, puldir_pin_t pul, puldir_pin_t dir,
                        float speed, float accel)
 {
-    if (!PulDir_init(a, name))
+    if (!PulDir_init(a, name, 280.0f))  /* pulses per deg; a refusal is logged */
         return false;
     PulDir_attachPins(a, pul, dir, false, false);
-    return PulDir_setConversion(a, 280.0f)
-        && PulDir_setDefaults(a, speed, accel, accel, 10.0f * accel)
+    return PulDir_setDefaults(a, speed, accel, accel, 10.0f * accel)
         && PulDir_register(a);
 }
 
 void app_setup(void)
 {
+    if (!PulDir_stm32_attachPulseTimer(&htim_pulse, PULSE_TIM_IRQn, 20u)
+        || !PulDir_stm32_attachPlanTimer(&htim_plan, PLAN_TIM_IRQn, 1000u))
+        Error_Handler();
     PulDir_attachLogger(log_line);
     if (!axis_setup(&pan, "pan", PIN_PAN_PUL, PIN_PAN_DIR, 15.0f, 30.0f)
         || !axis_setup(&tilt, "tilt", PIN_TILT_PUL, PIN_TILT_DIR, 10.0f, 20.0f)) {
@@ -226,8 +241,6 @@ void app_setup(void)
         PulDir_loop(&tilt);
         Error_Handler();
     }
-    PulDir_stm32_attachPulseTimer(&htim_pulse, PULSE_TIM_IRQn);
-    PulDir_stm32_attachPlanTimer(&htim_plan, PLAN_TIM_IRQn);
     PulDir_start();
 }
 
@@ -258,7 +271,7 @@ A group moves its members along one shared path: a straight line in joint space,
 static PulDirGroup gimbal;              /* static: the library keeps a pointer to it */
 static PulDir* gimbal_axes[] = { &pan, &tilt };
 
-/* in app_setup, after both axes are registered */
+/* in app_setup, after both axes are registered and before PulDir_start */
 if (!PulDirGroup_init(&gimbal, gimbal_axes, 2u))
     Error_Handler();
 ```
@@ -345,7 +358,7 @@ What happens: the master turns 2π rad in 7.5 s. Each axis peaks at 10 deg/s and
 
 ## The port
 
-`puldir_port.h` is the contract: `port_pin_init_output`, `port_pin_init_input`, `port_pin_write` (called from the pulse tick, one register write), `port_pin_read`, `port_start(pulse_tick, plan_tick)`, and `port_lock` and `port_unlock`. The lock must mask only the library's two interrupts. Every port takes two timers counting at `PULDIR_TIMER_HZ` (1 MHz, 1 µs per count) and sets their periods in `port_start`: `PULDIR_PULSE_COUNTS` (= `PULDIR_PULSE_US`) for the pulse timer and `PULDIR_PLAN_COUNTS` (= 1e6 / `PULDIR_PLAN_HZ`) for the plan timer, which is exactly N pulse periods. The port cannot check that the counters run at 1 MHz. The scope does.
+`puldir_port.h` is the contract: `port_pin_init_output`, `port_pin_init_input`, `port_pin_write` (called from the pulse tick, one register write), `port_pin_read`, `port_start(pulse_tick, plan_tick)`, and `port_lock` and `port_unlock`. The lock must mask only the library's two interrupts. Every port takes two timers counting at `PULDIR_TIMER_HZ` (1 MHz, 1 µs per count). Its attach calls take the two periods in µs and hand them to the library with `puldir_timing_pulse` and `puldir_timing_plan`, keeping a timer only if the library accepts its period. `port_start` then sets the pulse timer's period to `pulse_us` counts and the plan timer's to `plan_us` counts, which is exactly N pulse periods. The port cannot check that the counters run at 1 MHz. The scope does.
 
 The STM32 `port_lock` disables exactly the two attached IRQ numbers in the NVIC (on a shared vector, the other source too). A tick that comes due inside the lock fires on unlock, late by the lock's duration. Until both timers are attached the lock does nothing. The host tests use `test/fake_port.c`, where pins are an array and the test calls the ticks.
 
@@ -355,8 +368,6 @@ Define these on the compiler command line. Defaults are from the headers.
 
 | macro | default | meaning |
 |---|---|---|
-| `PULDIR_PULSE_US` | 20u | pulse width, which is one pulse tick, in µs; at least 2. 5u for 100k pulses/s. The tick rate `PULDIR_TICK_HZ` = 1e6 / this is derived; defining it is an error |
-| `PULDIR_PLAN_HZ` | 1000u | plan tick rate; 1000 to 4000, must divide 1 MHz, and its period must be a whole number of pulse ticks, N = tick / plan in 2..4096 |
 | `PULDIR_MAX_AXES` | 8u | axis table size |
 | `PULDIR_MAX_GROUPS` | 4u | group table size |
 | `PULDIR_CATCHUP_MS` | 50u | stream catch-up time |
@@ -367,19 +378,27 @@ Define these on the compiler command line. Defaults are from the headers.
 | `PULDIR_TICK_START` | 0u | first tick count; tests only |
 | `MOTION_PROFILE_MAX_TAPS` | 256 | jerk filter window; raise for softer jerk |
 
-A bad combination fails to compile.
+## Timing
+
+The two rates are arguments of the timer attach calls, not macros, so one build serves every rate.
+
+- `pulse_us`, the pulse width and pulse tick, is 2 to 1000 µs. The tick rate is 1e6 / `pulse_us`.
+- `plan_us`, the plan period, is 250 to 10000 µs (the generator's dt range, and a 16-bit timer).
+- The plan period must be a whole number of pulse periods: `plan_us` % `pulse_us` == 0, and N = `plan_us` / `pulse_us` in 2 to 4096.
+
+Each attach call checks its own range. `PulDir_init` checks the ratio, refuses without valid timing, and fixes the timing: from the first accepted init (or `PulDir_start`) on, attach calls are refused. `PulDirGroup_init` refuses without timing too.
 
 ## The numbers
 
-| `PULDIR_PULSE_US` | tick rate | max pulses/s per axis | four axes, CPU (estimate) |
+| `pulse_us` | tick rate | max pulses/s per axis | four axes, CPU (estimate) |
 |---|---|---|---|
-| 20 (default) | 50 kHz | just under 25,000 | about 5 % |
+| 20 | 50 kHz | just under 25,000 | about 5 % |
 | 10 | 100 kHz | just under 50,000 | about 10 % |
 | 5 | 200 kHz | just under 100,000 | about 20 % |
 
-- The pulse is one tick wide, and the gap, the DIR setup and the DIR hold are each at least one tick. A drive that needs a 40 µs pulse builds with `PULDIR_PULSE_US=40u`, a 25 kHz tick.
-- The maximum rate is just under half the tick rate. Setters refuse a speed at or above it.
-- The plan tick runs at 1 kHz by default. It is the stream rate limit: setpoints can arrive up to that rate.
+- The pulse is one tick wide, and the gap, the DIR setup and the DIR hold are each at least one tick. A drive that needs a 40 µs pulse attaches the pulse timer with `pulse_us` 40, a 25 kHz tick.
+- The maximum rate is just under half the tick rate. Setters refuse a speed at or above it. `PulDir_init` logs it in user units.
+- The plan tick runs every `plan_us`, 1 kHz at 1000. It is the stream rate limit: setpoints can arrive up to that rate.
 - CPU is a Cortex-M4F at 144 MHz: about 20 cycles per axis per tick plus about 50 cycles of interrupt overhead. It scales with the tick rate, not the pulse rate.
 - Pulse jitter is a few tens of ns when nothing else runs at the pulse priority. CPU and jitter figures are estimates until the bench (`docs/bench-step4.md`) measures them.
 - Memory: about 1.4 KB per axis (the profile's 1 KB of taps is most of it) plus about 100 bytes of pulse state, and about 1.3 KB per group. Four axes and one group is under 8 KB.
@@ -398,7 +417,7 @@ Host tests need only gcc, from bash:
 bash test/run.sh
 ```
 
-It builds and runs the generator tests, then the axis tests against `test/fake_port.c` at the default tick, at 200 kHz, at a 2 kHz plan rate on a 100 kHz tick, and with the tick counter near its wrap. It takes about 25 s. All use `-Wall -Wextra -Werror`.
+It builds and runs the generator tests, then builds the axis tests against `test/fake_port.c` once and runs every case at three timings: 20/1000 µs (a 50 kHz tick), 5/1000 µs (200 kHz) and 10/500 µs (a 2 kHz plan rate on a 100 kHz tick). A second build starts the tick counter near its wrap and runs at 20/1000 µs. One case runs as `build/test/test_puldir <case> <pulse_us> <plan_us>`. It takes about 25 s. All use `-Wall -Wextra -Werror`.
 
 Target compile, from bash with arm-none-eabi-gcc on the path and `$FW` set to a CubeMX project (STM32G473 here; change `-DSTM32G473xx` and the HAL include for another family):
 
@@ -416,5 +435,5 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E26) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E27) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.

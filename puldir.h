@@ -38,11 +38,6 @@ extern "C" {
 #define PULDIR_TICK_START 0u                /* the rollover test starts near the wrap (D9) */
 #endif
 
-#define PULDIR_TICKS_PER_PLAN (PULDIR_TICK_HZ / PULDIR_PLAN_HZ)
-typedef char puldir_check_ratio[(PULDIR_TICK_HZ % PULDIR_PLAN_HZ) == 0u ? 1 : -1];
-typedef char puldir_check_plan[(PULDIR_PLAN_HZ >= 1000u && PULDIR_PLAN_HZ <= 4000u) ? 1 : -1];
-typedef char puldir_check_n[(PULDIR_TICKS_PER_PLAN >= 2u && PULDIR_TICKS_PER_PLAN <= 4096u) ? 1 : -1];
-
 typedef enum { PULDIR_IDLE, PULDIR_ENABLED, PULDIR_MOVING, PULDIR_FAULT } PulDirStatus;
 
 typedef enum {
@@ -157,16 +152,16 @@ uint32_t PulDir_ticks(void);
 uint32_t PulDir_overruns(void);
 void     PulDir_consoleMenu(char* buf, size_t n);
 
-/* axis setup, before PulDir_start() */
-/* Refuses a NULL name or one longer than 15 characters, and then writes nothing. */
-bool  PulDir_init(PulDir*, const char* name);
+/* axis setup, before PulDir_start(), after both timers are attached */
+/* Refuses a NULL name or one longer than 15 characters, a conversion not finite and positive, and
+ * timing unset or not a whole 2 to 4096 pulse periods per plan period; then writes nothing. Logs one
+ * line either way: the refusal, or the axis's top speed and resolution. */
+bool  PulDir_init(PulDir*, const char* name, float pulses_per_unit);
 void  PulDir_attachPins(PulDir*, puldir_pin_t pulse, puldir_pin_t dir,
                         bool pulse_active_low, bool dir_inverted);
 void  PulDir_attachEnable(PulDir*, puldir_pin_t, bool inverted);
 void  PulDir_attachFault(PulDir*, puldir_pin_t, bool inverted);
 void  PulDir_attachFaultClear(PulDir*, puldir_pin_t, bool inverted);
-/* IDLE only. Limits and defaults are held in pulses, so call setDefaults after it. */
-bool  PulDir_setConversion(PulDir*, float pulses_per_unit);
 bool  PulDir_setDefaults(PulDir*, float speed, float accel, float decel, float jerk);
 bool  PulDir_restoreDefaults(PulDir*);
 /* D16: refuses a delay past half the tick counter's range (about 3 h at a 5 us pulse). */

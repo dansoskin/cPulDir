@@ -13,7 +13,7 @@ void PulDir_attachLogger(void (*fn)(const char*))
 
 void puldir_log(const PulDir* a, const char* line)
 {
-    if (a->log_on && logger != NULL)
+    if ((a == NULL || a->log_on) && logger != NULL)
         logger(line);
 }
 
