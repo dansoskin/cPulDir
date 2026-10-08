@@ -10,6 +10,7 @@
 #include "puldir_port.h"
 #include "puldir_enable.h"
 #include "puldir_fault.h"
+#include "puldir_homing.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,12 +48,6 @@ typedef enum {
     PULDIR_MODE_STREAM, PULDIR_MODE_GROUP, PULDIR_MODE_HOMING
 } PulDirMode;
 
-typedef enum {
-    PULDIR_HOME_IDLE, PULDIR_HOME_MOVE_TOWARDS_LIMIT, PULDIR_HOME_DELAY1,
-    PULDIR_HOME_MOVE_AWAY_FROM_LIMIT, PULDIR_HOME_DELAY2,
-    PULDIR_HOME_ADJUST_POSITION, PULDIR_HOME_DELAY3, PULDIR_HOME_ERROR
-} PulDirHomeState;
-
 /* Why a call was refused; PulDir_loop turns it into one log line. */
 typedef enum {
     PULDIR_R_NONE, PULDIR_R_FAULT, PULDIR_R_MODE, PULDIR_R_ARG, PULDIR_R_RATE,
@@ -73,11 +68,6 @@ typedef struct PulDir {
     float lim[4];                        /* current speed, accel, decel, jerk, user units */
     uint32_t catchup_ms;
     bool  log_on;
-    int8_t home_dir;                     /* +1, -1, 0 = not configured */
-    float home_speed, home_adjust, home_zero;
-    float home_lim[4];                   /* the limits at homeStart: a run that ends unhomed restores them */
-    const uint8_t* home_switch;
-    uint32_t home_timeout_ticks;         /* setHoming's phase timeout */
     uint8_t slot;                        /* index in the axis table, PULDIR_MAX_AXES if unregistered */
 
     /* main -> plan requests (D17), written under the lock */
@@ -89,7 +79,7 @@ typedef struct PulDir {
     MotionProfile prof;                  /* pulses, relative to origin */
     uint64_t target;                     /* absolute, 32.32 pulses */
     int32_t  origin;
-    volatile bool moving, homed;
+    volatile bool moving;
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
@@ -105,16 +95,12 @@ typedef struct PulDir {
     float v_cmd;                         /* pulses/s */
     volatile float stream_err;           /* pulses: p_hold - P at the boundary */
 
-    /* homing */
-    volatile PulDirHomeState home_state;
-    PulDirHomeState home_fail;           /* the phase the last failed run was in */
-    uint32_t home_t0;                    /* the tick the current phase began */
-
     struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
 
     /* the modules, each with its own file */
     PulDirEnable enable;
     PulDirFault  fault;
+    PulDirHoming home;
 
     /* the pulse tick's state lives in puldir_pulse.c, by slot */
 

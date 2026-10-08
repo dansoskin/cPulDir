@@ -89,6 +89,16 @@ void puldir_set_inc(PulDir*, PulDirInc* out, int32_t inc);
 /* One interval toward T for an axis or a member; T, end and pb are 32.32 from the whole-pulse
  * base. D6 holds end M short when hold; arrival rounds away (E13). True once settled. */
 bool puldir_steer(PulDir*, PulDirInc* out, int64_t T, int64_t end, int64_t pb, bool arrival, bool hold);
+float puldir_to_pulses(int64_t q);            /* 32.32 to float pulses, saturated to +-2^24 (D2) */
+/* Limits in user units to the generator, and to lim[] only if it takes them. */
+void puldir_take_limits(PulDir*, const float l[4]);
+/* The generator stops dead where the pulses are (pb, relative to the origin): a
+ * new goal (E17), and a stream's idle generator stays put. */
+void puldir_halt_generator(PulDir*, int64_t pb);
+/* Aims this interval's end at the generator's position (T, pb, end: 32.32 from base). True at rest:
+ * settled on the final position, the generator done, the last pulse lowered. */
+bool puldir_run_generator(PulDir*, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
+                          bool pul_high);
 
 /* groups (puldir_group.c) */
 void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group, before the axes */
@@ -96,6 +106,8 @@ void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group
  * no rising edge on any member after this tick, every member IDLE, the move abandoned. */
 void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
 
+/* main context (puldir.c) */
+float puldir_rate_cap(float conv);            /* in user units: speeds at or above it are refused */
 /* Under the lock, from main or the plan tick, for an axis outside a group's move: no rising edge
  * after this tick, the target where the pulses stopped, IDLE, REQ_HALT for the generator. A homing
  * run gets back the limits homeStart saved; its homing state is the caller's to set. */
@@ -114,4 +126,5 @@ void   puldir_log(const PulDir* a, const char* line);     /* through the logger,
 #define PULDIR_INTERNAL_FUNCTIONS
 #include "puldir_enable.h"
 #include "puldir_fault.h"
+#include "puldir_homing.h"
 #endif

@@ -79,7 +79,7 @@ static void status(PulDir* a)
 {
     port_lock();
     const uint32_t faults = a->fault.count, last = a->fault.last_tick;
-    const PulDirHomeState hs = a->home_state, failed = a->home_fail;
+    const PulDirHomeState hs = a->home.state, failed = a->home.fail;
     port_unlock();
     char fail[40] = "";
     if (hs == PULDIR_HOME_ERROR)

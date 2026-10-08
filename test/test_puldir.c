@@ -1054,7 +1054,7 @@ static void t_setup_order(void)
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_UNREGISTERED);
     assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_UNREGISTERED);
     assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && a->req == req0);
-    assert(a->home_state == PULDIR_HOME_IDLE && a->slot == PULDIR_MAX_AXES);
+    assert(a->home.state == PULDIR_HOME_IDLE && a->slot == PULDIR_MAX_AXES);
     assert(PulDir_position(a) == 100.0f && PulDir_target(a) == 100.0f);
     nlines = 0;
     PulDir_loop(a);
@@ -1703,16 +1703,16 @@ static void t_setpos(void)
     fake_on_write(count_write);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 20.0f, 100.0f, 100.0f, 0.0f));
-    a->homed = true;
+    a->home.homed = true;
     assert(!PulDir_setPosition(a, NAN) && a->refusal == PULDIR_R_ARG);
     assert(!PulDir_setPosition(a, 3.0e7f) && a->refusal == PULDIR_R_ARG);   /* 3e9 pulses */
-    assert(a->homed && st(0).count == 0 && !(a->req & REQ_SETPOS));
+    assert(a->home.homed && st(0).count == 0 && !(a->req & REQ_SETPOS));
 
     /* refused while moving */
     assert(PulDir_moveTo(a, 2.0f));
     fake_run(10u * N);
     assert(!PulDir_setPosition(a, 7.0f) && a->refusal == PULDIR_R_NOT_IDLE);
-    assert(a->homed && PulDir_target(a) == 2.0f);
+    assert(a->home.homed && PulDir_target(a) == 2.0f);
     run_until_idle(a, TICK_HZ);
     assert(st(0).count == 200);
 
@@ -1723,7 +1723,7 @@ static void t_setpos(void)
         fake_run(1);
     PulDir_halt(a);
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_isMoving(a));
-    assert(!PulDir_setPosition(a, 7.0f) && a->refusal == PULDIR_R_NOT_IDLE && a->homed);
+    assert(!PulDir_setPosition(a, 7.0f) && a->refusal == PULDIR_R_NOT_IDLE && a->home.homed);
     run_until_idle(a, 3u * N);
     assert(st(0).Pb != (uint64_t)(uint32_t)st(0).count << 32);   /* halted between pulses */
 
@@ -1731,7 +1731,7 @@ static void t_setpos(void)
     assert(PulDir_setPosition(a, -3.0f));
     PulDirSnap s = st(0);
     assert(s.count == -300 && s.Pb == (uint64_t)(int64_t)-300 << 32);
-    assert(PulDir_position(a) == -3.0f && PulDir_target(a) == -3.0f && !a->homed);
+    assert(PulDir_position(a) == -3.0f && PulDir_target(a) == -3.0f && !a->home.homed);
     fake_run(N);
     assert(a->origin == -300 && a->prof.pos == 0.0f && a->prof.target == 0.0f && a->prof.done);
     assert(!PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
@@ -3173,7 +3173,7 @@ static void t_fault(void)
     assert(!a->fault.latched && a->fault.count == 0 && PulDir_isMoving(a) && PulDir_velocity(a) == 4000.0f);
 
     /* held: latched 2 ms after onset, within one plan interval; the axis halts */
-    a->homed = true;
+    a->home.homed = true;
     const uint32_t on = PulDir_ticks();
     fake_set_input(FLT(0), true);
     while (!a->fault.latched) {
@@ -3183,7 +3183,7 @@ static void t_fault(void)
     const size_t r0 = nrise;
     const int32_t ch = st(0).count;
     assert(a->fault.last_tick - on >= 2u * MS && a->fault.last_tick - on <= 2u * MS + N);
-    assert(a->fault.count == 1 && PulDir_status(a) == PULDIR_FAULT && !a->homed);
+    assert(a->fault.count == 1 && PulDir_status(a) == PULDIR_FAULT && !a->home.homed);
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
     fake_run(10u * MS);
     assert(nrise == r0 && st(0).count == ch && !PulDir_isMoving(a) && PulDir_target(a) == (float)ch);
@@ -3641,7 +3641,7 @@ static void home_plan(bool after)
     if (!after)
         return;
     const PulDir* a = &ax[0];
-    const PulDirHomeState h = a->home_state;
+    const PulDirHomeState h = a->home.state;
     if (nseen == 0 || seen[nseen - 1] != h) {
         assert(nseen < 16);
         seen[nseen] = h;
@@ -3721,7 +3721,7 @@ static void t_homing(void)
     assert(!PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 3.0e9f, 3000u));
     assert(a->refusal == PULDIR_R_ARG);
     assert(!PulDir_setHoming(a, -1, cap, 50.0f, &sw, 100.0f, 3000u) && a->refusal == PULDIR_R_RATE);
-    assert(a->home_dir == 0 && a->home_switch == NULL);
+    assert(a->home.dir == 0 && a->home.switch_ptr == NULL);
     assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_NO_HOMING);
     assert(a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a) && a->req == 0);
     assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 3000u));
@@ -3747,7 +3747,7 @@ static void t_homing(void)
     assert(!PulDir_setHoming(a, 1, 10.0f, 0.0f, &sw, 0.0f, 10u) && a->refusal == PULDIR_R_BUSY);
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setPosition(a, 0.0f) && a->refusal == PULDIR_R_NOT_IDLE);
-    assert(a->home_dir == -1 && a->mode == PULDIR_MODE_HOMING);
+    assert(a->home.dir == -1 && a->mode == PULDIR_MODE_HOMING);
     PulDir_loop(a);
     nlines = 0;
     for (uint32_t t = 0; a->mode == PULDIR_MODE_HOMING; t++) {
@@ -4006,7 +4006,7 @@ static void t_homing_limits(void)
     /* a stop in the adjust, which runs on the defaults' one-tap window: the
      * generator cannot widen it in flight, so it takes them once at rest */
     home_begin(a, st(0).count - 300);
-    for (uint32_t t = 0; !(a->home_state == PULDIR_HOME_ADJUST_POSITION && fabsf(a->vel_out) > 500.0f); t++) {
+    for (uint32_t t = 0; !(a->home.state == PULDIR_HOME_ADJUST_POSITION && fabsf(a->vel_out) > 500.0f); t++) {
         assert(t < 3000u * MS);
         fake_run(1);
     }
@@ -4111,7 +4111,7 @@ static void t_rollover(void)
     assert(t_to - t_sp >= PULDIR_STREAM_TIMEOUT_MS * MS && t_to - t_sp <= PULDIR_STREAM_TIMEOUT_MS * MS + N);
     assert(PulDir_streamTimedOut(&ax[0]));
     assert(t_fail - t_home >= 30u * MS && t_fail - t_home <= 30u * MS + 2u * N);
-    assert(ax[1].home_state == PULDIR_HOME_ERROR);
+    assert(ax[1].home.state == PULDIR_HOME_ERROR);
     assert(t_low - t_clr >= PULDIR_FAULT_CLEAR_MS * MS && t_low - t_clr <= PULDIR_FAULT_CLEAR_MS * MS + N);
     assert(t_latch - t_on >= PULDIR_FAULT_DEBOUNCE_MS * MS && t_latch - t_on <= PULDIR_FAULT_DEBOUNCE_MS * MS + N);
     assert(first_rise[4] < 0x80000000u && first_rise[4] - t_ena >= 5u * MS);

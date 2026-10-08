@@ -7,12 +7,11 @@
 #define M   (N * N)                             /* D6 margin, in 2^-32 pulse */
 #define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
 #define TIMEOUT_TICKS  puldir_ms_ticks(PULDIR_STREAM_TIMEOUT_MS)
-#define DELAY_TICKS    puldir_ms_ticks(PULDIR_HOMING_DELAY_MS)
 
 static int64_t to_fix(float pulses) { return (int64_t)(pulses * PULDIR_FIX); }
 
 /* Pulses as float, saturated to +-2^24 so the generator never sees more. */
-static float to_pulses(int64_t q)
+float puldir_to_pulses(int64_t q)
 {
     if (q > SAT)
         q = SAT;
@@ -86,10 +85,10 @@ bool puldir_steer(PulDir* a, PulDirInc* out, int64_t T, int64_t end, int64_t pb,
 
 /* The generator stops dead where the pulses are (pb, relative to the origin): a
  * new goal (E17), and a stream's idle generator stays put. */
-static void halt_generator(PulDir* a, int64_t pb)
+void puldir_halt_generator(PulDir* a, int64_t pb)
 {
     MotionProfile_halt(&a->prof);
-    (void)MotionProfile_setPosition(&a->prof, to_pulses(pb));
+    (void)MotionProfile_setPosition(&a->prof, puldir_to_pulses(pb));
     a->arrived = false;
     a->settle = 0;
     a->stream_live = false;
@@ -97,7 +96,7 @@ static void halt_generator(PulDir* a, int64_t pb)
 
 /* Aims this interval's end at the generator's position (T, pb, end: 32.32 from base). True at rest:
  * settled on the final position, the generator done, the last pulse lowered. */
-static bool run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
+bool puldir_run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
                           bool pul_high)
 {
     MotionProfile* p = &a->prof;
@@ -125,7 +124,7 @@ static bool run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, 
 static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
                         bool pul_high)
 {
-    if (run_generator(a, out, base, pb, live, pul_high)) {
+    if (puldir_run_generator(a, out, base, pb, live, pul_high)) {
         a->target = base;                       /* the target, or the last integer a stop reached */
         a->mode = PULDIR_MODE_IDLE;
         a->moving = false;
@@ -133,10 +132,8 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
     }
 }
 
-/* ---- homing (5.8): the phases of cFlexyStepper's machine, from the plan tick ---- */
-
 /* Limits in user units to the generator, and to lim[] only if it takes them. */
-static void take_limits(PulDir* a, const float l[4])
+void puldir_take_limits(PulDir* a, const float l[4])
 {
     const float c = a->conv;
     if (MotionProfile_setLimits(&a->prof, (MotionLimits){ l[0] * c, l[1] * c, l[2] * c, l[3] * c }))
@@ -144,142 +141,12 @@ static void take_limits(PulDir* a, const float l[4])
             a->lim[k] = l[k];
 }
 
-/* A phase timed out: the run ends unhomed, the pulses stop now. The next plan tick
- * applies the halt's REQ_HALT and REQ_LIMITS (the limits homeStart found) to the generator. */
-static void home_fail(PulDir* a, PulDirInc* out, int64_t pb)
-{
-    a->home_fail = a->home_state;
-    a->home_state = PULDIR_HOME_ERROR;
-    a->events |= PULDIR_EV_HOME_FAILED;
-    port_lock();
-    puldir_halt_locked(a);
-    port_unlock();
-    /* The requests it left apply next tick; the generator stops and takes its limits back now. */
-    halt_generator(a, pb);
-    take_limits(a, a->home_lim);
-    puldir_set_inc(a, out, 0);
-}
-
-/* A new goal for the generator (E17). */
-static void home_course(PulDir* a)
-{
-    a->arrived = false;
-    a->settle = 0;
-}
-
-/* A moving phase: the homing speed toward the switch, or 0.2x back, as the speed limit, as
- * cFlexyStepper's jog did. The generator is at rest, so only vmax changes. */
-static void home_jog(PulDir* a, bool away)
-{
-    const float speed = away ? 0.2f * a->home_speed : a->home_speed;
-    const float l[4] = { speed, a->lim[1], a->lim[2], a->lim[3] };
-    take_limits(a, l);
-    const float dir = away ? -(float)a->home_dir : (float)a->home_dir;
-    (void)MotionProfile_setEndless(&a->prof, dir * speed * a->conv);   /* finite: homeStart checked it */
-    home_course(a);
-}
-
-/* DELAY3: the datum, as PulDir_setPosition sets it. The axis must be at rest:
- * no increment and the pin low, read again under the lock (puldir_set_datum). */
-static bool home_datum(PulDir* a, PulDirInc* out)
-{
-    const int32_t c = (int32_t)roundf(a->home_zero * a->conv);   /* checked by homeStart */
-    PulDirSnap s;
-    port_lock();
-    puldir_pulse_read(a->slot, 0u, &s);
-    const bool rest = s.inc == 0 && !s.high;
-    if (rest)
-        puldir_set_datum(a->slot, c);
-    port_unlock();
-    if (!rest)
-        return false;
-    a->origin = c;
-    a->target = (uint64_t)(uint32_t)c << 32;
-    (void)MotionProfile_setPosition(&a->prof, 0.0f);   /* done: ADJUST ended at rest */
-    a->homed = true;
-    a->home_state = PULDIR_HOME_IDLE;
-    a->mode = PULDIR_MODE_IDLE;
-    a->moving = false;
-    a->vel_out = 0.0f;
-    a->events |= PULDIR_EV_HOMED;
-    puldir_set_inc(a, out, 0);
-    return true;
-}
-
-/* One interval of HOMING. The switch is read before the generator advances, so a switch seen now
- * stops the aim published now. A phase timeout halts the axis (2.2). */
-static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t count,
-                     int32_t live, bool pul_high, uint32_t now)
-{
-    MotionProfile* p = &a->prof;
-    const uint8_t sw = *(const volatile uint8_t*)a->home_switch;
-    const uint32_t in_phase = now - a->home_t0;
-    const bool late = in_phase >= a->home_timeout_ticks;
-    PulDirHomeState next = a->home_state;
-    switch (a->home_state) {
-    case PULDIR_HOME_MOVE_TOWARDS_LIMIT:
-    case PULDIR_HOME_MOVE_AWAY_FROM_LIMIT: {
-        const bool towards = a->home_state == PULDIR_HOME_MOVE_TOWARDS_LIMIT;
-        if (sw == (towards ? 1u : 0u)) {
-            MotionProfile_halt(p);              /* stops on the aim published last interval */
-            home_course(a);
-            next = towards ? PULDIR_HOME_DELAY1 : PULDIR_HOME_DELAY2;
-        } else if (late) {
-            home_fail(a, out, pb);
-            return;
-        }
-        break;
-    }
-    case PULDIR_HOME_DELAY1:
-        if (in_phase >= DELAY_TICKS) {
-            home_jog(a, true);
-            next = PULDIR_HOME_MOVE_AWAY_FROM_LIMIT;
-        }
-        break;
-    case PULDIR_HOME_DELAY2:
-        if (in_phase >= DELAY_TICKS) {
-            const int64_t t = (int64_t)count + (int64_t)roundf(a->home_adjust * a->conv);
-            if (t < INT32_MIN || t > INT32_MAX) {
-                home_fail(a, out, pb);
-                return;
-            }
-            take_limits(a, a->def);             /* the defaults, for the adjust */
-            a->target = (uint64_t)t << 32;
-            (void)MotionProfile_setTarget(p, to_pulses((int64_t)(a->target - base)));
-            home_course(a);
-            next = PULDIR_HOME_ADJUST_POSITION;
-        }
-        break;
-    case PULDIR_HOME_ADJUST_POSITION:
-        if (late) {
-            home_fail(a, out, pb);
-            return;
-        }
-        break;
-    case PULDIR_HOME_DELAY3:
-        if (in_phase >= DELAY_TICKS && !pul_high && live == 0 && home_datum(a, out))
-            return;
-        break;
-    default:
-        break;
-    }
-    if (next != a->home_state) {
-        a->home_state = next;
-        a->home_t0 = now;
-    }
-    /* The adjust ends through the usual arrival path (E13, D19). */
-    if (run_generator(a, out, base, pb, live, pul_high) && a->home_state == PULDIR_HOME_ADJUST_POSITION) {
-        a->home_state = PULDIR_HOME_DELAY3;
-        a->home_t0 = now;
-    }
-}
-
 /* Leave STREAM for STOPPING (5.6): the idle generator is put in motion at the
  * stream's velocity through the boundary position, then stopped at its decel. */
 static void leave_stream(PulDir* a, int64_t pb)
 {
     /* The generator was halted by streamBegin and stays done: seed accepts. */
-    (void)MotionProfile_seed(&a->prof, to_pulses(pb), a->v_cmd);
+    (void)MotionProfile_seed(&a->prof, puldir_to_pulses(pb), a->v_cmd);
     MotionProfile_stop(&a->prof);
     a->stream_live = false;
     a->arrived = false;                         /* a new course (E17) */
@@ -331,7 +198,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
     /* 2. Shift the generator onto the new origin. A profile heading for a target
      * takes the axis's target relative to it. */
-    const float trel = to_pulses((int64_t)(a->target - base));
+    const float trel = puldir_to_pulses((int64_t)(a->target - base));
     MotionProfile_rebase(&a->prof, (float)shift, trel);
 
     /* 3. Requests, read after service: a latch's halt this tick is applied now (E17). Halt first, so
@@ -340,14 +207,14 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     uint16_t req = a->req;
     a->req = 0;
     if (req & REQ_HALT)                         /* puldir_kill zeroed the increments: pb is where they stopped */
-        halt_generator(a, pb);
+        puldir_halt_generator(a, pb);
     if (req & REQ_STREAM_BEGIN) {
         /* The stream starts at the velocity the running set was aimed with; a stream ended and
          * begun within one interval keeps its own. The generator idles where the pulses are. */
         if (!a->stream_live)
             a->v_cmd = a->prof.vel;
         MotionProfile_halt(&a->prof);
-        (void)MotionProfile_setPosition(&a->prof, to_pulses(pb));
+        (void)MotionProfile_setPosition(&a->prof, puldir_to_pulses(pb));
         a->stream_live = true;
         a->arrived = false;                     /* the generator's goal is gone (E17) */
         a->settle = 0;
@@ -382,18 +249,15 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     }
     if (req & REQ_STOP)
         MotionProfile_stop(&a->prof);
-    if ((req & REQ_HOME) && a->mode == PULDIR_MODE_HOMING) {
-        home_jog(a, false);                     /* homeStart: toward the switch */
-        a->home_state = PULDIR_HOME_MOVE_TOWARDS_LIMIT;
-        a->home_t0 = now;
-    }
+    if ((req & REQ_HOME) && a->mode == PULDIR_MODE_HOMING)
+        puldir_home_begin(a, now);              /* homeStart: toward the switch */
 
     /* 4. The enable delay (5.8): a drive enabled too recently publishes nothing and its generator
      * waits. The homing phase clock starts when the hold ends. */
     if (a->enable.wait && a->mode != PULDIR_MODE_IDLE) {
         puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
-        a->home_t0 = now;
+        a->home.t0 = now;
         return;
     }
 
@@ -406,7 +270,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
         run_stream(a, out, base, pb, count, now + ahead);
         break;
     case PULDIR_MODE_HOMING:
-        run_home(a, out, base, pb, count, live, pul_high, now);
+        puldir_home_run(a, out, base, pb, count, live, pul_high, now);
         break;
     case PULDIR_MODE_IDLE:
         puldir_set_inc(a, out, 0);
@@ -433,13 +297,8 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         return;
 
     /* Latch: halt, and leave the enable pin alone (D12). */
-    a->homed = false;
+    puldir_home_fault(a);
     a->enable.held = true;
-    if (a->mode == PULDIR_MODE_HOMING) {
-        a->home_fail = a->home_state;
-        a->home_state = PULDIR_HOME_ERROR;
-        a->events |= PULDIR_EV_HOME_FAILED;
-    }
     PulDirGroup* g = a->group;
     port_lock();
     if (a->mode == PULDIR_MODE_GROUP && g != NULL) {
