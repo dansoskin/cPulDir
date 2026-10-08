@@ -129,7 +129,8 @@ typedef struct PulDir {
     volatile uint16_t events;
     PulDirRefusal refusal;
     const char* refused_call;
-    float refused_value;
+    float refused_value;                 /* R_RATE: the cap. R_TAPS: the jerk floor as a plain quotient; the
+                                            log line rounds it up, and that printed value is the one that fits */
 } PulDir;
 
 typedef struct PulDirGroup {

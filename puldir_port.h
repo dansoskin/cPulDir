@@ -18,7 +18,9 @@ bool puldir_timing_pulse(uint32_t pulse_us);    /* 2 to 1000: one pulse tick, on
 bool puldir_timing_plan(uint32_t plan_us);      /* 250 to 10000; PulDir_init checks it is 2 to 4096 pulse periods */
 
 /* Levels only: pin modes are the application's (CubeMX's) business. The attach calls park each
- * output with port_pin_write before PulDir_start; from then on the ticks write and read. */
+ * output with port_pin_write before PulDir_start; after it the pulse tick writes the pulse and
+ * direction pins, the plan tick reads the fault pin, and main writes the enable and clear pins
+ * under the lock. */
 void port_pin_write(puldir_pin_t, bool level);   /* from the pulse tick: one register write */
 bool port_pin_read (puldir_pin_t);               /* from the plan tick */
 /* Sets the two timers' periods to the pulse_us and plan_us the port handed over, in 1 us counts. */

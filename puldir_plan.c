@@ -148,7 +148,7 @@ static void take_limits(PulDir* a, const float l[4])
 
 /* A phase timed out: the run ends unhomed, the pulses stop now. The next plan tick
  * applies the halt's REQ_HALT and REQ_LIMITS (the limits homeStart found) to the generator. */
-static void home_fail(PulDir* a, PulDirInc* out)
+static void home_fail(PulDir* a, PulDirInc* out, int64_t pb)
 {
     a->home_fail = a->home_state;
     a->home_state = PULDIR_HOME_ERROR;
@@ -156,6 +156,9 @@ static void home_fail(PulDir* a, PulDirInc* out)
     port_lock();
     puldir_halt_locked(a);
     port_unlock();
+    /* The requests it left apply next tick; the generator stops and takes its limits back now. */
+    halt_generator(a, pb);
+    take_limits(a, a->home_lim);
     puldir_set_inc(a, out, 0);
 }
 
@@ -224,7 +227,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
             home_course(a);
             next = towards ? PULDIR_HOME_DELAY1 : PULDIR_HOME_DELAY2;
         } else if (late) {
-            home_fail(a, out);
+            home_fail(a, out, pb);
             return;
         }
         break;
@@ -239,7 +242,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
         if (in_phase >= DELAY_TICKS) {
             const int64_t t = (int64_t)count + (int64_t)roundf(a->home_adjust * a->conv);
             if (t < INT32_MIN || t > INT32_MAX) {
-                home_fail(a, out);
+                home_fail(a, out, pb);
                 return;
             }
             take_limits(a, a->def);             /* the defaults, for the adjust */
@@ -251,7 +254,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
         break;
     case PULDIR_HOME_ADJUST_POSITION:
         if (late) {
-            home_fail(a, out);
+            home_fail(a, out, pb);
             return;
         }
         break;
