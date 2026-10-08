@@ -38,7 +38,7 @@ static void add_axis(uint8_t i, bool pul_active_low, bool dir_inverted)
 {
     char name[8];
     snprintf(name, sizeof name, "a%u", (unsigned)i);
-    PulDir_init(&ax[i], name);
+    assert(PulDir_init(&ax[i], name));
     fake_mark_motion_pin((uint8_t)(2u * i));
     fake_mark_motion_pin((uint8_t)(2u * i + 1u));
     PulDir_attachPins(&ax[i], fake_pin((uint8_t)(2u * i)), fake_pin((uint8_t)(2u * i + 1u)),
@@ -158,10 +158,15 @@ static uint32_t rise[MAX_EDGES], fall[MAX_EDGES];
 
 static void t_setup(void)
 {
-    PulDir a;
+    PulDir a, junk;
     memset(&a, 0xA5, sizeof a);           /* init must not depend on a zeroed struct */
-    PulDir_init(&a, "a name longer than sixteen");
-    assert(strlen(a.name) == 15 && strncmp(a.name, "a name longer t", 15) == 0);
+    memset(&junk, 0xA5, sizeof junk);
+    /* a name that does not fit, or none: refused, nothing written */
+    assert(!PulDir_init(&a, "sixteen chars ok"));
+    assert(!PulDir_init(&a, NULL));
+    assert(memcmp(&a, &junk, sizeof a) == 0);
+    assert(PulDir_init(&a, "fifteen chars o"));
+    assert(strcmp(a.name, "fifteen chars o") == 0);
     assert(a.conv == 1.0f);
     for (int i = 0; i < 4; i++) {
         const float want = i < 3 ? 200.0f : 0.0f;
@@ -175,7 +180,7 @@ static void t_setup(void)
     assert(a.prof.lim.vmax == 200.0f && a.prof.lim.amax == 200.0f &&
            a.prof.lim.dmax == 200.0f && a.prof.lim.jmax == 0.0f);
 
-    PulDir_init(&a, NULL);
+    assert(PulDir_init(&a, ""));
     assert(a.name[0] == '\0');
 
     /* register refuses without pins, and changes nothing */
@@ -215,7 +220,7 @@ static void t_register_after_start(void)
 {
     setup(1);
     PulDir b;
-    PulDir_init(&b, "late");
+    assert(PulDir_init(&b, "late"));
     PulDir_attachPins(&b, fake_pin(10), fake_pin(11), false, false);
     assert(!PulDir_register(&b));
     assert(b.slot == PULDIR_MAX_AXES && puldir_naxes == 1);
@@ -888,7 +893,7 @@ static void t_refusals(void)
 {
     /* the natural setup order: the conversion first, then limits in user units */
     PulDir b;
-    PulDir_init(&b, "b");
+    assert(PulDir_init(&b, "b"));
     assert(PulDir_setConversion(&b, 280.0f));
     assert(PulDir_setDefaults(&b, 15.0f, 30.0f, 30.0f, 0.0f));
     assert(PulDir_speed(&b) == 15.0f && PulDir_acceleration(&b) == 30.0f);
@@ -965,6 +970,32 @@ static void t_refusals(void)
     assert(PulDir_target(a) == -11.5f && PulDir_isMoving(a) && PulDir_status(a) == PULDIR_MOVING);
     run_until_idle(a, 10u * PULDIR_TICK_HZ);
     assert(st(0).count == -23 && PulDir_position(a) == -11.5f);
+}
+
+/* 5.8, 5.9: each new batch of overruns is logged once, by the first axis loop
+ * that can log it. */
+static void t_overrun_log(void)
+{
+    setup(2);
+    PulDir_attachLogger(logger);
+    fake_pulse(false);
+    PulDir_loop(&ax[0]);
+    assert(nlines == 0);
+    fake_pulse(true);
+    fake_pulse(true);
+    PulDir_loop(&ax[1]);
+    assert(nlines == 1 && strcmp(lines[0], "[a1] pulse tick overrun, total 2") == 0);
+    PulDir_loop(&ax[0]);
+    PulDir_loop(&ax[1]);
+    assert(nlines == 1);
+
+    /* an axis that does not log leaves the batch to one that does */
+    PulDir_setLogging(&ax[0], false);
+    fake_pulse(true);
+    PulDir_loop(&ax[0]);
+    assert(nlines == 1);
+    PulDir_loop(&ax[1]);
+    assert(nlines == 2 && strcmp(lines[1], "[a1] pulse tick overrun, total 3") == 0);
 }
 
 /* ---- jog, stop, halt, the datum and live limits --------------------------------------------- */
@@ -2506,7 +2537,7 @@ static void t_group_rules(void)
 
     /* init: refused for no member, a missing, unregistered or repeated one, and a full table */
     PulDir loose;
-    PulDir_init(&loose, "loose");
+    assert(PulDir_init(&loose, "loose"));
     PulDir* bad1[2] = { &ax[0], &loose };
     PulDir* bad2[2] = { &ax[0], &ax[0] };
     PulDir* bad3[2] = { &ax[0], NULL };
@@ -2745,7 +2776,7 @@ static void t_enable_release(void)
     assert(!PulDir_setDelays(a, 0xFFFFFFFFu, 0u) && a->refusal == PULDIR_R_ARG);
     assert(!PulDir_setDelays(a, 0u, 0xFFFFFFFFu) && a->enable_ms == 50u && a->release_ms == 200u);
     PulDir b;
-    PulDir_init(&b, "b");
+    assert(PulDir_init(&b, "b"));
     assert(!PulDir_enable(&b, true) && b.refusal == PULDIR_R_NO_PIN && !b.enabled);
 
     /* a move on a disabled drive: the pin and isMoving at once, the first pulse enable_ms later */
@@ -3395,8 +3426,8 @@ static void home_plan(bool after)
         sw_frozen = true;
 }
 
-/* homeStart with the switch at sw_at; runs until the axis leaves HOMING. */
-static void home_run(PulDir* a, int32_t at, uint32_t max_ms)
+/* homeStart with the switch at sw_at. */
+static void home_begin(PulDir* a, int32_t at)
 {
     sw_at = at;
     sw_pos = st(0).count;
@@ -3407,6 +3438,12 @@ static void home_run(PulDir* a, int32_t at, uint32_t max_ms)
     assert(PulDir_homeStart(a));
     assert(a->mode == PULDIR_MODE_HOMING && PulDir_isMoving(a) && !PulDir_isHomed(a));
     assert(PulDir_homeState(a) == PULDIR_HOME_MOVE_TOWARDS_LIMIT);
+}
+
+/* homeStart with the switch at sw_at; runs until the axis leaves HOMING. */
+static void home_run(PulDir* a, int32_t at, uint32_t max_ms)
+{
+    home_begin(a, at);
     for (uint32_t t = 0; a->mode == PULDIR_MODE_HOMING; t++) {
         assert(t < max_ms * MS);
         fake_run(1);
@@ -3643,6 +3680,130 @@ static void t_homing(void)
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_PROFILE);
     assert(PulDir_isHomed(a));                /* a refused homeStart leaves the datum alone */
+}
+
+/* The limits as the getters read them and, at conv 1, as the generator holds them. */
+static void limits_are(const PulDir* a, const float l[4], bool generator)
+{
+    for (int k = 0; k < 4; k++)
+        assert(a->lim[k] == l[k]);
+    const MotionLimits g = a->prof.lim;
+    assert(!generator || (g.vmax == l[0] && g.amax == l[1] && g.dmax == l[2] && g.jmax == l[3]));
+}
+
+/* Runs until the axis has left HOMING. */
+static void home_finish(PulDir* a, uint32_t max_ms)
+{
+    for (uint32_t t = 0; a->mode == PULDIR_MODE_HOMING; t++) {
+        assert(t < max_ms * MS);
+        fake_run(1);
+    }
+}
+
+/* A run that ends unhomed, by any exit, puts back the limits homeStart found;
+ * while it runs, the limit setters are refused, so nothing races the plan tick. */
+static void t_homing_limits(void)
+{
+    add_axis(0, false, false);
+    PulDir* a = &ax[0];
+    PulDir_attachFault(a, fake_pin(FLT(0)), false);
+    PulDir_attachFaultClear(a, fake_pin(CLR(0)), false);
+    start();
+    fake_on_write(home_write);
+    fake_on_plan(home_plan);
+    const float def[4] = { 4000.0f, 40000.0f, 40000.0f, 0.0f };
+    /* A jerk whose window is wider than the one tap of the defaults. */
+    const float mine[4] = { 1000.0f, 30000.0f, 20000.0f,
+                            4.0f * MotionProfile_minJerk(30000.0f, 20000.0f, 1.0f / (float)PULDIR_PLAN_HZ) };
+    assert(PulDir_setDefaults(a, def[0], def[1], def[2], def[3]));
+    assert(PulDir_setSpeed(a, mine[0]) && PulDir_setAcceleration(a, mine[1]));
+    assert(PulDir_setDeceleration(a, mine[2]) && PulDir_setJerk(a, mine[3]));
+    assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 300u));
+    fake_run(N);
+    limits_are(a, mine, true);
+
+    /* refused while homing, limits and defaults unchanged */
+    home_begin(a, -1000000);
+    fake_run(20u * MS);
+    const float run[4] = { 2000.0f, mine[1], mine[2], mine[3] };   /* the homing speed as the limit */
+    limits_are(a, run, true);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setSpeed(a, 500.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setAcceleration(a, 500.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setDeceleration(a, 500.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setJerk(a, 0.0f) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_restoreDefaults(a) && a->refusal == PULDIR_R_MODE);
+    a->refusal = PULDIR_R_NONE;
+    assert(!PulDir_setDefaults(a, 1.0f, 1.0f, 1.0f, 0.0f) && a->refusal == PULDIR_R_MODE);
+    fake_run(N);
+    limits_are(a, run, true);
+    for (int k = 0; k < 4; k++)
+        assert(a->def[k] == def[k]);
+
+    /* halt, homeStop and stop put them back at once; the generator takes them */
+    for (int k = 0; k < 3; k++) {
+        if (k > 0) {
+            home_begin(a, -1000000);
+            fake_run(20u * MS);
+            limits_are(a, run, true);
+        }
+        if (k == 0)
+            PulDir_halt(a);
+        else if (k == 1)
+            PulDir_homeStop(a);
+        else
+            PulDir_stop(a);
+        limits_are(a, mine, false);
+        run_until_idle(a, PULDIR_TICK_HZ);
+        fake_run(N);
+        limits_are(a, mine, true);
+        assert(PulDir_homeState(a) == PULDIR_HOME_IDLE && a->mode == PULDIR_MODE_IDLE);
+    }
+
+    /* a stop in the adjust, which runs on the defaults' one-tap window: the
+     * generator cannot widen it in flight, so it takes them once at rest */
+    home_begin(a, st(0).count - 300);
+    for (uint32_t t = 0; !(a->home_state == PULDIR_HOME_ADJUST_POSITION && fabsf(a->vel_out) > 500.0f); t++) {
+        assert(t < 3000u * MS);
+        fake_run(1);
+    }
+    PulDir_stop(a);
+    limits_are(a, mine, false);
+    fake_run(N);
+    assert(a->prof.lim.jmax == 0.0f && a->prof.lim.vmax == def[0]);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    fake_run(N);
+    limits_are(a, mine, true);
+
+    /* a phase timeout and a fault latch end the run from the plan tick */
+    home_begin(a, -1000000);
+    home_finish(a, 400u);
+    assert(PulDir_homeState(a) == PULDIR_HOME_ERROR);
+    limits_are(a, mine, true);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    home_begin(a, -1000000);
+    fake_run(20u * MS);
+    fake_set_input(FLT(0), true);
+    for (uint32_t t = 0; !a->fault; t++) {
+        assert(t < 10u * MS);
+        fake_run(1);
+    }
+    assert(PulDir_homeState(a) == PULDIR_HOME_ERROR && a->mode == PULDIR_MODE_IDLE);
+    limits_are(a, mine, true);
+    fake_set_input(FLT(0), false);
+    assert(PulDir_clearFault(a));
+    fake_run(12u * MS);
+    assert(!a->fault);
+
+    /* a run that homes leaves the defaults its adjust ran on */
+    home_begin(a, st(0).count - 300);
+    home_finish(a, 6000u);
+    assert(PulDir_isHomed(a));
+    limits_are(a, def, true);
 }
 
 /* Test 22: with the counter started 1,000 ticks below its wrap, every timed
@@ -3889,6 +4050,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "arrival_twice", t_arrival_twice },
     { "creep", t_creep },
     { "refusals", t_refusals },
+    { "overrun_log", t_overrun_log },
     { "jog", t_jog },
     { "stop", t_stop },
     { "stop_random", t_stop_random },
@@ -3920,6 +4082,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "group_fault", t_group_fault },
     { "group_paths", t_group_paths },
     { "homing", t_homing },
+    { "homing_limits", t_homing_limits },
     { "rollover", t_rollover },
     { "console", t_console },
 };

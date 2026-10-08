@@ -8,14 +8,15 @@
 
 static bool started;                    /* PulDir_start has run */
 
-void PulDir_init(PulDir* a, const char* name)
+bool PulDir_init(PulDir* a, const char* name)
 {
+    size_t len = 0;
+    while (name != NULL && len < sizeof a->name && name[len] != '\0')
+        len++;
+    if (name == NULL || len == sizeof a->name)
+        return false;                   /* nothing to log through: the struct is not ours yet */
     memset(a, 0, sizeof *a);
-    size_t i = 0;
-    if (name)
-        for (; i < sizeof a->name - 1u && name[i] != '\0'; i++)
-            a->name[i] = name[i];
-    a->name[i] = '\0';
+    memcpy(a->name, name, len);
     a->conv = 1.0f;
     const float d[4] = { 200.0f, 200.0f, 200.0f, 0.0f };
     for (int k = 0; k < 4; k++)
@@ -31,6 +32,7 @@ void PulDir_init(PulDir* a, const char* name)
      * the limits are finite and positive, so neither call can refuse. */
     (void)MotionProfile_init(&a->prof, 0.0f, 1.0f / (float)PULDIR_PLAN_HZ);
     (void)MotionProfile_setLimits(&a->prof, (MotionLimits){ d[0], d[1], d[2], d[3] });
+    return true;
 }
 
 void PulDir_attachPins(PulDir* a, puldir_pin_t pulse, puldir_pin_t dir,
@@ -158,11 +160,16 @@ static float jerk_floor(float acc, float dec, float conv)
     return j;
 }
 
-/* Validate four limits (user units) at conv exactly as MotionProfile_setLimits
- * will see them, so the plan tick's call cannot refuse; then hand them over
- * (D17). The frozen-window test reads n and done under the same lock as the
- * stores, so the plan tick cannot move the generator in between. */
-static bool apply_limits(PulDir* a, const float lim[4], const char* call)
+/* GROUP: the path profile owns the limits until the move ends (5.7). HOMING: the
+ * run sets them from the plan tick. */
+static bool limits_busy(PulDirMode m)
+{
+    return m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING;
+}
+
+/* Checks four limits (user units) as MotionProfile_setLimits will see them, then
+ * stores them, and def too, under the lock that reads the frozen window (D17). */
+static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const char* call)
 {
     const float conv = a->conv;
     const float v = lim[0] * conv, acc = lim[1] * conv, dec = lim[2] * conv, j = lim[3] * conv;
@@ -180,11 +187,12 @@ static bool apply_limits(PulDir* a, const float lim[4], const char* call)
         value = jerk_floor(acc, dec, conv);
     } else {
         port_lock();
-        if (a->mode == PULDIR_MODE_GROUP) {
-            why = PULDIR_R_MODE;            /* the path profile owns the limits until the move ends (5.7) */
+        if (limits_busy(a->mode)) {
+            why = PULDIR_R_MODE;
         } else if (a->prof.done || j == 0.0f || ratio <= (float)a->prof.n) {
-            for (int k = 0; k < 4; k++)
-                a->lim[k] = lim[k];
+            memcpy(a->lim, lim, sizeof a->lim);
+            if (defaults)
+                memcpy(a->def, lim, sizeof a->def);
             a->req |= REQ_LIMITS;
         } else {
             why = PULDIR_R_WINDOW;          /* the window is frozen in flight (5.2) */
@@ -198,37 +206,48 @@ static bool apply_limits(PulDir* a, const float lim[4], const char* call)
     return true;
 }
 
+/* The copy and the mode at one instant: a copy taken in HOMING could be stale
+ * by the time the run ends, so it is refused here, not by apply_limits. */
 static bool set_limit(PulDir* a, int k, float x, const char* call)
 {
     float l[4];
+    port_lock();
     memcpy(l, a->lim, sizeof l);
+    const bool busy = limits_busy(a->mode);
+    port_unlock();
+    if (busy) {
+        puldir_refuse(a, call, PULDIR_R_MODE, 0.0f);
+        return false;
+    }
     l[k] = x;
-    return apply_limits(a, l, call);
+    return apply_limits(a, l, false, call);
 }
 
 /* Limits and defaults stay fixed in pulses, as in cFlexyStepper: the user-unit
- * values are rescaled, so the generator's limits are untouched and there is
- * nothing to check but the argument. */
+ * values are rescaled, so the generator's limits are untouched. */
 bool PulDir_setConversion(PulDir* a, float pulses_per_unit)
 {
     const float c = pulses_per_unit;
     PulDirRefusal why = PULDIR_R_NONE;
+    float lim[4], def[4];
+    port_lock();                                /* the plan tick writes lim, but never in IDLE */
+    const bool idle = a->mode == PULDIR_MODE_IDLE && !a->moving;
+    memcpy(lim, a->lim, sizeof lim);
+    memcpy(def, a->def, sizeof def);
+    port_unlock();
     if (!(isfinite(c) && c > 0.0f)) {
         why = PULDIR_R_ARG;
+    } else if (!idle) {
+        why = PULDIR_R_NOT_IDLE;
     } else {
-        float lim[4], def[4];
-        for (int k = 0; k < 4; k++) {           /* read in main context, where they are written */
-            lim[k] = a->lim[k] * a->conv / c;
-            def[k] = a->def[k] * a->conv / c;
+        for (int k = 0; k < 4; k++) {
+            lim[k] = lim[k] * a->conv / c;
+            def[k] = def[k] * a->conv / c;
         }
-        port_lock();
-        if (a->mode == PULDIR_MODE_IDLE && !a->moving) {
-            a->conv = c;
-            memcpy(a->lim, lim, sizeof lim);
-            memcpy(a->def, def, sizeof def);
-        } else {
-            why = PULDIR_R_NOT_IDLE;
-        }
+        port_lock();                            /* only main context leaves IDLE */
+        a->conv = c;
+        memcpy(a->lim, lim, sizeof lim);
+        memcpy(a->def, def, sizeof def);
         port_unlock();
     }
     if (why != PULDIR_R_NONE) {
@@ -241,15 +260,16 @@ bool PulDir_setConversion(PulDir* a, float pulses_per_unit)
 bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float jerk)
 {
     const float d[4] = { speed, accel, decel, jerk };
-    if (!apply_limits(a, d, "setDefaults"))
-        return false;
-    memcpy(a->def, d, sizeof d);
-    return true;
+    return apply_limits(a, d, true, "setDefaults");
 }
 
 bool PulDir_restoreDefaults(PulDir* a)
 {
-    return apply_limits(a, a->def, "restoreDefaults");
+    float d[4];
+    port_lock();
+    memcpy(d, a->def, sizeof d);
+    port_unlock();
+    return apply_limits(a, d, false, "restoreDefaults");
 }
 
 bool  PulDir_setSpeed(PulDir* a, float x)        { return set_limit(a, 0, x, "setSpeed"); }
@@ -371,6 +391,15 @@ bool PulDir_jog(PulDir* a, float speed)
     return true;
 }
 
+/* Under the lock, a homing run ended from main, unhomed: the limits homeStart
+ * found go back. The plan tick hands them to the generator once its window allows. */
+static void home_unwind(PulDir* a)
+{
+    a->home_state = PULDIR_HOME_IDLE;
+    memcpy(a->lim, a->home_lim, sizeof a->lim);
+    a->req |= REQ_LIMITS;
+}
+
 /* Ramped: the plan tick stops the generator from where it is. A pending target
  * or jog is applied first, so the stop is from the motion as commanded. A group
  * member refuses it (5.7): PulDirGroup_stop stops the group along its line. In
@@ -381,7 +410,7 @@ void PulDir_stop(PulDir* a)
     const bool group = a->mode == PULDIR_MODE_GROUP;
     if (!group && a->mode != PULDIR_MODE_IDLE) {
         if (a->mode == PULDIR_MODE_HOMING) {
-            a->home_state = PULDIR_HOME_IDLE;
+            home_unwind(a);
             a->req &= (uint16_t)~REQ_HOME;  /* not yet begun: there is nothing to stop */
         }
         a->req |= REQ_STOP;
@@ -410,7 +439,7 @@ void PulDir_halt(PulDir* a)
         a->target = (uint64_t)(uint32_t)s.count << 32;
     }
     if (a->mode == PULDIR_MODE_HOMING)
-        a->home_state = PULDIR_HOME_IDLE;
+        home_unwind(a);
     a->req = (uint16_t)((a->req & ~REQ_COURSE) | REQ_HALT);
     a->mode = PULDIR_MODE_IDLE;
     a->vel_out = 0.0f;
@@ -617,6 +646,7 @@ bool PulDir_homeStart(PulDir* a)
             why = PULDIR_R_NOT_IDLE;
         } else {
             a->homed = false;
+            memcpy(a->home_lim, a->lim, sizeof a->home_lim);
             a->req |= REQ_HOME;
             a->mode = PULDIR_MODE_HOMING;
             a->moving = true;

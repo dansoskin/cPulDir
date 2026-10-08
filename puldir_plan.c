@@ -159,21 +159,6 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
 
 /* ---- homing (5.8): the phases of cFlexyStepper's machine, from the plan tick ---- */
 
-static void home_fail(PulDir* a, PulDirInc* out, uint64_t base)
-{
-    a->home_fail = a->home_state;
-    a->home_state = PULDIR_HOME_ERROR;
-    a->events |= PULDIR_EV_HOME_FAILED;
-    halt_now(a, out, base);
-}
-
-/* A new goal for the generator (E17). */
-static void home_course(PulDir* a)
-{
-    a->arrived = false;
-    a->settle = 0;
-}
-
 /* Limits in user units to the generator, and to lim[] only if it takes them. */
 static void take_limits(PulDir* a, const float l[4])
 {
@@ -181,6 +166,23 @@ static void take_limits(PulDir* a, const float l[4])
     if (MotionProfile_setLimits(&a->prof, (MotionLimits){ l[0] * c, l[1] * c, l[2] * c, l[3] * c }))
         for (int k = 0; k < 4; k++)
             a->lim[k] = l[k];
+}
+
+/* The run ends unhomed: halted, the generator takes back the limits homeStart found. */
+static void home_fail(PulDir* a, PulDirInc* out, uint64_t base)
+{
+    a->home_fail = a->home_state;
+    a->home_state = PULDIR_HOME_ERROR;
+    a->events |= PULDIR_EV_HOME_FAILED;
+    halt_now(a, out, base);
+    take_limits(a, a->home_lim);
+}
+
+/* A new goal for the generator (E17). */
+static void home_course(PulDir* a)
+{
+    a->arrived = false;
+    a->settle = 0;
 }
 
 /* A moving phase runs at the homing speed, toward the switch (away = false) or
@@ -360,8 +362,11 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     uint16_t req = a->req;
     a->req = 0;
     if (latch) {
+        const bool homing = a->mode == PULDIR_MODE_HOMING;   /* service has set ERROR */
         req &= (uint16_t)~(REQ_COURSE | REQ_HALT);
         halt_now(a, out, base);
+        if (homing)
+            take_limits(a, a->home_lim);
     }
     if (req & REQ_HALT)                         /* puldir_kill zeroed the increments: pb is where they stopped */
         halt_generator(a, pb);
@@ -380,7 +385,10 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     if (req & REQ_LIMITS) {
         const float c = a->conv;
         const MotionLimits L = { a->lim[0] * c, a->lim[1] * c, a->lim[2] * c, a->lim[3] * c };
-        (void)MotionProfile_setLimits(&a->prof, L);  /* validated the same way by apply_limits */
+        /* apply_limits checked them as the generator does. A homing stop's restore
+         * can meet a window frozen in flight: it waits for the generator to rest. */
+        if (!MotionProfile_setLimits(&a->prof, L))
+            a->req |= REQ_LIMITS;
     }
     if (req & REQ_SETPOS)                       /* the datum is count, which is the origin */
         (void)MotionProfile_setPosition(&a->prof, 0.0f);

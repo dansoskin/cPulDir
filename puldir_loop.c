@@ -4,6 +4,7 @@
 #include "puldir_internal.h"
 
 static void (*logger)(const char*);
+static uint32_t overruns_logged;        /* the overrun total last logged, by any axis */
 
 void PulDir_attachLogger(void (*fn)(const char*))
 {
@@ -123,11 +124,19 @@ void PulDir_loop(PulDir* a)
     const uint32_t faults = a->fault_count;
     const PulDirHomeState failed_in = a->home_fail;
     port_unlock();
-    if (!a->log_on || logger == NULL || ev == 0u)
+    if (!a->log_on || logger == NULL)
         return;
 
     /* The bits keep no order: the drive's state first, then what it caused. */
     char b[PULDIR_LINE];
+    const uint32_t overruns = PulDir_overruns();    /* one aligned word: no lock */
+    if (overruns != overruns_logged) {
+        overruns_logged = overruns;
+        size_t at = puldir_head(b, a);
+        at = puldir_put(b, at, "pulse tick overrun, total ");
+        (void)puldir_put_uint(b, at, overruns, 1);
+        logger(b);
+    }
     if (ev & PULDIR_EV_FAULT) {
         size_t at = puldir_head(b, a);
         at = puldir_put(b, at, "fault latched, count ");

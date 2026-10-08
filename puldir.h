@@ -79,6 +79,7 @@ typedef struct PulDir {
     bool  auto_release, log_on;
     int8_t home_dir;                     /* +1, -1, 0 = not configured */
     float home_speed, home_adjust, home_zero;
+    float home_lim[4];                   /* the limits at homeStart: a run that ends unhomed restores them */
     const uint8_t* home_switch;
     uint32_t home_timeout_ms, home_timeout_ticks;
     uint8_t slot;                        /* index in the axis table, PULDIR_MAX_AXES if unregistered */
@@ -157,7 +158,8 @@ uint32_t PulDir_overruns(void);
 void     PulDir_consoleMenu(char* buf, size_t n);
 
 /* axis setup, before PulDir_start() */
-void  PulDir_init(PulDir*, const char* name);
+/* Refuses a NULL name or one longer than 15 characters, and then writes nothing. */
+bool  PulDir_init(PulDir*, const char* name);
 void  PulDir_attachPins(PulDir*, puldir_pin_t pulse, puldir_pin_t dir,
                         bool pulse_active_low, bool dir_inverted);
 void  PulDir_attachEnable(PulDir*, puldir_pin_t, bool inverted);
@@ -178,7 +180,7 @@ bool  PulDir_setHoming(PulDir*, int direction, float speed, float adjust,
 bool  PulDir_setStreamCatchup(PulDir*, uint32_t ms);
 bool  PulDir_register(PulDir*);
 
-/* limits */
+/* limits. These, setDefaults and restoreDefaults are refused (R_MODE) in GROUP and HOMING. */
 bool  PulDir_setSpeed(PulDir*, float);         float PulDir_speed(PulDir*);
 bool  PulDir_setAcceleration(PulDir*, float);  float PulDir_acceleration(PulDir*);
 bool  PulDir_setDeceleration(PulDir*, float);  float PulDir_deceleration(PulDir*);
@@ -201,6 +203,8 @@ bool  PulDir_streamTimedOut(PulDir*);
 float PulDir_streamError(PulDir*);
 
 /* homing */
+/* A run that ends unhomed (halt, stop, homeStop, timeout, fault) puts back the
+ * limits in force at homeStart; one that homes leaves the defaults. */
 bool  PulDir_homeStart(PulDir*);
 void  PulDir_homeStop(PulDir*);                  /* halts a run; the homing state goes IDLE */
 PulDirHomeState PulDir_homeState(PulDir*);

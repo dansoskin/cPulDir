@@ -64,7 +64,7 @@ Then move it from the main context:
 PulDir_moveBy(&x, 1.0f);          /* also moveTo, jog, stop, halt */
 ```
 
-Calls validate and refuse bad input, they never clamp. A refusal returns false and logs one line from `PulDir_loop` through the logger set with `PulDir_attachLogger`. `PulDir_loop` also logs landings and faults, so call it for every axis. Setup calls (`setConversion`, `setDefaults`, `setDelays`, `setHoming`) return false on refusal too. Check them.
+Calls validate and refuse bad input, they never clamp. A refusal returns false and logs one line from `PulDir_loop` through the logger set with `PulDir_attachLogger`. `PulDir_loop` also logs landings and faults, so call it for every axis. Setup calls (`setConversion`, `setDefaults`, `setDelays`, `setHoming`) return false on refusal too. Check them. `PulDir_init` returns false for a NULL name or one longer than 15 characters, and then writes nothing, so it has nothing to log through.
 
 Targets from `moveTo` and `moveBy` are rounded to whole pulses. `PulDir_stop` ramps down; `PulDir_halt` stops at once and leaves the drive enabled. A fault input latch halts and does not release the drive. `PulDir_console(&x, cmd, arg)` is a one-letter command console for a UART; `PulDir_consoleMenu` prints the verbs.
 
@@ -201,5 +201,5 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E23) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E24) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.
