@@ -13,7 +13,7 @@
 /* After every advance: velocity, acceleration and (with jerk) jerk bounds.
  * The tolerance absorbs float rounding, not design slack. */
 static int g_vmax_relaxed;   /* set by tests that lower vmax or retarget infeasibly */
-static float g_amax_carried; /* a lowered amax the jerk ring still carries; 0 when none */
+static float g_amax_carried; /* a lowered amax or dmax the jerk ring still carries; 0 when none */
 
 static void check_step(const MotionProfile* p, float vel0, float acc0)
 {
@@ -21,7 +21,7 @@ static void check_step(const MotionProfile* p, float vel0, float acc0)
     const MotionLimits L = p->lim;
     const float dv = p->vel - vel0;
     const bool speeding_up = fabsf(p->vel) > fabsf(vel0);
-    float bound = speeding_up ? fmaxf(L.amax, g_amax_carried) : L.dmax;
+    float bound = fmaxf(speeding_up ? L.amax : L.dmax, g_amax_carried);
 
     /* A zero crossing in one call is a shrink then a growth. */
     if ((p->vel > 0.0f && vel0 < 0.0f) || (p->vel < 0.0f && vel0 > 0.0f))
@@ -894,6 +894,30 @@ static void test_live_limits_history(void)
     printf("ok live_limits_history (peak jerk %.1f of 160 through the turnover)\n", (double)peak);
 }
 
+/* A limit change on the landing call (review): v_t still holds the landing step (E16) and the next
+ * call zeroes it, a step the new limits do not bound. Refused there; accepted one call later. */
+static void test_limits_on_landing(void)
+{
+    const MotionLimits L = { 15, 30, 30, 300 }, soft = { 15, 1, 1, 160 };
+    MotionProfile p = fresh(0.0f, 0.001f, L);
+    assert(MotionProfile_setTarget(&p, 0.53725f));
+    while (!p.landed)
+        step(&p);
+    assert(fabsf(p.v_t) >= 0.025f);           /* a landing step near dmax dt = 0.03 */
+    {
+        const MotionProfile before = p;
+        assert(MotionProfile_checkLimits(&p, soft) == MOTION_LIMITS_WINDOW);   /* (30 + 30) / 0.16 = 375 taps */
+        assert(!MotionProfile_setLimits(&p, soft) && profiles_equal(&before, &p));
+    }
+    step(&p);                                 /* the first drain call: v_t is 0 */
+    assert(p.v_t == 0.0f && MotionProfile_setLimits(&p, soft));   /* (1 + 30) / 0.16 = 194 */
+    g_amax_carried = 30.0f;                   /* the ring sheds the old ramp under the new limits */
+    run_to_done(&p, 10000);
+    g_amax_carried = 0.0f;
+    assert(p.pos == 0.53725f && p.vel == 0.0f);
+    printf("ok limits_on_landing\n");
+}
+
 /* D1: seeding the idle generator into motion, as the axis leaves a stream. */
 static void test_seed(void)
 {
@@ -961,6 +985,7 @@ int main(void)
     test_drain_mixed();
     test_reversal_asymmetric();
     test_live_limits_history();
+    test_limits_on_landing();
     test_seed();
     return 0;
 }

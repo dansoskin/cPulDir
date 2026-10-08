@@ -1642,6 +1642,30 @@ static void t_live_limits(void)
     assert(a->def[1] == 1.0f && PulDir_jerk(a) == 160.0f * hz);
     PulDir_stop(a);
     run_until_idle(a, 30u * TICK_HZ);
+
+    /* On a landing tick v_t still holds the landing step (E16): a change it does not fit is refused
+     * until the next plan tick, and one it fits is applied by that tick, before its advance. The
+     * targets are tried until one lands with a step near dmax dt. */
+    bool found = false;
+    for (int k = 1; k <= 60 && !found; k++) {
+        assert(PulDir_setDefaults(a, 20.0f, 30.0f, 30.0f, 300.0f * hz));
+        assert(PulDir_moveTo(a, PulDir_position(a) + 0.4f + 0.013f * (float)k));
+        do                                    /* the first plan tick takes the target; then to the landing tick */
+            fake_run(N);
+        while (a->prof.done || !a->prof.landed);
+        found = fabsf(a->prof.v_t) >= 0.8f * 3000.0f * DT;
+        if (found) {
+            assert(!PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz) && a->refusal == PULDIR_R_WINDOW);
+            assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 400.0f * hz));   /* (3000 + 3000) / 40 = 150 taps */
+            fake_run(N);
+            assert(a->prof.lim.amax == 100.0f && a->prof.lim.jmax == 40000.0f * hz && a->prof.landed);
+            assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz));   /* v_t is 0 now: 194 taps */
+            fake_run(N);
+            assert(a->prof.lim.jmax == 16000.0f * hz);
+        }
+        run_until_idle(a, 30u * TICK_HZ);
+    }
+    assert(found);
     fake_on_plan(check_published);
 }
 

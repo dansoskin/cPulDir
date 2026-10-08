@@ -42,7 +42,7 @@ static void clear_ring(MotionProfile* p)
         p->taps[i] = 0.0f;
     p->head = 0;
     p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
-    p->run = 0;
+    p->run = p->n;                        /* a ring of zeros is one-signed */
     p->run_sign = 0;
     p->hist_acc = 0.0f;
     p->hist_left = 0;
@@ -82,7 +82,10 @@ MotionLimitsCheck MotionProfile_checkLimits(const MotionProfile* p, MotionLimits
      * and the largest the new limits allow. New limits larger than the history make this the plain
      * frozen-window test, 2 max(amax, dmax) over n. */
     if (!p->done && L.jmax != 0.0f) {
-        const float a_new = fmaxf(L.amax, L.dmax);
+        /* On the landing call v_t still holds the landing step (E16) and the next call zeroes it, a
+         * step the new limits do not bound: it counts as an acceleration of its own. */
+        const float a_land = p->landed ? fabsf(p->v_t) / p->dt : 0.0f;
+        const float a_new = fmaxf(fmaxf(L.amax, L.dmax), a_land);
         if ((a_new + fmaxf(a_new, acc_history(p))) / (L.jmax * p->dt) > (float)p->n)
             return MOTION_LIMITS_WINDOW;
     }
@@ -98,7 +101,8 @@ bool MotionProfile_setLimits(MotionProfile* p, MotionLimits L)
         clear_ring(p);
     } else {                              /* the replaced limits' motion stays in the ring for n calls */
         p->hist_acc = acc_history(p);
-        p->hist_left = p->n;
+        p->hist_left = p->n;              /* restarted by each change: a set replaced twice within a
+                                             window is kept up to 2n - 1 calls, which only refuses more */
     }
     p->lim = L;
     return true;
@@ -136,6 +140,7 @@ void MotionProfile_stop(MotionProfile* p)
 
 void MotionProfile_halt(MotionProfile* p)
 {
+    p->n = window(p->lim, p->dt);
     clear_ring(p);
     p->v_t = p->vel = p->acc = 0.0f;
     p->p_t = p->target = p->pos;
@@ -143,7 +148,6 @@ void MotionProfile_halt(MotionProfile* p)
     p->endless = p->stopping = false;
     p->landed = p->done = true;
     p->drain = 0;
-    p->n = window(p->lim, p->dt);
 }
 
 bool MotionProfile_setPosition(MotionProfile* p, float pos)
@@ -279,13 +283,13 @@ static void push(MotionProfile* p, float u)
 /* The ring has drained: exact rest at the target, where lag is already 0. */
 static void finish(MotionProfile* p)
 {
+    p->n = window(p->lim, p->dt);
     clear_ring(p);
     p->vel = p->acc = 0.0f;
     p->pos = p->p_t = p->target;
     p->p_c = 0.0f;
     p->done = true;
     p->drain = 0;
-    p->n = window(p->lim, p->dt);
 }
 
 void MotionProfile_advance(MotionProfile* p)
