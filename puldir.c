@@ -188,7 +188,7 @@ PulDirRefusal puldir_motion_check(const PulDir* a)
     const PulDirMode m = a->mode;
     if (a->slot == PULDIR_MAX_AXES)
         return PULDIR_R_UNREGISTERED;   /* the ticks cannot run it: start needs registration */
-    if (puldir_fault_latched(&a->fault))
+    if (puldir_fault_latched(a))
         return PULDIR_R_FAULT;
     if (m == PULDIR_MODE_STREAM || m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING)
         return PULDIR_R_MODE;
@@ -205,7 +205,7 @@ static PulDirRefusal take_target(PulDir* a, uint64_t target)
     a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_TARGET);
     a->mode = PULDIR_MODE_PROFILE;
     a->moving = true;
-    puldir_enable_wake(&a->enable, PulDir_ticks());
+    puldir_enable_wake(a);
     return PULDIR_R_NONE;
 }
 
@@ -269,7 +269,7 @@ bool PulDir_jog(PulDir* a, float speed)
             a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
             a->mode = PULDIR_MODE_PROFILE;
             a->moving = true;
-            puldir_enable_wake(&a->enable, PulDir_ticks());
+            puldir_enable_wake(a);
         }
         port_unlock();
     }
@@ -397,7 +397,7 @@ PulDirMode PulDir_mode(PulDir* a)     { return a->mode; }
 
 PulDirStatus PulDir_status(PulDir* a)
 {
-    if (puldir_fault_latched(&a->fault))
+    if (puldir_fault_latched(a))
         return PULDIR_FAULT;
     if (a->moving)
         return PULDIR_MOVING;

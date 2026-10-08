@@ -15,7 +15,7 @@ bool PulDir_streamBegin(PulDir* a)
         a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_STREAM_BEGIN);
         a->mode = PULDIR_MODE_STREAM;
         a->moving = true;
-        puldir_enable_wake(&a->enable, PulDir_ticks());
+        puldir_enable_wake(a);
         a->stream.timed_out = false;
         a->stream.err = 0.0f;
         a->stream.sp_tick = PulDir_ticks(); /* the timeout runs from here until a setpoint */

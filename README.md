@@ -4,7 +4,7 @@ puldir drives several PUL/DIR motor drives (steppers, closed-loop steppers, serv
 
 ## Adding it to a project
 
-Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_loop.c`, `puldir_group.c`, `puldir_console.c`, `puldir_drive.c`, `puldir_homing.c`, `puldir_stream.c`, `drive/puldir_enable.c`, `drive/puldir_fault.c` and `port/stm32/puldir_port_stm32.c` to the build. Put the repo root and `port/stm32` on the include path. That directory supplies `puldir_pin.h`, which defines `puldir_pin_t` as a GPIO port and pin. Link with `-lm`. The library formats its log lines with `snprintf`, including `%f`, so a newlib-nano build must link float printf (`-u _printf_float`). newlib's `%f` allocates from the heap on its first use and needs roughly 1 KB of stack; logging happens only in main context, so both costs fall on the main loop, never on the interrupts. The planner alone (`motion_profile.c` and `.h`) needs nothing else.
+Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_loop.c`, `puldir_group.c`, `puldir_console.c`, `puldir_enable.c`, `puldir_fault.c`, `puldir_homing.c`, `puldir_stream.c` and `port/stm32/puldir_port_stm32.c` to the build. Put the repo root and `port/stm32` on the include path. That directory supplies `puldir_pin.h`, which defines `puldir_pin_t` as a GPIO port and pin. Link with `-lm`. The library formats its log lines with `snprintf`, including `%f`, so a newlib-nano build must link float printf (`-u _printf_float`). newlib's `%f` allocates from the heap on its first use and needs roughly 1 KB of stack; logging happens only in main context, so both costs fall on the main loop, never on the interrupts. The planner alone (`motion_profile.c` and `.h`) needs nothing else.
 
 ## STM32 timer setup
 
@@ -372,8 +372,8 @@ Define these on the compiler command line. Each default lives in the header of t
 | `PULDIR_MAX_GROUPS` | 4u | `puldir_group.h` | group table size |
 | `PULDIR_CATCHUP_MS` | 50u | `puldir_stream.h` | stream catch-up time |
 | `PULDIR_STREAM_TIMEOUT_MS` | 100u | `puldir_stream.h` | stream setpoint timeout |
-| `PULDIR_FAULT_DEBOUNCE_MS` | 2u | `drive/puldir_fault.h` | fault input must stay active this long |
-| `PULDIR_FAULT_CLEAR_MS` | 10u | `drive/puldir_fault.h` | fault clear pulse width |
+| `PULDIR_FAULT_DEBOUNCE_MS` | 2u | `puldir_fault.h` | fault input must stay active this long |
+| `PULDIR_FAULT_CLEAR_MS` | 10u | `puldir_fault.h` | fault clear pulse width |
 | `PULDIR_HOMING_DELAY_MS` | 1000u | `puldir_homing.h` | pause between homing phases |
 | `PULDIR_TICK_START` | 0u | `puldir.h` | first tick count; tests only |
 | `MOTION_PROFILE_MAX_TAPS` | 256 | `motion_profile.h` | jerk filter window; raise for softer jerk |
@@ -417,12 +417,12 @@ Host tests need only gcc, from bash:
 bash test/run.sh
 ```
 
-It builds and runs the generator tests and the drive modules' test (`drive/` and the fake port alone, no core), then builds the axis tests against `test/fake_port.c` once and runs every case at three timings: 20/1000 µs (a 50 kHz tick), 5/1000 µs (200 kHz) and 10/500 µs (a 2 kHz plan rate on a 100 kHz tick). A second build starts the tick counter near its wrap and runs at 20/1000 µs. One case runs as `build/test/test_puldir <case> <pulse_us> <plan_us>`. It takes about 25 s. All use `-Wall -Wextra -Werror`.
+It builds and runs the generator tests, then builds the axis tests against `test/fake_port.c` once and runs every case at three timings: 20/1000 µs (a 50 kHz tick), 5/1000 µs (200 kHz) and 10/500 µs (a 2 kHz plan rate on a 100 kHz tick). A second build starts the tick counter near its wrap and runs at 20/1000 µs. One case runs as `build/test/test_puldir <case> <pulse_us> <plan_us>`. It takes about 25 s. All use `-Wall -Wextra -Werror`.
 
 Target compile, from bash with arm-none-eabi-gcc on the path and `$FW` set to a CubeMX project (STM32G473 here; change `-DSTM32G473xx` and the HAL include for another family):
 
 ```
-for f in motion_profile.c puldir*.c drive/*.c port/stm32/puldir_port_stm32.c; do
+for f in motion_profile.c puldir*.c port/stm32/puldir_port_stm32.c; do
   arm-none-eabi-gcc -std=c99 -O2 -Wall -Wextra -Werror -Wdouble-promotion \
     -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard \
     -DSTM32G473xx -DUSE_HAL_DRIVER -I. -Iport/stm32 -I$FW/Core/Inc \
