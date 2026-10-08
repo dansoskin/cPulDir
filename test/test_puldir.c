@@ -2805,11 +2805,34 @@ static void t_enable_release(void)
     w = nw;
     t_cmd = PulDir_ticks();
     assert(PulDir_enable(a, false));
-    assert(!fake_level(ENA(0)) && !a->enabled && a->mode == PULDIR_MODE_IDLE);
-    assert(find_write(w, ENA(0), false, &t) && t == t_cmd);
+    /* the pulse is high: the drive stays enabled until the plan tick sees it lowered */
+    assert(high(0) && fake_level(ENA(0)) && !a->enabled && a->mode == PULDIR_MODE_IDLE);
+    assert(PulDir_status(a) == PULDIR_MOVING);
+    while (fake_level(ENA(0))) {
+        fake_run(1);
+        assert(PulDir_ticks() - t_cmd <= N + 1u);
+    }
+    assert(find_write(w, ENA(0), false, &t) && t > fall[nfall - 1u] && fall[nfall - 1u] == t_cmd);
     fake_run(3u * N);
     assert(nrise == r2 && st(0).count == ch && !PulDir_isMoving(a) && PulDir_status(a) == PULDIR_IDLE);
     assert(PulDir_target(a) == (float)ch);
+
+    /* at rest the pin goes inactive at once */
+    assert(PulDir_enable(a, true) && fake_level(ENA(0)));
+    assert(PulDir_enable(a, false) && !fake_level(ENA(0)) && !a->ena_off);
+
+    /* a command between enable(false) and the pulse's fall re-enables: the plan
+     * tick must not lower the pin after it */
+    assert(PulDir_jog(a, 3000.0f));
+    fake_run(100u * MS);
+    while (!high(0))
+        fake_run(1);
+    assert(PulDir_enable(a, false) && a->ena_off && fake_level(ENA(0)));
+    assert(PulDir_moveTo(a, (float)(st(0).count + 10)) && a->enabled && fake_level(ENA(0)));
+    fake_run(3u * N);
+    assert(fake_level(ENA(0)) && a->enabled);
+    run_until_idle(a, PULDIR_TICK_HZ);
+    assert(PulDir_enable(a, false) && !fake_level(ENA(0)));
 
     /* a group waits for the slowest enable delay; the final edges still share one tick */
     assert(PulDir_setDelays(&ax[1], 20u, 0u));
@@ -2917,10 +2940,8 @@ static void t_fault(void)
     ax[1].refusal = PULDIR_R_NONE;
     assert(!PulDir_clearFault(&ax[1]) && ax[1].refusal == PULDIR_R_NO_PIN);
 
-    /* the input gone: the latch holds until clearFault, whose pulse is 10 ms and does not block */
-    fake_set_input(FLT(0), false);
-    fake_run(10u * N);
-    assert(a->fault);
+    /* Still in alarm: the clear pulse is 10 ms and does not block, and the latch
+     * holds after it: never ENABLED, motion refused, nothing counted again. */
     size_t w = nw;
     const uint32_t tc = PulDir_ticks();
     assert(PulDir_clearFault(a) && PulDir_ticks() == tc && fake_level(CLR(0)));
@@ -2933,39 +2954,35 @@ static void t_fault(void)
     }
     uint32_t tl;
     assert(find_write(w, CLR(0), false, &tl) && tl - tc >= 10u * MS && tl - tc <= 10u * MS + N);
-    assert(!a->fault && PulDir_status(a) == PULDIR_ENABLED && a->fault_count == 1);
+    for (uint32_t k = 0; k < 20u * MS; k++) {
+        assert(a->fault && PulDir_status(a) == PULDIR_FAULT && a->fault_count == 1);
+        if (k % N == 0u) {
+            a->refusal = PULDIR_R_NONE;
+            assert(!PulDir_moveTo(a, 0.0f) && a->refusal == PULDIR_R_FAULT);
+        }
+        fake_run(1);
+    }
     nlines = 0;
     PulDir_loop(a);
-    assert(nlines == 2 && strcmp(lines[0], "[a0] fault cleared") == 0);   /* then the busy refusal */
+    assert(nlines == 1 && strcmp(lines[0], "[a0] moveTo refused: drive fault latched") == 0);
+
+    /* the alarm gone: the next sample lifts the latch; one fault, one clear */
+    fake_set_input(FLT(0), false);
+    const uint32_t t_off = PulDir_ticks();
+    while (a->fault) {
+        fake_run(1);
+        assert(PulDir_ticks() - t_off <= N + 8u);
+    }
+    assert(PulDir_status(a) == PULDIR_ENABLED && a->fault_count == 1);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] fault cleared") == 0);
     assert(PulDir_moveTo(a, (float)(ch + 300)));
     run_until_idle(a, PULDIR_TICK_HZ);
     assert(st(0).count == ch + 300 && nrise == r0 + 300u);
-
-    /* still in alarm: the clear lifts the latch and the debounce latches again */
-    fake_set_input(FLT(0), true);
-    fake_run(4u * MS);
-    assert(a->fault && a->fault_count == 2);
-    w = nw;
-    assert(PulDir_clearFault(a));
-    while (fake_level(CLR(0)))
-        fake_run(1);
-    assert(find_write(w, CLR(0), false, &tl) && !a->fault);
-    while (!a->fault) {
-        fake_run(1);
-        assert(PulDir_ticks() - tl <= 2u * MS + N);
-    }
-    assert(a->last_fault_tick - tl >= 2u * MS && a->fault_count == 3);
-    nlines = 0;
     PulDir_loop(a);
-    assert(nlines == 3 && strcmp(lines[0], "[a0] fault latched, count 3") == 0);
-    assert(strcmp(lines[1], "[a0] fault cleared") == 0);   /* the bits, in PulDir_loop's order */
 
     /* a move accepted just before the latch is discarded with the plan */
-    fake_set_input(FLT(0), false);
-    assert(PulDir_clearFault(a));
-    while (a->clearing)
-        fake_run(1);
-    assert(!a->fault);
     fake_set_input(FLT(0), true);
     while (!a->flt_seen)
         fake_run(1);
@@ -2979,13 +2996,40 @@ static void t_fault(void)
         fake_run(1);
     fake_run(3u * N);
     assert(nrise == r1 && st(0).count == c1 && !PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
-    assert(PulDir_target(a) == (float)c1 && a->prof.done);
+    assert(PulDir_target(a) == (float)c1 && a->prof.done && a->fault_count == 2);
 
-    /* the latch closing between a command's check and its lock: refused all the same */
+    /* the usual order, the alarm gone first: the latch holds until clearFault and
+     * lifts at the first sample after the pulse */
     fake_set_input(FLT(0), false);
+    fake_run(10u * N);
+    assert(a->fault);
+    w = nw;
+    assert(PulDir_clearFault(a));
+    while (fake_level(CLR(0)))
+        fake_run(1);
+    assert(find_write(w, CLR(0), false, &tl) && a->fault);
+    while (a->fault) {
+        fake_run(1);
+        assert(PulDir_ticks() - tl <= N + 8u);
+    }
+    assert(a->fault_count == 2);
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 2 && strcmp(lines[0], "[a0] fault latched, count 2") == 0);
+    assert(strcmp(lines[1], "[a0] fault cleared") == 0);
+
+    /* nothing latched: the clear pin pulses all the same, and nothing is logged */
+    w = nw;
     assert(PulDir_clearFault(a));
     while (a->clearing)
         fake_run(1);
+    fake_run(3u * N);
+    assert(find_write(w, CLR(0), true, &tl) && find_write(w, CLR(0), false, &tl));
+    nlines = 0;
+    PulDir_loop(a);
+    assert(nlines == 0 && !a->fault && a->fault_count == 2);
+
+    /* the latch closing between a command's check and its lock: refused all the same */
     fake_set_input(FLT(0), true);
     while (!a->flt_seen)
         fake_run(1);
@@ -2997,7 +3041,7 @@ static void t_fault(void)
     assert(!PulDir_moveTo(a, (float)(c1 + 5000)) && a->refusal == PULDIR_R_FAULT && a->fault);
     fake_set_input(FLT(0), false);            /* and once more for jog */
     assert(PulDir_clearFault(a));
-    while (a->clearing)
+    while (a->fault)
         fake_run(1);
     fake_set_input(FLT(0), true);
     while (!a->flt_seen)
@@ -3008,6 +3052,7 @@ static void t_fault(void)
     fake_on_lock(NULL);
     fake_run(3u * N);
     assert(nrise == r1 && st(0).count == c1 && !PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
+    assert(a->fault_count == 4);
 
     /* the inverted pin: high is inactive, low latches */
     assert(!ax[1].fault);
@@ -3015,6 +3060,71 @@ static void t_fault(void)
     fake_run(4u * MS);
     assert(ax[1].fault && ax[1].fault_count == 1);
     fake_preempt = 0;
+}
+
+/* Latches in odd places, and a glitch that must not latch. */
+static void t_fault_cases(void)
+{
+    for (uint8_t i = 0; i < 3; i++) {
+        add_axis(i, false, false);
+        PulDir_attachFault(&ax[i], fake_pin(FLT(i)), false);
+    }
+    PulDir_attachEnable(&ax[0], fake_pin(ENA(0)), false);
+    fake_set_input(FLT(1), true);             /* in alarm before the ticks start */
+    start();
+    fake_on_write(both_write);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(PulDir_setDefaults(&ax[i], 5000.0f, 1.0e5f, 1.0e5f, 0.0f));
+
+    /* the pin active at start: latched 2 ms after the first sample, motion refused */
+    for (uint32_t t = 0; !ax[1].fault; t++) {
+        assert(t < 2u * MS + N);
+        fake_run(1);
+    }
+    assert(ax[1].last_fault_tick - WRAP_START >= 2u * MS && ax[1].fault_count == 1);
+    assert(PulDir_status(&ax[1]) == PULDIR_FAULT && !PulDir_moveTo(&ax[1], 10.0f));
+
+    /* a 1.9 ms glitch that two samples see, 1 ms apart: no latch */
+    PulDir* a = &ax[0];
+    while (!tick1())
+        ;
+    fake_run(N - 2u);                         /* the next sample two ticks away */
+    fake_set_input(FLT(0), true);
+    fake_run(19u * N / 10u);                  /* samples at +2 and +N+2 */
+    assert(a->flt_seen);
+    fake_set_input(FLT(0), false);
+    fake_run(5u * MS);
+    assert(!a->fault && a->fault_count == 0 && !a->flt_seen);
+
+    /* a latch in the enable delay: no pulse ever, the drive left enabled (D12) */
+    assert(PulDir_setDelays(a, 50u, 0u));
+    assert(PulDir_moveTo(a, 1000.0f) && fake_level(ENA(0)) && a->ena_wait);
+    fake_run(10u * MS);
+    fake_set_input(FLT(0), true);
+    while (!a->fault)
+        fake_run(1);
+    assert(a->mode == PULDIR_MODE_IDLE && a->ena_wait);
+    fake_run(100u * MS);
+    assert(edges[0] == 0u && st(0).count == 0 && !PulDir_isMoving(a) && !a->ena_wait);
+    assert(fake_level(ENA(0)) && a->enabled && PulDir_target(a) == 0.0f);
+
+    /* a latch in STREAM: halted, out of the stream, no edge after */
+    PulDir* b = &ax[2];
+    assert(PulDir_streamBegin(b));
+    (void)stream_line(b, 0.0, 3000.0, 100u, 11u);
+    assert(PulDir_inStream(b) && edges[2] > 200u);
+    fake_set_input(FLT(2), true);
+    while (!b->fault)
+        fake_run(1);
+    const uint64_t e2 = edges[2];
+    const int32_t c2 = st(2).count;
+    assert(b->mode == PULDIR_MODE_IDLE && !PulDir_inStream(b) && !b->stream_live && PulDir_velocity(b) == 0.0f);
+    fake_run(3u * N);
+    assert(edges[2] == e2 && st(2).count == c2 && !PulDir_isMoving(b) && PulDir_target(b) == (float)c2);
+    b->refusal = PULDIR_R_NONE;
+    assert(!PulDir_streamBegin(b) && b->refusal == PULDIR_R_FAULT);
+    PulDir_stream(b, 0.0f, 0.0f);
+    assert(b->refusal == PULDIR_R_DROPPED);
 }
 
 /* Rising edges of axis i over the next ms milliseconds. */
@@ -3029,14 +3139,21 @@ static uint64_t edges_over(uint8_t i, uint32_t ms)
 static void t_group_fault(void)
 {
     fake_plan_phase = 1u;                     /* the plan tick early: a stale prediction is a whole interval */
-    for (uint8_t i = 0; i < 3; i++)
+    for (uint8_t i = 0; i < 3; i++) {
         add_axis(i, false, false);
-    PulDir_attachFault(&ax[1], fake_pin(FLT(1)), false);
-    PulDir_attachFaultClear(&ax[1], fake_pin(CLR(1)), false);
+        PulDir_attachEnable(&ax[i], fake_pin(ENA(i)), false);
+    }
+    for (uint8_t i = 0; i < 2; i++) {
+        PulDir_attachFault(&ax[i], fake_pin(FLT(i)), false);
+        PulDir_attachFaultClear(&ax[i], fake_pin(CLR(i)), false);
+    }
     start();
     fake_on_write(group_write);
-    for (uint8_t i = 0; i < 3; i++)
+    for (uint8_t i = 0; i < 3; i++) {
         assert(PulDir_setDefaults(&ax[i], 4000.0f + 1000.0f * (float)i, 40000.0f, 30000.0f, 0.0f));
+        assert(PulDir_setDelays(&ax[i], 0u, 5u));
+        PulDir_setAutoRelease(&ax[i], true);   /* D12 must hold all the same */
+    }
     PulDir* m[3] = { &ax[0], &ax[1], &ax[2] };
     assert(PulDirGroup_init(&grp, m, 3));
     float tg[3] = { 3000.0f, -2000.0f, 1500.0f };
@@ -3067,6 +3184,10 @@ static void t_group_fault(void)
     fake_run(3u * N);
     for (uint8_t i = 0; i < 3; i++)
         assert(edges[i] == e0[i] && st(i).count == ch[i] && !PulDir_isMoving(&ax[i]) && !high(i));
+    /* D12: no member released, faulted or not, for three release delays */
+    fake_run(15u * MS);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(fake_level(ENA(i)) && ax[i].enabled && ax[i].held);
 
     /* the group is refused while a member is latched */
     ax[1].refusal = PULDIR_R_NONE;
@@ -3085,9 +3206,11 @@ static void t_group_fault(void)
     /* cleared, the group moves again */
     fake_set_input(FLT(1), false);
     assert(PulDir_clearFault(&ax[1]));
-    while (ax[1].clearing)
+    for (uint32_t t = 0; ax[1].fault; t++) {
+        assert(t < 12u * MS);
         fake_run(1);
-    assert(!ax[1].fault);
+    }
+    assert(fake_level(ENA(1)));                /* held until its own command */
     assert(PulDir_moveTo(&ax[1], (float)(ch[1] - 100)));   /* the faulted member's too */
     assert(edges_over(1, 4u) <= 1u);
     run_until_idle(&ax[1], PULDIR_TICK_HZ);
@@ -3098,6 +3221,29 @@ static void t_group_fault(void)
     run_until_idle(&ax[0], 2u * PULDIR_TICK_HZ);
     for (uint8_t i = 0; i < 3; i++)
         assert(st(i).count == (int32_t)tg[i]);
+
+    /* two members latching on one tick: one halt, both latched, nothing released */
+    for (uint8_t i = 0; i < 3; i++)
+        tg[i] = (float)(st(i).count - 3000 + 1000 * i);
+    assert(PulDirGroup_moveTo(&grp, tg));
+    fake_run(150u * N);
+    fake_set_input(FLT(0), true);
+    fake_set_input(FLT(1), true);
+    for (uint32_t t = 0; !ax[0].fault; t++) {
+        assert(t < 3u * MS + N);
+        fake_run(1);
+    }
+    assert(ax[1].fault && ax[0].last_fault_tick == ax[1].last_fault_tick);
+    assert(ax[0].fault_count == 1 && ax[1].fault_count == 2 && !ax[2].fault && PulDirGroup_faulted(&grp));
+    for (uint8_t i = 0; i < 3; i++) {
+        e0[i] = edges[i];
+        ch[i] = st(i).count;
+        assert(ax[i].mode == PULDIR_MODE_IDLE && PulDir_target(&ax[i]) == (float)ch[i]);
+    }
+    fake_run(15u * MS);
+    for (uint8_t i = 0; i < 3; i++)
+        assert(edges[i] == e0[i] && st(i).count == ch[i] && !PulDir_isMoving(&ax[i]) && fake_level(ENA(i)));
+    assert(!PulDirGroup_isMoving(&grp));
 }
 
 /* Group paths the other cases do not reach: the travel bound, members' limits
@@ -3217,6 +3363,7 @@ static int32_t seen_count[16];
 static int nseen;
 static float v_towards, v_away;               /* the fastest velocity in either moving phase */
 static int64_t adj_inc;                       /* the largest |live increment| during ADJUST_POSITION */
+static float lim_towards, lim_away;           /* the speed limit seen in either moving phase */
 static bool freeze_at_delay1;
 static void home_plan(bool after)
 {
@@ -3234,6 +3381,10 @@ static void home_plan(bool after)
     }
     if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT && fabsf(a->vel_out) > fabsf(v_towards))
         v_towards = a->vel_out;
+    if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT)
+        lim_towards = a->lim[0];
+    if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT)
+        lim_away = a->lim[0];
     if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && fabsf(a->vel_out) > fabsf(v_away))
         v_away = a->vel_out;
     if (h == PULDIR_HOME_ADJUST_POSITION) {
@@ -3275,7 +3426,7 @@ static void t_homing(void)
     PulDir_attachLogger(logger);
     assert(PulDir_setDefaults(a, 4000.0f, 40000.0f, 40000.0f, 0.0f));
     assert(PulDir_setDefaults(&ax[1], 4000.0f, 40000.0f, 40000.0f, 0.0f));
-    assert(PulDir_setSpeed(a, 3000.0f));
+    assert(PulDir_setSpeed(a, 1000.0f));      /* below the homing speed: homing runs at its own */
     fake_run(N);                              /* the limits applied: no request pending */
 
     /* setHoming refuses bad input and changes nothing; homeStart needs it */
@@ -3339,6 +3490,7 @@ static void t_homing(void)
     assert(seen_tick[4] - seen_tick[3] >= D && seen_tick[4] - seen_tick[3] <= D + N);
     assert(seen_tick[6] - seen_tick[5] >= D && seen_tick[6] - seen_tick[5] <= D + N);
     assert(v_towards == -2000.0f && v_away == 400.0f);          /* home speed, then 0.2x of it back */
+    assert(lim_towards == 2000.0f && lim_away == 400.0f);       /* applied as the speed limit */
     assert(seen_count[1] <= -1000 && seen_count[2] >= -1000 - 10);   /* stopped within an interval */
     assert(seen_count[3] >= -1000 + 20 && seen_count[3] <= -1000 + 22);
     assert(seen_count[5] - seen_count[4] == 50);                  /* the adjust, whole pulses from rest */
@@ -3412,7 +3564,6 @@ static void t_homing(void)
 
     /* a switch byte that stops being updated (stuck at 1 after the limit): a timeout halt */
     assert(PulDir_setHoming(a, -1, 4000.0f, 50.0f, &sw, 100.0f, 400u));
-    assert(PulDir_setSpeed(a, 4000.0f));
     freeze_at_delay1 = true;
     nlines = 0;
     home_run(a, st(0).count - 300, 3000u);
@@ -3466,6 +3617,15 @@ static void t_homing(void)
     assert(PulDir_isHomed(a));
     assert(PulDir_setPosition(a, 3.0f) && !PulDir_isHomed(a));
 
+    /* defaults the generator refuses (a jerk past the ring, set behind the API's
+     * back: the API cannot) are not copied: the adjust runs at the limits it has */
+    const float jerk_def = a->def[3];
+    a->def[3] = 1.0f;
+    home_run(a, st(0).count - 500, 6000u);
+    assert(PulDir_isHomed(a) && a->lim[0] == 400.0f && a->lim[3] == 0.0f && a->prof.lim.jmax == 0.0f);
+    assert(seen_count[5] - seen_count[4] == 50);
+    a->def[3] = jerk_def;
+
     /* refused outside IDLE: in STREAM (test 19), in GROUP, and while moving */
     assert(PulDir_streamBegin(a));
     a->refusal = PULDIR_R_NONE;
@@ -3482,7 +3642,7 @@ static void t_homing(void)
     assert(PulDir_moveBy(a, 2000.0f));
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_homeStart(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_PROFILE);
-    assert(!PulDir_isHomed(a));
+    assert(PulDir_isHomed(a));                /* a refused homeStart leaves the datum alone */
 }
 
 /* Test 22: with the counter started 1,000 ticks below its wrap, every timed
@@ -3611,6 +3771,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "group_creep", t_group_creep },
     { "enable_release", t_enable_release },
     { "fault", t_fault },
+    { "fault_cases", t_fault_cases },
     { "group_fault", t_group_fault },
     { "group_paths", t_group_paths },
     { "homing", t_homing },

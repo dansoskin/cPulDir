@@ -97,6 +97,9 @@ typedef struct PulDir {
     bool     ena_wait;                   /* enable_ms has not yet passed since enabled_at: hold */
     bool     release_due;                /* auto-release: the axis went IDLE at idle_at */
     uint32_t idle_at;
+    bool     held;                       /* halted by a fault latch: no auto-release until a command (D12) */
+    bool     ena_off;                    /* enable(false) with the pulse pin high: the plan tick lowers
+                                            the enable pin once the pulse pin is low */
     volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
@@ -119,6 +122,8 @@ typedef struct PulDir {
     uint32_t flt_since;                  /* the first sample of the current active run */
     uint32_t fault_count, last_fault_tick, clr_t0;
     bool flt_seen, clearing;
+    bool clr_armed;                      /* a clear pulse ended on a latch: the first sample that
+                                            reads the input inactive lifts it */
 
     struct PulDirGroup* group;           /* the group whose move this axis is in (GROUP mode) */
 

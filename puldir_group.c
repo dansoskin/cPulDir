@@ -320,8 +320,8 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
     const uint8_t req = g->req;
     g->req = 0;
     /* Before s lands no member has arrived, so nothing else changes course (E17);
-     * once landed, the move ends as planned. */
-    if ((req & GROUP_REQ_STOP) && !s->landed)
+     * once landed, MotionProfile_stop ignores it and the move ends as planned. */
+    if (req & GROUP_REQ_STOP)
         MotionProfile_stop(s);
 
     if (!g->started) {

@@ -105,6 +105,8 @@ void PulDir_setAutoRelease(PulDir* a, bool on)
 void puldir_wake(PulDir* a)
 {
     a->release_due = false;
+    a->held = false;
+    a->ena_off = false;
     if (a->has_ena && !a->enabled) {
         port_pin_write(a->ena, !a->ena_inverted);
         a->enabled = true;
@@ -416,7 +418,8 @@ void PulDir_halt(PulDir* a)
 }
 
 /* 5.8: enabling arms the enable delay; disabling halts first if the axis moves.
- * Without an enable pin there is nothing to switch: refused. */
+ * A pulse still high is not cut short: the plan tick lowers the enable pin once
+ * the pulse pin is low. Without an enable pin there is nothing to switch: refused. */
 bool PulDir_enable(PulDir* a, bool on)
 {
     if (!a->has_ena) {
@@ -429,7 +432,11 @@ bool PulDir_enable(PulDir* a, bool on)
     if (on) {
         puldir_wake(a);
     } else {
-        port_pin_write(a->ena, a->ena_inverted);
+        const bool pulse_high = a->slot < PULDIR_MAX_AXES && puldir_pul_high(a->slot);
+        if (pulse_high)
+            a->ena_off = true;
+        else
+            port_pin_write(a->ena, a->ena_inverted);
         a->enabled = false;
         a->ena_wait = false;
         a->release_due = false;

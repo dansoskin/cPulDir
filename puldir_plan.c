@@ -174,6 +174,28 @@ static void home_course(PulDir* a)
     a->settle = 0;
 }
 
+/* Limits in user units to the generator, and to lim[] only if it takes them. */
+static void take_limits(PulDir* a, const float l[4])
+{
+    const float c = a->conv;
+    if (MotionProfile_setLimits(&a->prof, (MotionLimits){ l[0] * c, l[1] * c, l[2] * c, l[3] * c }))
+        for (int k = 0; k < 4; k++)
+            a->lim[k] = l[k];
+}
+
+/* A moving phase runs at the homing speed, toward the switch (away = false) or
+ * back from it at 0.2x, applied as the speed limit, as cFlexyStepper's jog did.
+ * The generator is at rest (homeStart, or halted a delay ago): only vmax changes. */
+static void home_jog(PulDir* a, bool away)
+{
+    const float speed = away ? 0.2f * a->home_speed : a->home_speed;
+    const float l[4] = { speed, a->lim[1], a->lim[2], a->lim[3] };
+    take_limits(a, l);
+    const float dir = away ? -(float)a->home_dir : (float)a->home_dir;
+    (void)MotionProfile_setEndless(&a->prof, dir * speed * a->conv);   /* finite: homeStart checked it */
+    home_course(a);
+}
+
 /* DELAY3: the datum, as PulDir_setPosition sets it. The axis must be at rest:
  * no increment and the pin low, read again under the lock (puldir_set_datum). */
 static bool home_datum(PulDir* a, PulDirInc* out)
@@ -211,7 +233,6 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
     const uint8_t sw = *(const volatile uint8_t*)a->home_switch;
     const uint32_t in_phase = now - a->home_t0;
     const bool late = in_phase >= a->home_timeout_ticks;
-    const float v = (float)a->home_dir * a->home_speed * a->conv;
     PulDirHomeState next = a->home_state;
     switch (a->home_state) {
     case PULDIR_HOME_MOVE_TOWARDS_LIMIT:
@@ -229,8 +250,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
     }
     case PULDIR_HOME_DELAY1:
         if (in_phase >= DELAY_TICKS) {
-            (void)MotionProfile_setEndless(p, -0.2f * v);   /* finite: checked by homeStart */
-            home_course(a);
+            home_jog(a, true);
             next = PULDIR_HOME_MOVE_AWAY_FROM_LIMIT;
         }
         break;
@@ -241,13 +261,7 @@ static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
                 home_fail(a, out, base);
                 return;
             }
-            /* The defaults, validated when set and fixed in pulses since; the
-             * generator is done (halted a delay ago), so it takes them. */
-            for (int k = 0; k < 4; k++)
-                a->lim[k] = a->def[k];
-            const float c = a->conv;
-            (void)MotionProfile_setLimits(p, (MotionLimits){ a->def[0] * c, a->def[1] * c,
-                                                             a->def[2] * c, a->def[3] * c });
+            take_limits(a, a->def);             /* the defaults, for the adjust */
             a->target = (uint64_t)t << 32;
             (void)MotionProfile_setTarget(p, to_pulses((int64_t)(a->target - base)));
             home_course(a);
@@ -391,10 +405,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     if (req & REQ_STOP)
         MotionProfile_stop(&a->prof);
     if ((req & REQ_HOME) && a->mode == PULDIR_MODE_HOMING) {
-        /* homeStart: run toward the switch; finite, homeStart checked the speed */
-        (void)MotionProfile_setEndless(&a->prof, (float)a->home_dir * a->home_speed * a->conv);
-        a->arrived = false;                     /* E17 */
-        a->settle = 0;
+        home_jog(a, false);                     /* homeStart: toward the switch */
         a->home_state = PULDIR_HOME_MOVE_TOWARDS_LIMIT;
         a->home_t0 = now;
     }
@@ -444,20 +455,28 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
 {
     if (a->ena_wait && now - a->enabled_at >= a->enable_ticks)
         a->ena_wait = false;
+    if (a->ena_off && !snap[a->slot].high) {    /* enable(false): the last pulse is lowered */
+        port_pin_write(a->ena, a->ena_inverted);
+        a->ena_off = false;
+    }
 
-    /* The clear pulse ends: the latch lifts, and the debounce restarts from the
-     * first sample taken after the pin is lowered, not this one, taken before it. */
+    /* The clear pulse ends. The latch holds until a sample taken with the clear
+     * pin low reads the input inactive: this one was taken before it was lowered.
+     * A drive still in alarm stays latched; nothing is counted again. */
     if (a->clearing && now - a->clr_t0 >= CLEAR_TICKS) {
         port_pin_write(a->clr, a->clr_inverted);
         a->clearing = false;
-        a->fault = false;
-        a->flt_seen = false;
-        a->events |= PULDIR_EV_FAULT_CLEARED;
+        a->clr_armed = a->fault;
         return false;
     }
 
     if (!flt) {
         a->flt_seen = false;
+        if (a->clr_armed) {
+            a->clr_armed = false;
+            a->fault = false;
+            a->events |= PULDIR_EV_FAULT_CLEARED;
+        }
         return false;
     }
     if (!a->flt_seen) {
@@ -474,6 +493,7 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
     a->last_fault_tick = t_pin;
     a->events |= PULDIR_EV_FAULT;
     a->homed = false;
+    a->held = true;
     if (a->mode == PULDIR_MODE_HOMING) {
         a->home_fail = a->home_state;
         a->home_state = PULDIR_HOME_ERROR;
@@ -487,6 +507,7 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
     g->faulted = true;
     for (uint8_t i = 0; i < g->count; i++) {    /* the members' pulses stopped just now */
         const uint8_t k = g->axes[i]->slot;
+        g->axes[i]->held = true;
         PulDirPulse s;
         puldir_pulse_read(k, &s);
         snap[k].Pb = s.P + (uint64_t)((int64_t)s.inc * ahead);
@@ -501,7 +522,8 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
 
 /* After the modes: with auto-release on, the drive is disabled release_ms after
  * the axis went IDLE at the end of a move, which is within one plan interval of
- * the last falling edge (D19). Never after a fault latch (D12). */
+ * the last falling edge (D19). Never on an axis a fault latch halted, the faulted
+ * one or its group's other members, until its next accepted command (D12). */
 static void release(PulDir* a, bool was_moving, uint32_t now)
 {
     if (was_moving && !a->moving && a->mode == PULDIR_MODE_IDLE && a->auto_release
@@ -511,7 +533,7 @@ static void release(PulDir* a, bool was_moving, uint32_t now)
     }
     if (!a->release_due)
         return;
-    if (a->moving || a->mode != PULDIR_MODE_IDLE || a->fault) {
+    if (a->moving || a->mode != PULDIR_MODE_IDLE || a->held) {
         a->release_due = false;
     } else if (now - a->idle_at >= a->release_ticks) {
         port_pin_write(a->ena, a->ena_inverted);
