@@ -35,24 +35,6 @@ static void clear_ring(MotionProfile* p)
         p->taps[i] = 0.0f;
     p->head = 0;
     p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
-    p->same = 0;
-}
-
-/* Leaving a drain early: prefix sums back to taps in one pass, with the zeros the
- * drained calls would have pushed. sum and wsum already hold S(t) and T(t). */
-static void from_prefix_sums(MotionProfile* p)
-{
-    const uint16_t n = p->n, j = p->drain;
-    uint16_t i = p->head;                     /* the oldest slot, a_(n-1) */
-    for (uint16_t k = 0; k < n; k++) {
-        const uint16_t m = (uint16_t)(n - 1 - k), next = (uint16_t)(i + 1 == n ? 0 : i + 1);
-        if (k < j)
-            p->taps[i] = 0.0f;                /* already out of the window */
-        else if (m > 0)
-            p->taps[i] -= p->taps[next];      /* S(m) - S(m-1), not yet rewritten */
-        i = next;
-    }
-    p->head = (uint16_t)((p->head + j) % n);
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -100,8 +82,6 @@ bool MotionProfile_setTarget(MotionProfile* p, float target)
 {
     if (!isfinite(target))
         return false;
-    if (p->landed && !p->done && p->drain > 0)
-        from_prefix_sums(p);
     p->target = target;
     p->endless = p->stopping = p->landed = p->done = false;
     p->drain = 0;
@@ -112,8 +92,6 @@ bool MotionProfile_setEndless(MotionProfile* p, float speed)
 {
     if (!isfinite(speed))
         return false;
-    if (p->landed && !p->done && p->drain > 0)
-        from_prefix_sums(p);
     p->speed = speed;
     p->endless = true;
     p->stopping = p->landed = p->done = false;
@@ -262,53 +240,6 @@ static void push(MotionProfile* p, float u)
     }
 }
 
-/* Constant-time drain: the ring (newest tap a_0) becomes prefix sums S(t) once;
- * drain call j reads S(t) and T(t) = S(0) + ... + S(t-1), t = n-1-j. */
-static void to_prefix_sums(MotionProfile* p)
-{
-    const uint16_t n = p->n;
-    float s = 0.0f, c = 0.0f, w = 0.0f, wc = 0.0f;
-    float first = 0.0f;                       /* the first nonzero tap, for its sign */
-    uint16_t i = p->head;
-    p->same = (uint16_t)(n - 1);
-    for (uint16_t m = 0; m < n; m++) {
-        i = (uint16_t)((i == 0 ? n : i) - 1); /* a_m, newest first */
-        const float a = p->taps[i];
-        if (first == 0.0f)
-            first = a;
-        else if (a != 0.0f && (a > 0.0f) != (first > 0.0f) && p->same == n - 1)
-            p->same = (uint16_t)(m - 1);
-        kahan_add(&s, &c, a);
-        p->taps[i] = s;
-        if (m + 1 < n)
-            kahan_add(&w, &wc, s);
-    }
-    p->wsum = w;                              /* T(n-1), what this call steps down from */
-    p->wsum_c = 0.0f;
-}
-
-/* Drain call j = drain: S(t) is read, T(t) stepped down from T(t+1). */
-static void drain_step(MotionProfile* p)
-{
-    const uint16_t n = p->n, j = p->drain;
-    if (j == 1)
-        to_prefix_sums(p);
-    if (j >= n) {                             /* empty: exactly at rest */
-        p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;
-        return;
-    }
-    const uint16_t t = (uint16_t)(n - 1 - j);
-    const uint16_t i = (uint16_t)(p->head + j >= n ? p->head + j - n : p->head + j);
-    const float s = p->taps[i];
-    p->sum = s;
-    p->sum_c = 0.0f;
-    kahan_add(&p->wsum, &p->wsum_c, -s);
-    /* Taps sharing a sign give T(t) that sign: a residue of the other sign would
-     * turn the output back past the target. T(0) is 0. */
-    if (t == 0 || (t <= p->same && (s == 0.0f || (p->wsum > 0.0f) != (s > 0.0f))))
-        p->wsum = p->wsum_c = 0.0f;
-}
-
 /* The ring has drained: exact rest at the target, where lag is already 0. */
 static void finish(MotionProfile* p)
 {
@@ -326,13 +257,21 @@ void MotionProfile_advance(MotionProfile* p)
     if (p->done)
         return;
     const bool was_landed = p->landed;
-    const float u = trapezoid(p);
-    const float vel0 = p->vel;
-    if (was_landed) {
+    const float u = trapezoid(p);         /* 0 once landed: the ring drains through the same push */
+    const float vel0 = p->vel, w0 = p->wsum;
+    if (was_landed)
         p->drain++;
-        drain_step(p);
-    } else {
-        push(p, u);
+    push(p, u);
+    if (was_landed && p->drain >= p->n) {
+        p->sum = p->sum_c = p->wsum = p->wsum_c = 0.0f;   /* every tap is zero: exactly at rest */
+    } else if (was_landed) {
+        /* Draining, the lag only shrinks toward zero; a rounding residue past that would put
+         * the output a hair beyond its target. */
+        const float w = fminf(fmaxf(p->wsum, fminf(w0, 0.0f)), fmaxf(w0, 0.0f));
+        if (w != p->wsum) {
+            p->wsum = w;
+            p->wsum_c = 0.0f;
+        }
     }
     p->vel = p->sum / (float)p->n;
     p->pos = p->p_t - lag(p);

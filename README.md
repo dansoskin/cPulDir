@@ -435,5 +435,5 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E27) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E30) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.

@@ -62,7 +62,7 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
         && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
         && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
-        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c && a->same == b->same;
+        && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c;
 }
 
 static void test_setup(void)
@@ -694,8 +694,8 @@ static void test_rebase(void)
     printf("ok rebase\n");
 }
 
-/* A new target while the ring drains takes the ring back from its prefix sums
- * as it stood; the same target again replays the rest of the drain. */
+/* A new target while the ring drains goes on from the ring as it stands; the
+ * same target again replays the rest of the drain. */
 static void test_retarget_draining(void)
 {
     const MotionLimits L = { 15, 30, 30, 300 };
