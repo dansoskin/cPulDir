@@ -10,8 +10,14 @@ gcc $CFLAGS -o "$OUT/test_motion_profile" test/test_motion_profile.c motion_prof
 "$OUT/test_motion_profile"
 echo "generator: all ok"
 
+# The drive modules alone, with no puldir core: the fake port and its three core calls stubbed.
+DRIVE="drive/puldir_enable.c drive/puldir_fault.c"
+gcc $CFLAGS -Itest -o "$OUT/test_drive" test/test_drive.c test/fake_port.c $DRIVE
+"$OUT/test_drive"
+echo "drive: all ok"
+
 LIB="motion_profile.c puldir.c puldir_pulse.c puldir_plan.c puldir_loop.c puldir_group.c puldir_console.c
-     drive/puldir_enable.c drive/puldir_fault.c puldir_homing.c puldir_stream.c"
+     puldir_drive.c puldir_homing.c puldir_stream.c $DRIVE"
 build_axis() {   # $1 = output name, rest = extra flags
     local out="$1"; shift
     gcc $CFLAGS -Itest "$@" -o "$OUT/$out" test/test_puldir.c test/fake_port.c $LIB -lm

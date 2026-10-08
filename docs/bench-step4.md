@@ -69,10 +69,11 @@ In `CMakeLists.txt`, in the existing user sections:
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_loop.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_group.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_console.c
-    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/drive/puldir_enable.c
-    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/drive/puldir_fault.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_drive.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_homing.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/puldir_stream.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/drive/puldir_enable.c
+    ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/drive/puldir_fault.c
     ${CMAKE_SOURCE_DIR}/Drivers/cPulDir/port/stm32/puldir_port_stm32.c
     ${CMAKE_SOURCE_DIR}/Core/Src/puldir_bench.c
 
@@ -83,7 +84,7 @@ In `CMakeLists.txt`, in the existing user sections:
 
 No compile definitions: the rates are arguments of the timer attach calls in `puldir_bench.c`.
 
-(`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` and the four module files (`drive/puldir_enable.c`, `drive/puldir_fault.c`, `puldir_homing.c`, `puldir_stream.c`) are required too: the plan tick calls into them, so the link fails without them.)
+(`puldir_console.c` is required: `bench_console` calls `PulDir_console`. `puldir_group.c` and the four module files (`drive/puldir_enable.c`, `drive/puldir_fault.c`, `puldir_homing.c`, `puldir_stream.c`) are required too: the plan tick calls into them, so the link fails without them. So is `puldir_drive.c`, which holds the enable and fault calls.)
 
 The library formats its log lines with `snprintf`, including `%f`: with newlib-nano the firmware must link float printf (`-u _printf_float`).
 

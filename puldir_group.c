@@ -70,7 +70,7 @@ bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
 /* 5.5: a member must be IDLE and at rest, not faulted, not in a group's move. */
 static PulDirRefusal member_refusal(const PulDir* a)
 {
-    if (puldir_fault_latched(a))
+    if (puldir_fault_latched(&a->fault))
         return PULDIR_R_FAULT;
     if (a->mode == PULDIR_MODE_GROUP)
         return PULDIR_R_BUSY;                   /* in this group's move or another's */
@@ -178,11 +178,12 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     port_lock();
     for (uint8_t i = 0; i < n && why == PULDIR_R_NONE; i++)
-        if (puldir_fault_latched(g->axes[i])) {
+        if (puldir_fault_latched(&g->axes[i]->fault)) {
             why = PULDIR_R_FAULT;
             bad = g->axes[i];
         }
     if (why == PULDIR_R_NONE) {
+        const uint32_t now = PulDir_ticks();
         for (uint8_t i = 0; i < n; i++) {
             PulDir* a = g->axes[i];
             a->target = g->start[i] + ((uint64_t)(int64_t)delta[i] << 32);
@@ -192,7 +193,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
             a->arrived = false;                 /* a new course (E17) */
             a->settle = 0;
             a->vel_out = 0.0f;
-            puldir_enable_wake(a);              /* 5.8: s waits for every member's enable delay */
+            puldir_enable_wake(&a->enable, now);   /* 5.8: s waits for every member's enable delay */
         }
         g->faulted = false;
         g->moving = true;
@@ -321,7 +322,8 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
          * delay (5.8), publishing directions alone. A stop before the start need not wait. */
         bool ready = true;
         for (uint8_t i = 0; i < n; i++)
-            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !puldir_enable_delaying(g->axes[i]);
+            ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i)
+                    && !puldir_enable_delaying(&g->axes[i]->enable);
         if (!ready && !s->stopping) {
             for (uint8_t i = 0; i < n; i++) {
                 PulDir* a = g->axes[i];

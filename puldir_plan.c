@@ -188,7 +188,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
     /* 4. The enable delay (5.8): a drive enabled too recently publishes nothing and its generator
      * waits. The homing phase clock starts when the hold ends. */
-    if (puldir_enable_delaying(a) && a->mode != PULDIR_MODE_IDLE) {
+    if (puldir_enable_delaying(&a->enable) && a->mode != PULDIR_MODE_IDLE) {
         puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
         puldir_home_hold(a, now);
@@ -226,20 +226,24 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t ahead,
                     PulDirSnap* snap, PulDirInc* out)
 {
-    puldir_enable_service(a, snap[a->slot].high, now);
-    if (!puldir_fault_service(a, flt, t_pin, now))
+    puldir_enable_service(&a->enable, snap[a->slot].high, now);
+    const PulDirLatch latch = puldir_fault_service(&a->fault, flt, t_pin, now);
+    if (latch == PULDIR_LATCH_DROPPED)
+        a->events |= PULDIR_EV_FAULT_CLEARED;
+    if (latch != PULDIR_LATCH_CLOSED)
         return;
 
     /* Latch: halt, and leave the enable pin alone (D12). */
+    a->events |= PULDIR_EV_FAULT;
     puldir_home_fault(a);
-    puldir_enable_hold(a);
+    puldir_enable_hold(&a->enable);
     PulDirGroup* g = a->group;
     port_lock();
     if (a->mode == PULDIR_MODE_GROUP && g != NULL) {
         puldir_group_halt(g, out);
         g->faulted = true;
         for (uint8_t i = 0; i < g->count; i++) {
-            puldir_enable_hold(g->axes[i]);
+            puldir_enable_hold(&g->axes[i]->enable);
             puldir_pulse_read(g->axes[i]->slot, ahead, &snap[g->axes[i]->slot]);
         }
     } else {
@@ -260,7 +264,7 @@ void puldir_plan_tick(void)
     bool flt[PULDIR_MAX_AXES];
     const uint32_t t_pin = PulDir_ticks();
     for (uint8_t i = 0; i < n; i++)
-        flt[i] = puldir_fault_sample(puldir_axes[i]);
+        flt[i] = puldir_fault_sample(&puldir_axes[i]->fault);
 
     PulDirSnap snap[PULDIR_MAX_AXES];
     port_lock();                                /* one consistent instant for every axis */
@@ -283,7 +287,7 @@ void puldir_plan_tick(void)
         PulDir* a = puldir_axes[i];
         if (a->mode != PULDIR_MODE_GROUP)
             run_axis(a, &out[i], snap[i].Pb, snap[i].count, snap[i].inc, snap[i].high, now, ahead);
-        puldir_enable_release(a, was[i], now);
+        puldir_enable_release(&a->enable, was[i], !a->moving && a->mode == PULDIR_MODE_IDLE, now);
     }
     puldir_publish(now + ahead);                /* due at the boundary the snapshot aimed at: the tick after the ahead ticks */
 }

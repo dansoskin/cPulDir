@@ -64,7 +64,7 @@ bool PulDir_homeStart(PulDir* a)
         port_lock();
         if (a->slot == PULDIR_MAX_AXES) {
             why = PULDIR_R_UNREGISTERED;    /* as puldir_motion_check: the ticks cannot run it */
-        } else if (puldir_fault_latched(a)) {
+        } else if (puldir_fault_latched(&a->fault)) {
             why = PULDIR_R_FAULT;
         } else if (a->mode != PULDIR_MODE_IDLE) {
             why = PULDIR_R_MODE;
@@ -77,7 +77,7 @@ bool PulDir_homeStart(PulDir* a)
             a->mode = PULDIR_MODE_HOMING;
             a->moving = true;
             h->state = PULDIR_HOME_MOVE_TOWARDS_LIMIT;
-            puldir_enable_wake(a);
+            puldir_enable_wake(&a->enable, PulDir_ticks());
         }
         port_unlock();
     }
