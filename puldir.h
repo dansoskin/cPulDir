@@ -74,19 +74,19 @@ typedef struct PulDir {
     float conv;                          /* pulses per user unit, > 0 */
     float def[4];                        /* default speed, accel, decel, jerk, user units */
     float lim[4];                        /* current speed, accel, decel, jerk, user units */
-    uint32_t enable_ms, release_ms, catchup_ms;
-    uint32_t enable_ticks, release_ticks; /* the same delays in pulse ticks */
+    uint32_t catchup_ms;
+    uint32_t enable_ticks, release_ticks; /* setDelays' delays, in pulse ticks */
     bool  auto_release, log_on;
     int8_t home_dir;                     /* +1, -1, 0 = not configured */
     float home_speed, home_adjust, home_zero;
     float home_lim[4];                   /* the limits at homeStart: a run that ends unhomed restores them */
     const uint8_t* home_switch;
-    uint32_t home_timeout_ms, home_timeout_ticks;
+    uint32_t home_timeout_ticks;         /* setHoming's phase timeout */
     uint8_t slot;                        /* index in the axis table, PULDIR_MAX_AXES if unregistered */
 
     /* main -> plan requests (D17), written under the lock */
     volatile uint16_t req;
-    float req_arg[4];
+    float req_speed;                     /* REQ_ENDLESS: the jog speed, pulses/s */
 
     /* plan tick state */
     volatile PulDirMode mode;
@@ -95,7 +95,7 @@ typedef struct PulDir {
     int32_t  origin;
     volatile bool moving, enabled, homed, fault;
     uint32_t enabled_at;                 /* tick of the enable edge */
-    bool     ena_wait;                   /* enable_ms has not yet passed since enabled_at: hold */
+    bool     ena_wait;                   /* the enable delay has not yet passed since enabled_at: hold */
     bool     release_due;                /* auto-release: the axis went IDLE at idle_at */
     uint32_t idle_at;
     bool     held;                       /* halted by a fault latch: no auto-release until a command (D12) */
@@ -172,9 +172,8 @@ bool  PulDir_restoreDefaults(PulDir*);
 /* D16: refuses a delay past half the tick counter's range (about 3 h at 200 kHz). */
 bool  PulDir_setDelays(PulDir*, uint32_t enable_ms, uint32_t release_ms);
 void  PulDir_setAutoRelease(PulDir*, bool);
-/* D16: refuses a direction other than +-1, a speed not finite, not positive or at the
- * tick ceiling, a null switch, a zero timeout or one past half the counter, and a
- * call while homing. A timeout covers each moving phase; the delays are fixed. */
+/* D16: refuses bad values, a speed at the tick ceiling and a call while homing. The timeout covers
+ * each moving phase, up to half the counter; the delays between phases are fixed. */
 bool  PulDir_setHoming(PulDir*, int direction, float speed, float adjust,
                        const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms);
 bool  PulDir_setStreamCatchup(PulDir*, uint32_t ms);

@@ -3,9 +3,6 @@
 #include <string.h>
 #include "puldir_internal.h"
 
-#define DT (1.0f / (float)PULDIR_PLAN_HZ)      /* the profile's dt, the same expression as init's */
-#define PULSES_MAX 2147483648.0f                /* whole-pulse targets lie in [-2^31, 2^31) */
-
 static bool started;                    /* PulDir_start has run */
 
 bool PulDir_init(PulDir* a, const char* name)
@@ -30,7 +27,7 @@ bool PulDir_init(PulDir* a, const char* name)
     a->refusal = PULDIR_R_NONE;
     /* The plan interval is a constant inside MotionProfile_init's range and
      * the limits are finite and positive, so neither call can refuse. */
-    (void)MotionProfile_init(&a->prof, 0.0f, 1.0f / (float)PULDIR_PLAN_HZ);
+    (void)MotionProfile_init(&a->prof, 0.0f, PULDIR_DT);
     (void)MotionProfile_setLimits(&a->prof, (MotionLimits){ d[0], d[1], d[2], d[3] });
     return true;
 }
@@ -87,8 +84,6 @@ bool PulDir_setDelays(PulDir* a, uint32_t enable_ms, uint32_t release_ms)
         return false;
     }
     port_lock();
-    a->enable_ms = enable_ms;
-    a->release_ms = release_ms;
     a->enable_ticks = PULDIR_MS_TICKS(enable_ms);
     a->release_ticks = PULDIR_MS_TICKS(release_ms);
     port_unlock();
@@ -113,7 +108,7 @@ void puldir_wake(PulDir* a)
         port_pin_write(a->ena, !a->ena_inverted);
         a->enabled = true;
         a->enabled_at = PulDir_ticks();
-        a->ena_wait = true;                 /* the plan tick lifts it once enable_ms has passed */
+        a->ena_wait = true;                 /* the plan tick lifts it once the enable delay has passed */
     }
 }
 
@@ -145,14 +140,14 @@ void PulDir_start(void)
 /* The generator's window() test, on the same float products as apply_limits. */
 static bool taps_fit(float acc, float dec, float j)
 {
-    return ceilf((acc + dec) / (j * DT)) <= (float)MOTION_PROFILE_MAX_TAPS;
+    return ceilf((acc + dec) / (j * PULDIR_DT)) <= (float)MOTION_PROFILE_MAX_TAPS;
 }
 
 /* The smallest jerk in user units that fits: minJerk's quotient and the
  * conversion each round, so step to the exact float boundary. */
 static float jerk_floor(float acc, float dec, float conv)
 {
-    float j = MotionProfile_minJerk(acc, dec, DT) / conv;
+    float j = MotionProfile_minJerk(acc, dec, PULDIR_DT) / conv;
     while (!taps_fit(acc, dec, j * conv))
         j = nextafterf(j, INFINITY);
     for (float d = nextafterf(j, 0.0f); taps_fit(acc, dec, d * conv); d = nextafterf(d, 0.0f))
@@ -173,7 +168,7 @@ static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const cha
 {
     const float conv = a->conv;
     const float v = lim[0] * conv, acc = lim[1] * conv, dec = lim[2] * conv, j = lim[3] * conv;
-    const float ratio = j > 0.0f ? (acc + dec) / (j * DT) : 0.0f;    /* generator's window() */
+    const float ratio = j > 0.0f ? (acc + dec) / (j * PULDIR_DT) : 0.0f;    /* generator's window() */
     PulDirRefusal why = PULDIR_R_NONE;
     float value = 0.0f;
     if (!(isfinite(v) && isfinite(acc) && isfinite(dec) && isfinite(j))
@@ -318,7 +313,7 @@ bool PulDir_moveTo(PulDir* a, float position)
         return false;
     const float x = roundf(position * a->conv);
     PulDirRefusal why = PULDIR_R_ARG;
-    if (x >= -PULSES_MAX && x < PULSES_MAX) {
+    if (x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX) {
         port_lock();
         why = take_target(a, (uint64_t)(int64_t)x << 32);
         port_unlock();
@@ -336,7 +331,7 @@ bool PulDir_moveBy(PulDir* a, float distance)
         return false;
     const float dx = roundf(distance * a->conv);
     PulDirRefusal why = PULDIR_R_ARG;
-    if (dx >= -2.0f * PULSES_MAX && dx <= 2.0f * PULSES_MAX) {   /* finite, and the sum fits */
+    if (dx >= -2.0f * PULDIR_PULSES_MAX && dx <= 2.0f * PULDIR_PULSES_MAX) {   /* finite, and the sum fits */
         port_lock();
         const int64_t whole = (int32_t)(uint32_t)((a->target + (PULDIR_ONE >> 1)) >> 32);
         const int64_t t = whole + (int64_t)dx;
@@ -351,9 +346,8 @@ bool PulDir_moveBy(PulDir* a, float distance)
     return true;
 }
 
-/* D7: run at speed until told otherwise. The count carries on (2.2). jog(0) is
- * a stop, but refused wherever any jog is (5.5), so STREAM is left by streamEnd
- * or stop, never by a jog. */
+/* D7: run at speed until told otherwise; the count carries on (2.2). jog(0) is a stop, refused
+ * wherever any jog is (5.5), so a jog never ends a STREAM. */
 bool PulDir_jog(PulDir* a, float speed)
 {
     if (motion_refused(a, "jog"))
@@ -377,7 +371,7 @@ bool PulDir_jog(PulDir* a, float speed)
     if (a->fault) {
         why = PULDIR_R_FAULT;
     } else {
-        a->req_arg[0] = v;
+        a->req_speed = v;
         a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
         a->mode = PULDIR_MODE_PROFILE;
         a->moving = true;
@@ -400,10 +394,8 @@ static void home_unwind(PulDir* a)
     a->req |= REQ_LIMITS;
 }
 
-/* Ramped: the plan tick stops the generator from where it is. A pending target
- * or jog is applied first, so the stop is from the motion as commanded. A group
- * member refuses it (5.7): PulDirGroup_stop stops the group along its line. In
- * HOMING it ends the run (homing IDLE, not homed) and stops at the axis's decel. */
+/* Ramped from the motion as commanded: a pending target or jog applies first. A group member
+ * refuses it (5.7); in HOMING it ends the run unhomed and stops at the axis's decel. */
 void PulDir_stop(PulDir* a)
 {
     port_lock();
@@ -421,9 +413,8 @@ void PulDir_stop(PulDir* a)
         puldir_refuse(a, "stop", PULDIR_R_MODE, 0.0f);
 }
 
-/* Immediate (D17): no rising edge after the tick this is called in. The target
- * is where the pulses stopped; isMoving clears once the plan tick sees the pin low.
- * A group member's halt halts the whole group (5.5). A homing run ends (IDLE). */
+/* Immediate (D17): no rising edge after this tick, the target where the pulses stopped. A member
+ * halts its whole group (5.5); a homing run ends. isMoving clears once the pin is low. */
 void PulDir_halt(PulDir* a)
 {
     port_lock();
@@ -446,9 +437,8 @@ void PulDir_halt(PulDir* a)
     port_unlock();
 }
 
-/* 5.8: enabling arms the enable delay; disabling halts first if the axis moves.
- * A pulse still high is not cut short: the plan tick lowers the enable pin once
- * the pulse pin is low. Without an enable pin there is nothing to switch: refused. */
+/* 5.8: enabling arms the enable delay; disabling halts first, and a pulse still high is not cut
+ * short: the plan tick lowers the enable pin after it. Refused without an enable pin. */
 bool PulDir_enable(PulDir* a, bool on)
 {
     if (!a->has_ena) {
@@ -476,9 +466,8 @@ bool PulDir_enable(PulDir* a, bool on)
 
 /* ---- stream (5.6) ---------------------------------------------------------- */
 
-/* From IDLE, PROFILE or STOPPING. The plan tick takes the velocity the axis has
- * as the stream's, halts the generator and starts the timeout: the call itself
- * changes nothing in the motion. A pending move or stop gives way to it. */
+/* From IDLE, PROFILE or STOPPING; a pending move or stop gives way. The plan tick takes the axis's
+ * velocity as the stream's and starts the timeout, so the call itself changes no motion. */
 bool PulDir_streamBegin(PulDir* a)
 {
     PulDirRefusal why = PULDIR_R_NONE;
@@ -506,21 +495,12 @@ bool PulDir_streamBegin(PulDir* a)
     return true;
 }
 
-/* One setpoint: where the axis should be now, and how fast it moves there. One
- * lock and four stores; the plan tick does the arithmetic. Outside STREAM it is
- * dropped and never starts a stream.
- *
- * Precision: sp_pos is a float in pulses and carries about seven significant
- * digits. Beyond 2^24 pulses (16.8 million) from the datum the setpoint itself
- * is quantised to a whole pulse or more, before the library sees it; the plan
- * tick's error arithmetic is exact relative to it, but cannot restore what the
- * float has lost.
- *
- * Main context only (5.9): the plan tick relies on sp_tick never being ahead of its own reading. */
+/* Main context only (5.9): the plan tick relies on sp_tick never being ahead of its reading. Past
+ * 2^24 pulses from the datum the float setpoint is quantised before the library sees it. */
 void PulDir_stream(PulDir* a, float position, float velocity)
 {
     const float p = position * a->conv, v = velocity * a->conv;
-    bool ok = isfinite(v) && p >= -PULSES_MAX && p < PULSES_MAX;   /* false for NaN */
+    bool ok = isfinite(v) && p >= -PULDIR_PULSES_MAX && p < PULDIR_PULSES_MAX;   /* false for NaN */
     if (ok) {
         port_lock();
         ok = a->mode == PULDIR_MODE_STREAM;
@@ -585,7 +565,7 @@ static PulDirRefusal home_values(const PulDir* a, float speed, float adjust, flo
     *cap = (float)(PULDIR_TICK_HZ / 2u) / c;
     if (!(speed < *cap))
         return PULDIR_R_RATE;
-    if (!(z >= -PULSES_MAX && z < PULSES_MAX && d > -PULSES_MAX && d < PULSES_MAX))
+    if (!(z >= -PULDIR_PULSES_MAX && z < PULDIR_PULSES_MAX && d > -PULDIR_PULSES_MAX && d < PULDIR_PULSES_MAX))
         return PULDIR_R_ARG;
     return PULDIR_R_NONE;
 }
@@ -613,7 +593,6 @@ bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
             a->home_adjust = adjust;
             a->home_zero = zero_pos;
             a->home_switch = switch_ptr;
-            a->home_timeout_ms = phase_timeout_ms;
             a->home_timeout_ticks = PULDIR_MS_TICKS(phase_timeout_ms);
         }
         port_unlock();
@@ -625,9 +604,8 @@ bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
     return true;
 }
 
-/* 5.5: IDLE and at rest, not faulted, homing configured. The values are checked
- * again: the conversion may have changed since setHoming. The plan tick runs the
- * phases (5.8); the caller reads HOMING, isMoving and the first phase at once. */
+/* 5.5: IDLE and at rest, not faulted, configured. The values are checked again because the
+ * conversion may have changed since setHoming; the plan tick runs the phases (5.8). */
 bool PulDir_homeStart(PulDir* a)
 {
     PulDirRefusal why = PULDIR_R_NONE;
@@ -723,7 +701,7 @@ float PulDir_target(PulDir* a)
     const uint64_t t = a->target;
     port_unlock();
     const int32_t whole = (int32_t)(uint32_t)(t >> 32);
-    return ((float)whole + (float)(uint32_t)t * (1.0f / 4294967296.0f)) / a->conv;
+    return ((float)whole + (float)(uint32_t)t * (1.0f / PULDIR_FIX)) / a->conv;
 }
 
 /* D18: the datum, in IDLE only. The pulse tick's count, position and edge move
@@ -732,7 +710,7 @@ bool PulDir_setPosition(PulDir* a, float pos)
 {
     const float x = roundf(pos * a->conv);
     PulDirRefusal why = PULDIR_R_NONE;
-    if (!(x >= -PULSES_MAX && x < PULSES_MAX)) {
+    if (!(x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX)) {
         why = PULDIR_R_ARG;
     } else {
         const int32_t c = (int32_t)x;

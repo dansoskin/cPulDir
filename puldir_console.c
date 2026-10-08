@@ -1,13 +1,12 @@
-/* The @ console: cFlexyStepper_decode.c verb for verb, plus jerk. Main context.
- * Replies go through the logger with the axis's "[name] " prefix, in the integer
- * four-decimal format of PulDir_loop, and honour the axis's logging switch. */
-#include <stdio.h>
+/* The @ console: cFlexyStepper_decode.c verb for verb, plus jerk, from main context. Replies go
+ * through the logger as PulDir_loop's lines do, and honour the axis's logging switch. */
 #include <stdlib.h>
 #include "puldir_internal.h"
 
+/* A bounded copy, cut short to fit: the core links no formatted output. */
 void PulDir_consoleMenu(char* buf, size_t n)
 {
-    (void)snprintf(buf, n,
+    static const char menu[] =
         "Stepper commands:\n"
         "E<0|1> - Enable/disable motor\n"
         "P<position> - Set current position\n"
@@ -28,7 +27,13 @@ void PulDir_consoleMenu(char* buf, size_t n)
         "K - Halt now and release motor\n"
         "s - Get status, mode, homed, home state and fault count\n"
         "C - Clear fault\n"
-        "H - Start homing state machine\n");
+        "H - Start homing state machine\n";
+    if (n == 0u)
+        return;
+    size_t i = 0;
+    for (; i + 1u < n && menu[i] != '\0'; i++)
+        buf[i] = menu[i];
+    buf[i] = '\0';
 }
 
 /* The whole argument is one number; white space around it is not part of it. */

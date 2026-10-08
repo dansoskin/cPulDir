@@ -20,11 +20,8 @@ void port_start(void (*pulse)(bool), void (*plan)(void))
 {
     pulse_fn = pulse;
     plan_fn = plan;
-    /* The core latches increment sets every N pulse ticks counted from the first.
-     * The plan tick should fire just after such a boundary so it has the whole
-     * interval to publish. Both timers share a clock and the plan period is N pulse
-     * periods, so zero both counters and start them back to back: the plan timer's
-     * first update then lands just after a boundary and stays there. */
+    /* The core latches every N pulse ticks from the first; with a shared clock and a plan period
+     * of N pulse periods, zeroed counters put every plan tick just after a boundary. */
     __HAL_TIM_SET_COUNTER(pulse_tim, 0);
     __HAL_TIM_SET_COUNTER(plan_tim, 0);
     HAL_TIM_Base_Start_IT(pulse_tim);

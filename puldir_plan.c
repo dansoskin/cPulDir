@@ -5,15 +5,13 @@
 
 #define N   ((int64_t)PULDIR_TICKS_PER_PLAN)
 #define M   (N * N)                             /* D6 margin, in 2^-32 pulse */
-#define FIX 4294967296.0f                       /* one pulse in 32.32 */
 #define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
-#define DT  (1.0f / (float)PULDIR_PLAN_HZ)      /* the profile's dt, the same expression as init's */
 #define TIMEOUT_TICKS  PULDIR_MS_TICKS(PULDIR_STREAM_TIMEOUT_MS)
 #define DEBOUNCE_TICKS PULDIR_MS_TICKS(PULDIR_FAULT_DEBOUNCE_MS)
 #define CLEAR_TICKS    PULDIR_MS_TICKS(PULDIR_FAULT_CLEAR_MS)
 #define DELAY_TICKS    PULDIR_MS_TICKS(PULDIR_HOMING_DELAY_MS)
 
-static int64_t to_fix(float pulses) { return (int64_t)(pulses * FIX); }
+static int64_t to_fix(float pulses) { return (int64_t)(pulses * PULDIR_FIX); }
 
 /* Pulses as float, saturated to +-2^24 so the generator never sees more. */
 static float to_pulses(int64_t q)
@@ -22,7 +20,7 @@ static float to_pulses(int64_t q)
         q = SAT;
     else if (q < -SAT)
         q = -SAT;
-    return (float)q * (1.0f / FIX);
+    return (float)q * (1.0f / PULDIR_FIX);
 }
 
 /* The speed cap keeps cruise below PULDIR_INC_MAX; a speed one float rounding
@@ -53,9 +51,8 @@ void puldir_set_inc(PulDir* a, PulDirInc* out, int32_t inc)
 bool puldir_steer(PulDir* a, PulDirInc* out, int64_t T, int64_t end, int64_t pb, bool arrival, bool hold)
 {
     if (!a->arrived && arrival) {
-        /* Arrival: round away from zero so the target's integer is crossed (5.4
-         * step 5). D6 kept the last interval M short, so this one moves more than
-         * N(N-1) and the final edge falls on its last tick. */
+        /* Arrival rounds away from zero to cross the target's integer (5.4 step 5); D6 kept the
+         * last interval M short, so this one moves more than N(N-1): the edge is on its last tick. */
         int32_t inc = div_away(T - pb);
         /* No edge lies between pb and T (D3): a fraction back must not turn the pin. */
         const int64_t one = (int64_t)PULDIR_ONE;
@@ -74,9 +71,8 @@ bool puldir_steer(PulDir* a, PulDirInc* out, int64_t T, int64_t end, int64_t pb,
             end = T > pb ? T - M : T + M;
         puldir_set_inc(a, out, div_trunc(end - pb));
     } else {
-        /* Settling (D19): the final interval runs after publication and its last
-         * pulse is lowered on the tick after it. If the final set latched late or
-         * was overwritten, the boundary is still short of the target: steer again. */
+        /* Settling (D19): the final interval runs after publication. If its set latched late or was
+         * overwritten, the boundary is still short of the target: steer again. */
         const bool short_of = (a->approach > 0 && pb < T) || (a->approach < 0 && pb > T);
         if (short_of) {
             puldir_set_inc(a, out, div_away(T - pb));
@@ -101,9 +97,8 @@ static void halt_generator(PulDir* a, int64_t pb)
     a->stream_live = false;
 }
 
-/* PulDir_halt from inside the plan tick, after the re-base (E17): no rising edge
- * after this tick, the target where the pulses stopped, IDLE. isMoving clears in
- * IDLE once the pin is low. */
+/* PulDir_halt from inside the plan tick, after the re-base (E17): no rising edge after this tick,
+ * the target where the pulses stopped, IDLE; isMoving clears once the pin is low. */
 static void halt_now(PulDir* a, PulDirInc* out, uint64_t base)
 {
     PulDirPulse s;
@@ -118,9 +113,8 @@ static void halt_now(PulDir* a, PulDirInc* out, uint64_t base)
     puldir_set_inc(a, out, 0);
 }
 
-/* Aim this interval's end at the generator's position. T, pb and end are 32.32
- * relative to base; live is the running increment. Returns true at rest: settled
- * on the generator's final position, the generator done, the last pulse lowered. */
+/* Aims this interval's end at the generator's position (T, pb, end: 32.32 from base). True at rest:
+ * settled on the final position, the generator done, the last pulse lowered. */
 static bool run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
                           bool pul_high)
 {
@@ -185,9 +179,8 @@ static void home_course(PulDir* a)
     a->settle = 0;
 }
 
-/* A moving phase runs at the homing speed, toward the switch (away = false) or
- * back from it at 0.2x, applied as the speed limit, as cFlexyStepper's jog did.
- * The generator is at rest (homeStart, or halted a delay ago): only vmax changes. */
+/* A moving phase: the homing speed toward the switch, or 0.2x back, as the speed limit, as
+ * cFlexyStepper's jog did. The generator is at rest, so only vmax changes. */
 static void home_jog(PulDir* a, bool away)
 {
     const float speed = away ? 0.2f * a->home_speed : a->home_speed;
@@ -225,9 +218,8 @@ static bool home_datum(PulDir* a, PulDirInc* out)
     return true;
 }
 
-/* One plan interval of HOMING. The switch and the clocks are read before the
- * generator advances, so a switch seen now stops the aim published now. Every
- * phase that moves has home_timeout_ms; a timeout halts the axis (2.2). */
+/* One interval of HOMING. The switch is read before the generator advances, so a switch seen now
+ * stops the aim published now. A phase timeout halts the axis (2.2). */
 static void run_home(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t count,
                      int32_t live, bool pul_high, uint32_t now)
 {
@@ -306,13 +298,12 @@ static void leave_stream(PulDir* a, int64_t pb)
     a->settle = 0;
 }
 
-/* STREAM: feedforward plus proportional catch-up toward the first-order hold,
- * evaluated at t_b, the boundary where the set published now takes over. pb is
- * P_b relative to count, so no large float is subtracted from another. */
+/* STREAM: feedforward plus catch-up toward the first-order hold at t_b, where this set takes over.
+ * pb is relative to count, so no large float is subtracted from another. */
 static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t count,
                        uint32_t t_b)
 {
-    const float frac = (float)pb * (1.0f / FIX);
+    const float frac = (float)pb * (1.0f / PULDIR_FIX);
     if (a->sp_have) {
         /* sp_pos - P_b as (whole part - count) + (sp_pos's fraction) - frac: each
          * term is exact or small. PulDir_stream keeps |sp_pos| below 2^31. */
@@ -334,7 +325,7 @@ static void run_stream(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
     else if (a->v_cmd < -vmax)
         a->v_cmd = -vmax;
 
-    const int32_t inc = div_trunc(to_fix(a->v_cmd * DT));
+    const int32_t inc = div_trunc(to_fix(a->v_cmd * PULDIR_DT));
     puldir_set_inc(a, out, inc);
     a->vel_out = a->v_cmd;
     a->target = base + (uint64_t)(pb + (int64_t)inc * N);   /* the aim, as a jog reads it */
@@ -355,10 +346,8 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     const float trel = to_pulses((int64_t)(a->target - base));
     MotionProfile_rebase(&a->prof, (float)shift, trel);
 
-    /* 3. Requests (main writes req under the lock, which masks this tick). Halt
-     * first, so later commands start where the pulses stopped; then a stream
-     * begins, so limits reach an idle generator; a stop last. A fault latched
-     * this tick halts here and now (E17) and discards every course requested. */
+    /* 3. Requests. Halt first, so commands start where the pulses stopped; a stream begin before the
+     * limits, so they reach an idle generator; a stop last. A latch this tick halts now (E17). */
     uint16_t req = a->req;
     a->req = 0;
     if (latch) {
@@ -371,9 +360,8 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     if (req & REQ_HALT)                         /* puldir_kill zeroed the increments: pb is where they stopped */
         halt_generator(a, pb);
     if (req & REQ_STREAM_BEGIN) {
-        /* The stream starts at the velocity the running set was aimed with (a
-         * stream still live, ended and begun within one interval, keeps its own).
-         * The generator stays idle, where the pulses are, until the stream ends. */
+        /* The stream starts at the velocity the running set was aimed with; a stream ended and
+         * begun within one interval keeps its own. The generator idles where the pulses are. */
         if (!a->stream_live)
             a->v_cmd = a->prof.vel;
         MotionProfile_halt(&a->prof);
@@ -406,7 +394,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
         if (req & REQ_TARGET)
             (void)MotionProfile_setTarget(&a->prof, trel);
         else
-            (void)MotionProfile_setEndless(&a->prof, a->req_arg[0]);
+            (void)MotionProfile_setEndless(&a->prof, a->req_speed);
         a->arrived = false;                     /* so must every request that sets a new course */
         a->settle = 0;
     }
@@ -418,9 +406,8 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
         a->home_t0 = now;
     }
 
-    /* 4. The enable delay (5.8): a moving mode on a drive enabled less than
-     * enable_ms ago publishes nothing and leaves the generator where it is.
-     * The homing phase clock starts when the hold ends. */
+    /* 4. The enable delay (5.8): a drive enabled too recently publishes nothing and its generator
+     * waits. The homing phase clock starts when the hold ends. */
     if (a->ena_wait && a->mode != PULDIR_MODE_IDLE) {
         puldir_set_inc(a, out, 0);
         a->vel_out = 0.0f;
@@ -454,10 +441,8 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
 
 /* ---- fault, enable delay and release (5.8), for every axis, group members too ---- */
 
-/* Before the groups and the axes run. flt is the fault input sampled at t_pin.
- * Returns true when the latch closes on an axis that is not in a group's move;
- * run_axis halts it after its re-base. A member's latch halts its group here,
- * under the lock, and refreshes every member's snapshot. */
+/* Before the groups and axes run. True when the latch closes on an axis outside a group's move;
+ * a member's latch halts its group here, under the lock, and refreshes the snapshots. */
 static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t ahead,
                     PulDirSnap* snap, PulDirInc* out)
 {
@@ -468,9 +453,8 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
         a->ena_off = false;
     }
 
-    /* The clear pulse ends. The latch holds until a sample taken with the clear
-     * pin low reads the input inactive: this one was taken before it was lowered.
-     * A drive still in alarm stays latched; nothing is counted again. */
+    /* The clear pulse ends. This sample was taken before the pin was lowered, so the latch holds
+     * until a later one reads inactive; a drive still in alarm stays latched, uncounted. */
     if (a->clearing && now - a->clr_t0 >= CLEAR_TICKS) {
         port_pin_write(a->clr, a->clr_inverted);
         a->clearing = false;
@@ -528,10 +512,8 @@ static bool service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
     return false;
 }
 
-/* After the modes: with auto-release on, the drive is disabled release_ms after
- * the axis went IDLE at the end of a move, which is within one plan interval of
- * the last falling edge (D19). Never on an axis a fault latch halted, the faulted
- * one or its group's other members, until its next accepted command (D12). */
+/* Auto-release: release_ticks after the axis went IDLE at the end of a move (D19). Never on an axis
+ * a fault latch halted, or its group's members, until its next accepted command (D12). */
 static void release(PulDir* a, bool was_moving, uint32_t now)
 {
     if (was_moving && !a->moving && a->mode == PULDIR_MODE_IDLE && a->auto_release

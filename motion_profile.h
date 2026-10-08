@@ -1,6 +1,5 @@
-/* Motion profile generator: an acceleration-limited online trapezoid whose
- * velocity passes through a moving-average jerk filter. Pure maths, no
- * statics, unit-agnostic. Section 5.2 of docs/puldir-guidelines.md. */
+/* Motion profile generator: an acceleration-limited online trapezoid through a moving-average
+ * jerk filter. Pure maths, no statics, unit-agnostic (guidelines 5.2). */
 #ifndef MOTION_PROFILE_H
 #define MOTION_PROFILE_H
 

@@ -1,5 +1,8 @@
 /* Generator tests (guidelines section 8, tests 1-9), each printing "ok <name>".
  * Every advance goes through step(), which checks the limits of 5.2. */
+#ifdef NDEBUG
+#error "the tests call the code under test inside assert(): build without NDEBUG"
+#endif
 #include <assert.h>
 #include <float.h>
 #include <math.h>

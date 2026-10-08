@@ -1,16 +1,10 @@
-/* Groups (guidelines 5.7): several axes along one straight line in joint space.
- * One path profile s runs from 0 to 1; member i aims at start_i + delta_i * s,
- * so every member arrives on the same plan interval, and D6 with the rounded-away
- * final increment puts every final rising edge on that interval's last tick. */
+/* Groups (5.7): one path profile s from 0 to 1, member i aiming at start_i + delta_i * s, so every
+ * member arrives on one interval and D6 puts every final rising edge on its last tick. */
 #include <math.h>
 #include "puldir_internal.h"
 
-#define FIX 4294967296.0f                       /* one pulse in 32.32 */
-#define DT  (1.0f / (float)PULDIR_PLAN_HZ)      /* the profile's dt, the same expression as init's */
-#define PULSES_MAX 2147483648.0f                /* whole-pulse targets lie in [-2^31, 2^31) */
-/* The longest member travel. s is a float: past 2^24 pulses one ulp of s moves
- * a member by more than a pulse, and its aim steps by more than its speed limit
- * (6x measured at 2^28). It also keeps delta * s inside int64 without a clamp. */
+/* The longest member travel: past 2^24 pulses one ulp of s moves a member by more than a pulse
+ * (6x its speed limit at 2^28). It also keeps delta * s inside int64 without a clamp. */
 #define TRAVEL_MAX ((int64_t)1 << 24)
 
 static PulDirGroup* groups[PULDIR_MAX_GROUPS];
@@ -24,9 +18,8 @@ static bool listed(const PulDirGroup* g)
     return false;
 }
 
-/* D16: refuses a member list it cannot run, and a full table. The plan tick
- * ignores a group that is neither active nor moving, so the fields are written
- * outside the lock; only joining the table takes it. */
+/* D16: refuses a member list it cannot run, and a full table. The plan tick ignores an inactive,
+ * still group, so only joining the table takes the lock. */
 bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
 {
     PulDir* first = (axes != NULL && count > 0u) ? axes[0] : NULL;
@@ -64,7 +57,7 @@ bool PulDirGroup_init(PulDirGroup* g, PulDir** axes, uint8_t count)
         g->start[i] = 0;
         g->delta[i] = 0;
     }
-    (void)MotionProfile_init(&g->s, 0.0f, DT);  /* a constant in range: cannot refuse */
+    (void)MotionProfile_init(&g->s, 0.0f, PULDIR_DT);  /* a constant in range: cannot refuse */
     if (!known) {
         port_lock();
         groups[ngroups] = g;
@@ -86,9 +79,8 @@ static PulDirRefusal member_refusal(const PulDir* a)
     return PULDIR_R_NONE;
 }
 
-/* The path profile's limits in s per second (5.7): each member's own, in pulses
- * (the same products REQ_LIMITS hands its generator), over its travel; the
- * tightest wins. A member without travel, or without jerk, does not constrain. */
+/* The path's limits in s per second (5.7): each member's own in pulses over its travel, the
+ * tightest winning. A member without travel, or without jerk, does not constrain. */
 static bool path_limits(const PulDirGroup* g, const int32_t* delta, MotionLimits* L)
 {
     float l[4] = { INFINITY, INFINITY, INFINITY, INFINITY };
@@ -107,10 +99,8 @@ static bool path_limits(const PulDirGroup* g, const int32_t* delta, MotionLimits
     return any;
 }
 
-/* Whole-pulse targets (D4). Everything is computed and the path profile built
- * before the lock: the group is not active, so the plan tick does not read it,
- * and only main context takes an axis out of IDLE, so the members stay as
- * checked. The fault latch alone can change under us; it is checked again. */
+/* Whole-pulse targets (D4), all built before the lock: the plan tick reads no inactive group and
+ * only main leaves IDLE. Only the fault latch can change meanwhile, so it is checked again. */
 bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 {
     const uint8_t n = g->count;
@@ -138,7 +128,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
     for (uint8_t i = 0; i < n && why == PULDIR_R_NONE; i++) {
         const PulDir* a = g->axes[i];
         const float x = roundf(targets[i] * a->conv);
-        const bool fits = x >= -PULSES_MAX && x < PULSES_MAX;      /* false for NaN */
+        const bool fits = x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX;      /* false for NaN */
         const int64_t d = fits ? (int64_t)x - count[i] : 0;
         if (!fits || d > TRAVEL_MAX || d < -TRAVEL_MAX) {
             why = PULDIR_R_ARG;
@@ -156,7 +146,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
         if (any && !(L.vmax > 0.0f && L.amax > 0.0f && L.dmax > 0.0f)) {
             why = PULDIR_R_ARG;                 /* underflowed: limits too small for the travel */
         } else if (any && L.jmax > 0.0f
-                   && !(ceilf((L.amax + L.dmax) / (L.jmax * DT)) <= (float)MOTION_PROFILE_MAX_TAPS)) {
+                   && !(ceilf((L.amax + L.dmax) / (L.jmax * PULDIR_DT)) <= (float)MOTION_PROFILE_MAX_TAPS)) {
             /* Each member's own window fits, and the tightest jerk's member bounds the
              * ratio, so only float rounding at the 256-tap edge can land here. */
             why = PULDIR_R_TAPS;
@@ -170,11 +160,11 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     /* Not active: the plan tick leaves s and these fields alone. */
     if (any) {
-        (void)MotionProfile_init(&g->s, 0.0f, DT);
+        (void)MotionProfile_init(&g->s, 0.0f, PULDIR_DT);
         (void)MotionProfile_setLimits(&g->s, L);   /* checked above as the generator checks */
         (void)MotionProfile_setTarget(&g->s, 1.0f);
     } else {
-        (void)MotionProfile_init(&g->s, 1.0f, DT); /* at rest on the end already */
+        (void)MotionProfile_init(&g->s, 1.0f, PULDIR_DT); /* at rest on the end already */
     }
     for (uint8_t i = 0; i < n; i++) {
         g->start[i] = (uint64_t)(uint32_t)count[i] << 32;
@@ -263,7 +253,7 @@ bool PulDirGroup_faulted(PulDirGroup* g)  { return g->faulted; }
  * |delta| <= 2^24, so delta * s_fix fits int64 with room to spare. */
 static int64_t s_fix(float s)
 {
-    return (int64_t)(s * FIX);
+    return (int64_t)(s * PULDIR_FIX);
 }
 
 /* The direction member i must show before s advances. */
@@ -282,7 +272,7 @@ static void finish(PulDirGroup* g, const PulDirSnap* sn)
         const PulDirSnap* q = &sn[a->slot];
         const uint64_t base = (uint64_t)(uint32_t)q->count << 32;
         const int64_t T = (int64_t)(a->target - base);
-        (void)MotionProfile_setPosition(&a->prof, (float)T * (1.0f / FIX));
+        (void)MotionProfile_setPosition(&a->prof, (float)T * (1.0f / PULDIR_FIX));
         a->origin = q->count;
         a->target = base;                       /* the target, or the last integer a stop reached */
         a->vel_out = 0.0f;
@@ -325,11 +315,8 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
         MotionProfile_stop(s);
 
     if (!g->started) {
-        /* The start tick (5.7): a reversal costs the member ticks (E14), so s waits
-         * until every member's pin shows the direction of its travel, and until
-         * every member's drive is past its enable delay (5.8); until then every
-         * member publishes its direction with no increment. A stop before the
-         * start moves nothing, so it need not wait. */
+        /* A reversal costs a member ticks (E14), so s waits for every member's direction and enable
+         * delay (5.8), publishing directions alone. A stop before the start need not wait. */
         bool ready = true;
         for (uint8_t i = 0; i < n; i++)
             ready = ready && sn[g->axes[i]->slot].dir == wanted(g, i) && !g->axes[i]->ena_wait;

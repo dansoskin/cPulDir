@@ -34,7 +34,7 @@ void puldir_refuse(PulDir* a, const char* call, PulDirRefusal why, float value)
     port_unlock();
 }
 
-/* ---- lines, without printf: no double ever reaches a formatter ------------- */
+/* ---- lines from integers: no double ever reaches a formatter --------------- */
 
 size_t puldir_put(char* b, size_t at, const char* s)
 {

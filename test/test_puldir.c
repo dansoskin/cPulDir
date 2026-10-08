@@ -1,5 +1,8 @@
 /* Axis tests (guidelines section 8, tests 10 to 24). One case per process
  * (D9): `test_puldir list` prints the names, `test_puldir <name>` runs one. */
+#ifdef NDEBUG
+#error "the tests call the code under test inside assert(): build without NDEBUG"
+#endif
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -555,7 +558,6 @@ static void t_overrun(void)
 
 /* ---- the plan tick ------------------------------------------------------------------------- */
 
-#define FIX 4294967296.0f
 #define M ((int64_t)N * N)                    /* D6's margin, in 2^-32 pulse */
 
 /* Rising edges per axis (active-high pins), signed by the direction pin's level,
@@ -630,7 +632,7 @@ static void track_run(PulDir* a, uint32_t ticks)
         if (left() == plan_left) {
             fake_plan();
             const uint64_t aim = ((uint64_t)(uint32_t)a->origin << 32)
-                               + (uint64_t)(int64_t)(a->prof.pos * FIX);
+                               + (uint64_t)(int64_t)(a->prof.pos * PULDIR_FIX);
             int64_t gap = (int64_t)(a->target - aim);
             if (gap < 0)
                 gap = -gap;
@@ -1206,7 +1208,7 @@ static void t_stop_random(void)
         else
             assert(PulDir_jog(a, frand(-1.0f, 1.0f) * v / conv));
         const float tg = PulDir_target(a);
-        const int travel = kind == 0 ? (tg > pos0) - (tg < pos0) : (a->req_arg[0] > 0.0f) - (a->req_arg[0] < 0.0f);
+        const int travel = kind == 0 ? (tg > pos0) - (tg < pos0) : (a->req_speed > 0.0f) - (a->req_speed < 0.0f);
         fake_run(rnd() % (300u * N));
         if (kind == 2) {
             const uint64_t e0 = edges[0];
@@ -1280,7 +1282,7 @@ static void t_halt(void)
         assert(edges[0] == e0 && st(0).count == ch && st(0).inc == 0);   /* no rising edge since */
         assert(PulDir_target(a) == (float)ch && PulDir_velocity(a) == 0.0f && a->mode == PULDIR_MODE_IDLE);
         /* the generator is at rest where the pulses stopped, not where it was aiming */
-        const float frac = (float)(int64_t)(st(0).P - ((uint64_t)(uint32_t)a->origin << 32)) / FIX;
+        const float frac = (float)(int64_t)(st(0).P - ((uint64_t)(uint32_t)a->origin << 32)) / PULDIR_FIX;
         assert(a->prof.done && a->prof.vel == 0.0f && fabsf(a->prof.pos - frac) < 1e-6f);
         assert(a->origin == ch && fabsf(frac) < 1.0f);
 
@@ -1738,7 +1740,7 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
                 const double p = A * (1.0 - cos(w * t)) * conv;
                 const PulDirPulse s = st(0);
                 const double e = fabs((double)s.count - p);
-                const double ep = fabs((double)(int64_t)s.P / (double)FIX - p);
+                const double ep = fabs((double)(int64_t)s.P / (double)PULDIR_FIX - p);
                 if (t > 0.5) {
                     worst = fmax(worst, e);
                     worst_p = fmax(worst_p, ep);
@@ -2313,7 +2315,7 @@ static void group_write(uint32_t tick, uint8_t id, bool level)
 /* Member i's aim at path parameter s, absolute 32.32, as the plan tick computes it. */
 static uint64_t group_aim(const PulDirGroup* g, uint8_t i, float s)
 {
-    return g->start[i] + (uint64_t)((int64_t)g->delta[i] * (int64_t)(s * FIX));
+    return g->start[i] + (uint64_t)((int64_t)g->delta[i] * (int64_t)(s * PULDIR_FIX));
 }
 
 /* Test 18's tracking. A plan tick publishes a set aimed at start + delta * s; when
@@ -2774,7 +2776,7 @@ static void t_enable_release(void)
 
     /* refused: a delay beyond half the tick counter, and enable without a pin */
     assert(!PulDir_setDelays(a, 0xFFFFFFFFu, 0u) && a->refusal == PULDIR_R_ARG);
-    assert(!PulDir_setDelays(a, 0u, 0xFFFFFFFFu) && a->enable_ms == 50u && a->release_ms == 200u);
+    assert(!PulDir_setDelays(a, 0u, 0xFFFFFFFFu) && a->enable_ticks == 50u * MS && a->release_ticks == 200u * MS);
     PulDir b;
     assert(PulDir_init(&b, "b"));
     assert(!PulDir_enable(&b, true) && b.refusal == PULDIR_R_NO_PIN && !b.enabled);

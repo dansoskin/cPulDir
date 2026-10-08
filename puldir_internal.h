@@ -4,6 +4,9 @@
 #include "puldir.h"
 
 #define PULDIR_ONE     ((uint64_t)1 << 32)    /* one pulse in 32.32 */
+#define PULDIR_FIX     4294967296.0f          /* the same, as a float scale */
+#define PULDIR_DT      (1.0f / (float)PULDIR_PLAN_HZ)   /* every profile's dt: one expression, one float */
+#define PULDIR_PULSES_MAX 2147483648.0f       /* whole-pulse targets lie in [-2^31, 2^31) */
 #define PULDIR_INC_MAX 0x7FFFFFFF             /* just under half a pulse per tick */
 
 typedef struct { int32_t inc; int8_t dir; } PulDirInc;   /* D3: dir is +1 or -1 */
@@ -50,7 +53,7 @@ typedef struct {
 enum {
     PULDIR_EV_REFUSED = 1u << 0, PULDIR_EV_LANDED = 1u << 1, PULDIR_EV_STREAM_TIMEOUT = 1u << 2,
     PULDIR_EV_HOMED = 1u << 3, PULDIR_EV_HOME_FAILED = 1u << 4, PULDIR_EV_FAULT = 1u << 5,
-    PULDIR_EV_FAULT_CLEARED = 1u << 6, PULDIR_EV_DROPPED = 1u << 7
+    PULDIR_EV_FAULT_CLEARED = 1u << 6
 };
 
 extern PulDir* puldir_axes[PULDIR_MAX_AXES];
@@ -78,29 +81,24 @@ void puldir_plan_tick(void);
 /* Write one entry of the set being built. A non-zero inc carries its sign as the
  * direction; zero keeps the last one, so a pause never turns the pin. */
 void puldir_set_inc(PulDir*, PulDirInc* out, int32_t inc);
-/* One interval of an axis or a group member heading for T. T, end (this
- * interval's aim) and pb are 32.32 relative to the axis's whole-pulse base.
- * Before arrival: D6 holds end M short of T when hold. arrival: the generator has
- * landed with end on T; the final increment is published, rounded away (E13).
- * After: settle steering. Returns true once settling has elapsed. */
+/* One interval toward T for an axis or a member; T, end and pb are 32.32 from the whole-pulse
+ * base. D6 holds end M short when hold; arrival rounds away (E13). True once settled. */
 bool puldir_steer(PulDir*, PulDirInc* out, int64_t T, int64_t end, int64_t pb, bool arrival, bool hold);
 
 /* groups (puldir_group.c) */
 void puldir_group_tick(const PulDirSnap* snap, PulDirInc* out);   /* every group, before the axes */
-/* Under the lock, from main or from inside the plan tick: no rising edge on any
- * member after this tick, every member IDLE, the move abandoned. shadow is the set
- * the plan tick is writing, whose members' entries are zeroed too; NULL from main. */
+/* Under the lock, from main (shadow NULL) or the plan tick (shadow, the set it writes, zeroed too):
+ * no rising edge on any member after this tick, every member IDLE, the move abandoned. */
 void puldir_group_halt(PulDirGroup*, PulDirInc* shadow);
 
-/* Main context, under the lock, for every accepted motion command (5.8): enables a
- * disabled drive (the plan tick then holds the motion for enable_ms) and cancels
- * a pending auto-release. A few stores and one pin write. */
+/* Main context, under the lock, for every accepted motion command (5.8): enables a disabled drive,
+ * whose motion the plan tick then holds for the enable delay, and cancels a pending release. */
 void puldir_wake(PulDir*);
 
 /* events (puldir_loop.c) */
 void puldir_refuse(PulDir*, const char* call, PulDirRefusal why, float value);
 
-/* Reply lines: four-decimal integer formatting, no printf of floats. Each put
+/* Reply lines: four-decimal integer formatting, no float formatter. Each put
  * returns the new length; a line holds PULDIR_LINE - 1 characters. */
 #define PULDIR_LINE 128u
 size_t puldir_put(char* b, size_t at, const char* s);
