@@ -29,3 +29,14 @@ run_axis test_puldir 5 1000         # a 200 kHz tick
 run_axis test_puldir 10 500         # a 2 kHz plan rate on a 100 kHz tick
 run_axis test_puldir_wrap 20 1000
 echo "axis: all ok"
+
+# Drift guard: the library map must name every public call and every #ifndef setting, so a rename or a new knob cannot slip past it.
+HDRS="puldir.h puldir_*.h motion_profile.h"
+names=$( { grep -ohE '\b(PulDir|PulDirGroup|MotionProfile)_\w+ *\(' $HDRS | sed -E 's/ *\($//'
+           grep -ohE '^\w+ +(puldir_timing_\w+|port_\w+) *\(' puldir_port.h | sed -E 's/^\w+ +//; s/ *\($//'
+           grep -h -A1 '^#ifndef' $HDRS | grep -oE '^#define +(PULDIR|MOTION_PROFILE)_\w+ +\S' | awk '{print $2}'
+         } | sort -u)
+missing=""
+for n in $names; do grep -qw -- "$n" docs/library-map.html || missing="$missing $n"; done
+if [ -n "$missing" ]; then echo "docs/library-map.html lacks:$missing"; exit 1; fi
+echo "map: all $(echo "$names" | wc -l) names ok"
