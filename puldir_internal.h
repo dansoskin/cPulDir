@@ -106,13 +106,9 @@ void puldir_halt_locked(PulDir*);
 /* events (puldir_loop.c) */
 void puldir_refuse(PulDir*, const char* call, PulDirRefusal why, float value);
 
-/* Reply lines: four-decimal integer formatting, no float formatter. Each put
- * returns the new length; a line holds PULDIR_LINE - 1 characters. */
+/* Log and reply lines, each "[name] " and the text, by snprintf in main context only (E33).
+ * A line holds PULDIR_LINE - 1 characters; a longer one is cut short. */
 #define PULDIR_LINE 128u
-size_t puldir_put(char* b, size_t at, const char* s);
-size_t puldir_put_uint(char* b, size_t at, uint64_t v, int min_digits);
-size_t puldir_put_num(char* b, size_t at, float v, bool up);
-size_t puldir_head(char* b, const PulDir* a);             /* "[name] " */
 const char* puldir_phase(PulDirHomeState h);
 void   puldir_log(const PulDir* a, const char* line);     /* through the logger, if the axis logs; NULL: no axis yet */
 #endif

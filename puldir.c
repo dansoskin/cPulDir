@@ -1,5 +1,6 @@
 /* Main context: setup, commands, getters. */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include "puldir_internal.h"
 
@@ -13,10 +14,7 @@ static float rate_cap(float conv)
 static bool init_refused(const char* name, const char* why)
 {
     char b[PULDIR_LINE];
-    size_t at = puldir_put(b, 0, "[");
-    at = puldir_put(b, at, name);
-    at = puldir_put(b, at, "] init refused: ");
-    (void)puldir_put(b, at, why);
+    snprintf(b, sizeof b, "[%s] init refused: %s", name, why);
     puldir_log(NULL, b);
     return false;
 }
@@ -56,16 +54,9 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
     (void)MotionProfile_setLimits(&a->prof, (MotionLimits){ d[0], d[1], d[2], d[3] });
 
     char b[PULDIR_LINE];
-    size_t at = puldir_head(b, a);
-    at = puldir_put(b, at, "max speed ");
-    at = puldir_put_num(b, at, rate_cap(c), false);
-    at = puldir_put(b, at, " units/s, resolution ");
-    at = puldir_put_num(b, at, 1.0f / c, false);
-    at = puldir_put(b, at, " units/pulse (pulse ");
-    at = puldir_put_uint(b, at, puldir_timing.pulse_us, 1);
-    at = puldir_put(b, at, " us, plan ");
-    at = puldir_put_uint(b, at, puldir_timing.plan_us, 1);
-    (void)puldir_put(b, at, " us)");
+    snprintf(b, sizeof b, "[%s] max speed %.4f units/s, resolution %.4f units/pulse (pulse %lu us, plan %lu us)",
+             a->name, (double)rate_cap(c), (double)(1.0f / c), (unsigned long)puldir_timing.pulse_us,
+             (unsigned long)puldir_timing.plan_us);
     puldir_log(a, b);
     return true;
 }

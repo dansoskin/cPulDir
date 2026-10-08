@@ -1,9 +1,10 @@
 /* The @ console: cFlexyStepper_decode.c verb for verb, plus jerk, from main context. Replies go
  * through the logger as PulDir_loop's lines do, and honour the axis's logging switch. */
+#include <stdio.h>
 #include <stdlib.h>
 #include "puldir_internal.h"
 
-/* A bounded copy, cut short to fit: the core links no formatted output. */
+/* Cut short to fit n. */
 void PulDir_consoleMenu(char* buf, size_t n)
 {
     static const char menu[] =
@@ -28,12 +29,7 @@ void PulDir_consoleMenu(char* buf, size_t n)
         "s - Get status, mode, homed, home state and fault count\n"
         "C - Clear fault\n"
         "H - Start homing state machine\n";
-    if (n == 0u)
-        return;
-    size_t i = 0;
-    for (; i + 1u < n && menu[i] != '\0'; i++)
-        buf[i] = menu[i];
-    buf[i] = '\0';
+    snprintf(buf, n, "%s", menu);
 }
 
 /* The whole argument is one number; white space around it is not part of it. */
@@ -56,15 +52,14 @@ static bool number(const char* arg, float* out)
 static void say(const PulDir* a, const char* text)
 {
     char b[PULDIR_LINE];
-    (void)puldir_put(b, puldir_head(b, a), text);
+    snprintf(b, sizeof b, "[%s] %s", a->name, text);
     puldir_log(a, b);
 }
 
 static void say_num(const PulDir* a, const char* label, float v)
 {
     char b[PULDIR_LINE];
-    size_t at = puldir_put(b, puldir_head(b, a), label);
-    (void)puldir_put_num(b, at, v, false);
+    snprintf(b, sizeof b, "[%s] %s%.4f", a->name, label, (double)v);
     puldir_log(a, b);
 }
 
@@ -86,24 +81,13 @@ static void status(PulDir* a)
     const uint32_t faults = a->fault_count, last = a->last_fault_tick;
     const PulDirHomeState hs = a->home_state, failed = a->home_fail;
     port_unlock();
+    char fail[40] = "";
+    if (hs == PULDIR_HOME_ERROR)
+        snprintf(fail, sizeof fail, " (failed in %s)", puldir_phase(failed));
     char b[PULDIR_LINE];
-    size_t at = puldir_put(b, puldir_head(b, a), "status ");
-    at = puldir_put(b, at, status_name(PulDir_status(a)));
-    at = puldir_put(b, at, ", mode ");
-    at = puldir_put(b, at, mode_name(PulDir_mode(a)));
-    at = puldir_put(b, at, ", homed ");
-    at = puldir_put(b, at, PulDir_isHomed(a) ? "1" : "0");
-    at = puldir_put(b, at, ", home ");
-    at = puldir_put(b, at, puldir_phase(hs));
-    if (hs == PULDIR_HOME_ERROR) {
-        at = puldir_put(b, at, " (failed in ");
-        at = puldir_put(b, at, puldir_phase(failed));
-        at = puldir_put(b, at, ")");
-    }
-    at = puldir_put(b, at, ", faults ");
-    at = puldir_put_uint(b, at, faults, 1);
-    at = puldir_put(b, at, ", last fault tick ");
-    (void)puldir_put_uint(b, at, last, 1);
+    snprintf(b, sizeof b, "[%s] status %s, mode %s, homed %d, home %s%s, faults %lu, last fault tick %lu",
+             a->name, status_name(PulDir_status(a)), mode_name(PulDir_mode(a)), PulDir_isHomed(a) ? 1 : 0,
+             puldir_phase(hs), fail, (unsigned long)faults, (unsigned long)last);
     puldir_log(a, b);
 }
 

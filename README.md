@@ -4,7 +4,7 @@ puldir drives several PUL/DIR motor drives (steppers, closed-loop steppers, serv
 
 ## Adding it to a project
 
-Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_loop.c`, `puldir_group.c`, `puldir_console.c` and `port/stm32/puldir_port_stm32.c` to the build. Put the repo root and `port/stm32` on the include path. That directory supplies `puldir_pin.h`, which defines `puldir_pin_t` as a GPIO port and pin. Link with `-lm`. The planner alone (`motion_profile.c` and `.h`) needs nothing else.
+Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_loop.c`, `puldir_group.c`, `puldir_console.c` and `port/stm32/puldir_port_stm32.c` to the build. Put the repo root and `port/stm32` on the include path. That directory supplies `puldir_pin.h`, which defines `puldir_pin_t` as a GPIO port and pin. Link with `-lm`. The library formats its log lines with `snprintf`, including `%f`, so a newlib-nano build must link float printf (`-u _printf_float`). The planner alone (`motion_profile.c` and `.h`) needs nothing else.
 
 ## STM32 timer setup
 
