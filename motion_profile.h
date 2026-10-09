@@ -1,5 +1,5 @@
-/* Motion profile generator: an acceleration-limited online trapezoid through a moving-average
- * jerk filter. Pure maths, no statics, unit-agnostic (guidelines 5.2). */
+/* Motion profile generator: an online trapezoid at the set speed and ramps, through a
+ * moving-average jerk filter. Pure maths, no statics, unit-agnostic (guidelines 5.2). */
 #ifndef MOTION_PROFILE_H
 #define MOTION_PROFILE_H
 
@@ -15,8 +15,9 @@ extern "C" {
 #endif
 
 typedef struct {
-    float vmax, amax, dmax, jmax;         /* jmax 0 = unlimited (trapezoid) */
-} MotionLimits;
+    float speed, accel, decel;            /* what a move uses; a short move never reaches the speed */
+    float jerk;                           /* a bound the filtered motion stays under; 0 = none (trapezoid) */
+} MotionSettings;
 
 typedef struct {
     float dt;                             /* seconds per advance, fixed at init */
@@ -26,7 +27,7 @@ typedef struct {
     bool  stopping;                       /* stop as soon as the ramps allow */
     bool  landed;                         /* the trapezoid is at rest; the ring may still drain */
     bool  done;                           /* at target with vel == 0.0f exactly */
-    MotionLimits lim;
+    MotionSettings settings;
     /* private */
     float    p_t, p_c, v_t;               /* the trapezoid's own position, its Kahan compensation, velocity */
     float    speed;                       /* endless speed, signed */
@@ -35,20 +36,20 @@ typedef struct {
     uint16_t drain;                       /* calls since landing, up to n + 1 */
     uint16_t run;                         /* the newest taps sharing a sign, zeros included, at most n */
     int8_t   run_sign;                    /* that sign; 0 while the run holds only zeros */
-    float    hist_acc;                    /* the largest amax or dmax of limits replaced in flight whose
+    float    hist_acc;                    /* the largest accel or decel of settings replaced in flight whose
                                              motion the ring may still hold (E32) */
     uint16_t hist_left;                   /* calls until the ring has turned over since; 0: no history */
     float    sum, sum_c;                  /* running sum of the ring, its Kahan compensation */
     float    wsum, wsum_c;                /* the ring weighted n-1 (newest) down to 0; pos = p_t - wsum*dt/n */
 } MotionProfile;
 
-typedef enum { MOTION_LIMITS_OK, MOTION_LIMITS_INVALID, MOTION_LIMITS_TAPS, MOTION_LIMITS_WINDOW } MotionLimitsCheck;
+typedef enum { MOTION_SETTINGS_OK, MOTION_SETTINGS_INVALID, MOTION_SETTINGS_TAPS, MOTION_SETTINGS_WINDOW } MotionSettingsCheck;
 
 bool  MotionProfile_init(MotionProfile*, float pos, float dt);
-/* What setLimits would answer for this profile. In flight its window is frozen and must also bound
- * the acceleration its ring may still hold from the limits being replaced (E32). */
-MotionLimitsCheck MotionProfile_checkLimits(const MotionProfile*, MotionLimits);
-bool  MotionProfile_setLimits(MotionProfile*, MotionLimits);
+/* What setSettings would answer for this profile. In flight its window is frozen and must also bound
+ * the acceleration its ring may still hold from the settings being replaced (E32). */
+MotionSettingsCheck MotionProfile_checkSettings(const MotionProfile*, MotionSettings);
+bool  MotionProfile_setSettings(MotionProfile*, MotionSettings);
 bool  MotionProfile_setTarget(MotionProfile*, float target);
 bool  MotionProfile_setEndless(MotionProfile*, float speed);
 void  MotionProfile_stop(MotionProfile*);
@@ -62,7 +63,7 @@ void  MotionProfile_rebase(MotionProfile*, float shift, float target);
 bool  MotionProfile_seed(MotionProfile*, float pos, float vel);
 /* The smallest jerk whose window fits MOTION_PROFILE_MAX_TAPS, as the plain quotient: it can be
  * one ulp under the exact boundary, so a refusal message prints it rounded up. */
-float MotionProfile_minJerk(float amax, float dmax, float dt);
+float MotionProfile_minJerk(float accel, float decel, float dt);
 
 #ifdef __cplusplus
 }

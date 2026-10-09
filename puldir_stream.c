@@ -1,6 +1,5 @@
 /* Stream mode (5.6): the setpoint calls from main, the first-order hold from the plan tick. */
 #include <math.h>
-#include <string.h>
 #include "puldir_internal.h"
 
 #define TIMEOUT_TICKS puldir_ms_ticks(PULDIR_STREAM_TIMEOUT_MS)
@@ -56,8 +55,8 @@ void PulDir_streamEnd(PulDir* a)
 {
     port_lock();
     if (a->mode == PULDIR_MODE_STREAM) {
-        memcpy(a->lim, a->def, sizeof a->lim);   /* validated when set, at the one conversion */
-        a->req |= REQ_LIMITS;                 /* the plan tick sees STOPPING and leaves */
+        a->settings = a->defaults;            /* validated when set, at the one conversion */
+        a->req |= REQ_SETTINGS;               /* the plan tick sees STOPPING and leaves */
         a->mode = PULDIR_MODE_STOPPING;
     }
     port_unlock();
@@ -158,13 +157,13 @@ void puldir_stream_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
         s->err = err;
         s->v_cmd = s->sp_vel + err * (1000.0f / (float)s->catchup_ms);
     }
-    /* Specified behaviour (5.6), not input clamping: in STREAM the configured
-     * speed limit bounds v_cmd, and it lies below the tick ceiling. */
-    const float vmax = a->lim[0] * a->conv;
-    if (s->v_cmd > vmax)
-        s->v_cmd = vmax;
-    else if (s->v_cmd < -vmax)
-        s->v_cmd = -vmax;
+    /* Specified behaviour (5.6), not input clamping: in STREAM the speed setting
+     * bounds v_cmd, and it lies below the tick ceiling. */
+    const float top = a->settings.speed * a->conv;
+    if (s->v_cmd > top)
+        s->v_cmd = top;
+    else if (s->v_cmd < -top)
+        s->v_cmd = -top;
 
     const int32_t inc = puldir_div_trunc(puldir_to_fix(s->v_cmd * puldir_timing.dt));
     puldir_set_inc(a, out, inc);

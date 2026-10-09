@@ -30,7 +30,7 @@ typedef struct PulDirGroup {
 /* D16: refuses. The group's table keeps a pointer to it: give it static storage. */
 bool  PulDirGroup_init(PulDirGroup*, PulDir** axes, uint8_t count);
 /* Refuses a member not IDLE or faulted, and a member travel beyond 2^24 pulses.
- * While the move runs, members refuse their limit setters (R_MODE). */
+ * While the move runs, members refuse their settings' setters (R_MODE). */
 bool  PulDirGroup_moveTo(PulDirGroup*, const float* targets);
 /* Ramped along the line. After a stop mid-path each member ends on its last whole
  * pulse, within one pulse of the line; the final edges need not share a tick. */

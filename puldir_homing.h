@@ -4,6 +4,7 @@
 #define PULDIR_HOMING_H
 #include <stdbool.h>
 #include <stdint.h>
+#include "motion_profile.h"
 
 #ifndef PULDIR_HOMING_DELAY_MS
 #define PULDIR_HOMING_DELAY_MS 1000u
@@ -23,14 +24,14 @@ typedef struct {
     volatile PulDirHomeState state;
     PulDirHomeState fail;                /* the phase the last failed run was in */
     uint32_t t0;                         /* the tick the current phase began */
-    float    saved_lim[4];               /* the limits at homeStart: a run that ends unhomed restores them */
+    MotionSettings saved;                /* the settings at homeStart: a run that ends unhomed restores them */
     volatile bool homed;
 } PulDirHoming;
 #endif
 
 #if defined(PULDIR_INTERNAL_FUNCTIONS) && !defined(PULDIR_HOMING_FUNCTIONS)
 #define PULDIR_HOMING_FUNCTIONS
-/* Under the lock, from main or the plan tick, a run ending unhomed: the limits homeStart found go
+/* Under the lock, from main or the plan tick, a run ending unhomed: the settings homeStart found go
  * back. The plan tick hands them to the generator once its window allows. */
 void puldir_home_restore(PulDir*);
 /* Main context, under the lock: a stop or halt ended the run, and the homing state goes IDLE. */

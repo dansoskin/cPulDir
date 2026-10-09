@@ -4,7 +4,7 @@
 #include "puldir_internal.h"
 
 /* The longest member travel: past 2^24 pulses one ulp of s moves a member by more than a pulse
- * (6x its speed limit at 2^28). It also keeps delta * s inside int64 without a clamp. */
+ * (6x its speed setting at 2^28). It also keeps delta * s inside int64 without a clamp. */
 #define TRAVEL_MAX ((int64_t)1 << 24)
 
 static PulDirGroup* groups[PULDIR_MAX_GROUPS];
@@ -79,23 +79,28 @@ static PulDirRefusal member_refusal(const PulDir* a)
     return PULDIR_R_NONE;
 }
 
-/* The path's limits in s per second (5.7): each member's own in pulses over its travel, the
- * tightest winning. A member without travel, or without jerk, does not constrain. */
-static bool path_limits(const PulDirGroup* g, const int32_t* delta, MotionLimits* L)
+/* The path's settings in s per second (5.7): each member's own in pulses over its travel, the
+ * smallest winning. A member without travel, or without jerk, does not constrain. */
+static bool path_settings(const PulDirGroup* g, const int32_t* delta, MotionSettings* S)
 {
-    float l[4] = { INFINITY, INFINITY, INFINITY, INFINITY };
+    MotionSettings m = { INFINITY, INFINITY, INFINITY, INFINITY };
     bool any = false;
     for (uint8_t i = 0; i < g->count; i++) {
         if (delta[i] == 0)
             continue;
         const PulDir* a = g->axes[i];
+        const MotionSettings p = puldir_in_pulses(a, a->settings);
         const float d = fabsf((float)delta[i]);
         any = true;
-        for (int k = 0; k < 4; k++)
-            if (k < 3 || a->lim[3] > 0.0f)
-                l[k] = fminf(l[k], a->lim[k] * a->conv / d);
+        m.speed = fminf(m.speed, p.speed / d);
+        m.accel = fminf(m.accel, p.accel / d);
+        m.decel = fminf(m.decel, p.decel / d);
+        if (a->settings.jerk > 0.0f)
+            m.jerk = fminf(m.jerk, p.jerk / d);
     }
-    *L = (MotionLimits){ l[0], l[1], l[2], isfinite(l[3]) ? l[3] : 0.0f };
+    if (!isfinite(m.jerk))
+        m.jerk = 0.0f;
+    *S = m;
     return any;
 }
 
@@ -138,21 +143,21 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
         }
     }
 
-    MotionLimits L = { 1.0f, 1.0f, 1.0f, 0.0f };
+    MotionSettings S = { 1.0f, 1.0f, 1.0f, 0.0f };
     bool any = false;
     if (why == PULDIR_R_NONE) {
         bad = g->axes[0];                       /* a path refusal: reported on the first member */
-        any = path_limits(g, delta, &L);
+        any = path_settings(g, delta, &S);
         /* Not active: the plan tick leaves s alone, and a halt leaves it in flight, so it is reset
          * first, at rest, with no frozen window and no history for the check; refused, it stays so,
-         * unread. Invalid is an underflow: limits too small for the travel. Each member's own window
+         * unread. Invalid is an underflow: settings too small for the travel. Each member's own window
          * fits and the tightest jerk's member bounds the ratio, so only float rounding at the
          * 256-tap edge lands on the taps. */
         (void)MotionProfile_init(&g->s, 0.0f, puldir_timing.dt);   /* set, so in range: cannot refuse */
-        const MotionLimitsCheck check = any ? MotionProfile_checkLimits(&g->s, L) : MOTION_LIMITS_OK;
-        if (check == MOTION_LIMITS_INVALID)
+        const MotionSettingsCheck check = any ? MotionProfile_checkSettings(&g->s, S) : MOTION_SETTINGS_OK;
+        if (check == MOTION_SETTINGS_INVALID)
             why = PULDIR_R_ARG;
-        else if (check == MOTION_LIMITS_TAPS)
+        else if (check == MOTION_SETTINGS_TAPS)
             why = PULDIR_R_TAPS;
     }
     if (why != PULDIR_R_NONE) {
@@ -163,7 +168,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
 
     /* Not active: the plan tick leaves s and these fields alone. */
     if (any) {
-        (void)MotionProfile_setLimits(&g->s, L);   /* checked above as the generator checks */
+        (void)MotionProfile_setSettings(&g->s, S);   /* checked above as the generator checks */
         (void)MotionProfile_setTarget(&g->s, 1.0f);
     } else {
         (void)MotionProfile_init(&g->s, 1.0f, puldir_timing.dt); /* at rest on the end already */

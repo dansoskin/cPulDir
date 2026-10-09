@@ -36,11 +36,10 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
     memset(a, 0, sizeof *a);              /* every module at rest: drive off, no latch, homing IDLE */
     memcpy(a->name, name, len);
     a->conv = c;
-    /* The starting limits are 200 pulses/s, 200 pulses/s^2, no jerk: under the rate cap at any
+    /* The starting settings are 200 pulses/s, 200 pulses/s^2, no jerk: under the rate cap at any
      * timing, whatever the conversion. */
-    const float d[4] = { 200.0f, 200.0f, 200.0f, 0.0f };
-    for (int k = 0; k < 4; k++)
-        a->def[k] = a->lim[k] = d[k] / c;
+    const MotionSettings d = { 200.0f, 200.0f, 200.0f, 0.0f };
+    a->defaults = a->settings = (MotionSettings){ d.speed / c, d.accel / c, d.decel / c, d.jerk / c };
     puldir_stream_defaults(a);
     a->log_on = true;
     a->slot = PULDIR_MAX_AXES;
@@ -48,9 +47,9 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
     a->mode = PULDIR_MODE_IDLE;
     a->refusal = PULDIR_R_NONE;
     /* puldir_timing_plan kept dt inside MotionProfile_init's range and the
-     * limits are finite and positive, so neither call can refuse. */
+     * settings are finite and positive, so neither call can refuse. */
     (void)MotionProfile_init(&a->prof, 0.0f, puldir_timing.dt);
-    (void)MotionProfile_setLimits(&a->prof, (MotionLimits){ d[0], d[1], d[2], d[3] });
+    (void)MotionProfile_setSettings(&a->prof, d);
 
     char b[PULDIR_LINE];
     snprintf(b, sizeof b, "[%s] max speed %.4f units/s, resolution %.4f units/pulse (pulse %lu us, plan %lu us)",
@@ -89,48 +88,54 @@ bool PulDir_register(PulDir* a)
     return true;
 }
 
-/* ---- limits ---------------------------------------------------------------- */
+/* ---- settings -------------------------------------------------------------- */
 
-/* GROUP: the path profile owns the limits until the move ends (5.7). HOMING: the
+MotionSettings puldir_in_pulses(const PulDir* a, MotionSettings s)
+{
+    const float c = a->conv;
+    return (MotionSettings){ s.speed * c, s.accel * c, s.decel * c, s.jerk * c };
+}
+
+/* GROUP: the path profile owns the settings until the move ends (5.7). HOMING: the
  * run sets them from the plan tick. */
-static bool limits_busy(PulDirMode m)
+static bool settings_busy(PulDirMode m)
 {
     return m == PULDIR_MODE_GROUP || m == PULDIR_MODE_HOMING;
 }
 
-/* Checks four limits (user units) as MotionProfile_setLimits will see them, the rate cap being the
- * axis's own, then stores them, and def too (D17). The check reads the profile's frozen window and
- * the acceleration its ring may still hold (E32), so it runs under the lock: a few compares, a ceilf
- * and two divisions, about 100 cycles. */
-static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const char* call)
+/* Checks the settings (user units) as MotionProfile_setSettings will see them, the rate cap being
+ * the axis's own, then stores them, and the defaults too (D17). The check reads the profile's frozen
+ * window and the acceleration its ring may still hold (E32), so it runs under the lock: a few
+ * compares, a ceilf and two divisions, about 100 cycles. */
+static bool apply_settings(PulDir* a, MotionSettings s, bool defaults, const char* call)
 {
-    const float conv = a->conv, cap = puldir_rate_cap(conv);
-    const MotionLimits L = { lim[0] * conv, lim[1] * conv, lim[2] * conv, lim[3] * conv };
+    const float cap = puldir_rate_cap(a->conv);
+    const MotionSettings S = puldir_in_pulses(a, s);
     PulDirRefusal why = PULDIR_R_NONE;
     float value = 0.0f;
     port_lock();
-    const MotionLimitsCheck check = MotionProfile_checkLimits(&a->prof, L);
-    if (check == MOTION_LIMITS_INVALID)
+    const MotionSettingsCheck check = MotionProfile_checkSettings(&a->prof, S);
+    if (check == MOTION_SETTINGS_INVALID)
         why = PULDIR_R_ARG;
-    else if (!(lim[0] < cap))
+    else if (!(s.speed < cap))
         why = PULDIR_R_RATE;
-    else if (check == MOTION_LIMITS_TAPS)
+    else if (check == MOTION_SETTINGS_TAPS)
         why = PULDIR_R_TAPS;
-    else if (limits_busy(a->mode))
+    else if (settings_busy(a->mode))
         why = PULDIR_R_MODE;
-    else if (check == MOTION_LIMITS_WINDOW)
+    else if (check == MOTION_SETTINGS_WINDOW)
         why = PULDIR_R_WINDOW;              /* the window is frozen in flight (5.2) */
     else {
-        memcpy(a->lim, lim, sizeof a->lim);
+        a->settings = s;
         if (defaults)
-            memcpy(a->def, lim, sizeof a->def);
-        a->req |= REQ_LIMITS;
+            a->defaults = s;
+        a->req |= REQ_SETTINGS;
     }
     port_unlock();
     if (why == PULDIR_R_RATE)
         value = cap;
     else if (why == PULDIR_R_TAPS)          /* the log rounds the floor up to fit */
-        value = MotionProfile_minJerk(L.amax, L.dmax, puldir_timing.dt) / conv;
+        value = MotionProfile_minJerk(S.accel, S.decel, puldir_timing.dt) / a->conv;
     if (why != PULDIR_R_NONE) {
         puldir_refuse(a, call, why, value);
         return false;
@@ -138,46 +143,44 @@ static bool apply_limits(PulDir* a, const float lim[4], bool defaults, const cha
     return true;
 }
 
-/* The copy and the mode at one instant: a copy taken in HOMING could be stale
- * by the time the run ends, so it is refused here, not by apply_limits. */
-static bool set_limit(PulDir* a, int k, float x, const char* call)
+/* One setting, at its offset in MotionSettings. The copy and the mode at one instant: a copy taken
+ * in HOMING could be stale by the time the run ends, so it is refused here, not by apply_settings. */
+static bool set_one(PulDir* a, size_t field, float x, const char* call)
 {
-    float l[4];
     port_lock();
-    memcpy(l, a->lim, sizeof l);
-    const bool busy = limits_busy(a->mode);
+    MotionSettings s = a->settings;
+    const bool busy = settings_busy(a->mode);
     port_unlock();
     if (busy) {
         puldir_refuse(a, call, PULDIR_R_MODE, 0.0f);
         return false;
     }
-    l[k] = x;
-    return apply_limits(a, l, false, call);
+    memcpy((char*)&s + field, &x, sizeof x);
+    return apply_settings(a, s, false, call);
 }
 
 bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float jerk)
 {
-    const float d[4] = { speed, accel, decel, jerk };
-    return apply_limits(a, d, true, "setDefaults");
+    return apply_settings(a, (MotionSettings){ speed, accel, decel, jerk }, true, "setDefaults");
 }
 
 bool PulDir_restoreDefaults(PulDir* a)
 {
-    float d[4];
     port_lock();
-    memcpy(d, a->def, sizeof d);
+    const MotionSettings d = a->defaults;
     port_unlock();
-    return apply_limits(a, d, false, "restoreDefaults");
+    return apply_settings(a, d, false, "restoreDefaults");
 }
 
-bool  PulDir_setSpeed(PulDir* a, float x)        { return set_limit(a, 0, x, "setSpeed"); }
-bool  PulDir_setAcceleration(PulDir* a, float x) { return set_limit(a, 1, x, "setAcceleration"); }
-bool  PulDir_setDeceleration(PulDir* a, float x) { return set_limit(a, 2, x, "setDeceleration"); }
-bool  PulDir_setJerk(PulDir* a, float x)         { return set_limit(a, 3, x, "setJerk"); }
-float PulDir_speed(PulDir* a)                    { return a->lim[0]; }
-float PulDir_acceleration(PulDir* a)             { return a->lim[1]; }
-float PulDir_deceleration(PulDir* a)             { return a->lim[2]; }
-float PulDir_jerk(PulDir* a)                     { return a->lim[3]; }
+#define FIELD(f) offsetof(MotionSettings, f)
+bool  PulDir_setSpeed(PulDir* a, float x)        { return set_one(a, FIELD(speed), x, "setSpeed"); }
+bool  PulDir_setAcceleration(PulDir* a, float x) { return set_one(a, FIELD(accel), x, "setAcceleration"); }
+bool  PulDir_setDeceleration(PulDir* a, float x) { return set_one(a, FIELD(decel), x, "setDeceleration"); }
+bool  PulDir_setJerk(PulDir* a, float x)         { return set_one(a, FIELD(jerk), x, "setJerk"); }
+float PulDir_speed(PulDir* a)                    { return a->settings.speed; }
+float PulDir_acceleration(PulDir* a)             { return a->settings.accel; }
+float PulDir_deceleration(PulDir* a)             { return a->settings.decel; }
+float PulDir_jerk(PulDir* a)                     { return a->settings.jerk; }
 
 /* ---- motion ---------------------------------------------------------------- */
 

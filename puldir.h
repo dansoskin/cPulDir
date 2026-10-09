@@ -47,8 +47,8 @@ typedef struct PulDir {
     bool  pul_active_low, dir_inverted;
     bool  has_pins;
     float conv;                          /* pulses per user unit, > 0 */
-    float def[4];                        /* default speed, accel, decel, jerk, user units */
-    float lim[4];                        /* current speed, accel, decel, jerk, user units */
+    MotionSettings defaults;             /* user units */
+    MotionSettings settings;             /* the ones in force, user units */
     bool  log_on;
     uint8_t slot;                        /* index in the axis table, PULDIR_MAX_AXES if unregistered */
 
@@ -115,7 +115,8 @@ bool  PulDir_setHoming(PulDir*, int direction, float speed, float adjust,
 bool  PulDir_setStreamCatchup(PulDir*, uint32_t ms);
 bool  PulDir_register(PulDir*);
 
-/* limits. These, setDefaults and restoreDefaults are refused (R_MODE) in GROUP and HOMING. */
+/* settings: speed, accel and decel are what a move uses, jerk a bound it stays under. These,
+ * setDefaults and restoreDefaults are refused (R_MODE) in GROUP and HOMING. */
 bool  PulDir_setSpeed(PulDir*, float);         float PulDir_speed(PulDir*);
 bool  PulDir_setAcceleration(PulDir*, float);  float PulDir_acceleration(PulDir*);
 bool  PulDir_setDeceleration(PulDir*, float);  float PulDir_deceleration(PulDir*);
@@ -139,7 +140,7 @@ float PulDir_streamError(PulDir*);
 
 /* homing */
 /* A run that ends unhomed (halt, stop, homeStop, timeout, fault) puts back the
- * limits in force at homeStart; one that homes leaves the defaults. */
+ * settings in force at homeStart; one that homes leaves the defaults. */
 bool  PulDir_homeStart(PulDir*);
 void  PulDir_homeStop(PulDir*);                  /* halts a run; the homing state goes IDLE */
 PulDirHomeState PulDir_homeState(PulDir*);

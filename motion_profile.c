@@ -12,28 +12,28 @@
 #define DT_MIN 0.00025f    /* 2 kHz plan tick (D14) */
 #define DT_MAX 0.01f
 
-/* The acceleration span the window must cover: a reversal puts +amax and -amax (or the larger of
- * amax and dmax, both ways) one window apart, so it is twice the larger, not amax + dmax (E31). */
-static float acc_span(float amax, float dmax)
+/* The acceleration span the window must cover: a reversal puts +accel and -accel (or the larger of
+ * accel and decel, both ways) one window apart, so it is twice the larger, not accel + decel (E31). */
+static float acc_span(float accel, float decel)
 {
-    return 2.0f * fmaxf(amax, dmax);
+    return 2.0f * fmaxf(accel, decel);
 }
 
-/* Jerk filter length for these limits; 0 when it would not fit the ring. */
-static uint16_t window(MotionLimits L, float dt)
+/* Jerk filter length for these settings; 0 when it would not fit the ring. */
+static uint16_t window(MotionSettings S, float dt)
 {
-    if (L.jmax == 0.0f)
+    if (S.jerk == 0.0f)
         return 1;
-    const float n = ceilf(acc_span(L.amax, L.dmax) / (L.jmax * dt));
+    const float n = ceilf(acc_span(S.accel, S.decel) / (S.jerk * dt));
     if (!(n <= (float)MOTION_PROFILE_MAX_TAPS))
         return 0;
     return (uint16_t)n;
 }
 
-static bool limits_valid(MotionLimits L)
+static bool settings_valid(MotionSettings S)
 {
-    return isfinite(L.vmax) && isfinite(L.amax) && isfinite(L.dmax) && isfinite(L.jmax)
-        && L.vmax > 0.0f && L.amax > 0.0f && L.dmax > 0.0f && L.jmax >= 0.0f;
+    return isfinite(S.speed) && isfinite(S.accel) && isfinite(S.decel) && isfinite(S.jerk)
+        && S.speed > 0.0f && S.accel > 0.0f && S.decel > 0.0f && S.jerk >= 0.0f;
 }
 
 static void clear_ring(MotionProfile* p)
@@ -48,10 +48,10 @@ static void clear_ring(MotionProfile* p)
     p->hist_left = 0;
 }
 
-/* The largest acceleration the ring may hold: the current limits' and any replaced within n calls. */
+/* The largest acceleration the ring may hold: the current settings' and any replaced within n calls. */
 static float acc_history(const MotionProfile* p)
 {
-    return fmaxf(p->hist_acc, fmaxf(p->lim.amax, p->lim.dmax));
+    return fmaxf(p->hist_acc, fmaxf(p->settings.accel, p->settings.decel));
 }
 
 bool MotionProfile_init(MotionProfile* p, float pos, float dt)
@@ -64,47 +64,47 @@ bool MotionProfile_init(MotionProfile* p, float pos, float dt)
     p->vel = p->acc = p->v_t = p->speed = 0.0f;
     p->endless = p->stopping = false;
     p->landed = p->done = true;
-    p->lim = (MotionLimits){ 1.0f, 1.0f, 1.0f, 0.0f };
+    p->settings = (MotionSettings){ 1.0f, 1.0f, 1.0f, 0.0f };
     p->n = 1;
     p->drain = 0;
     clear_ring(p);
     return true;
 }
 
-MotionLimitsCheck MotionProfile_checkLimits(const MotionProfile* p, MotionLimits L)
+MotionSettingsCheck MotionProfile_checkSettings(const MotionProfile* p, MotionSettings S)
 {
-    if (!limits_valid(L))
-        return MOTION_LIMITS_INVALID;
-    if (window(L, p->dt) == 0)
-        return MOTION_LIMITS_TAPS;
-    /* In flight the window is frozen, and the ring may still hold motion under any limits in force
+    if (!settings_valid(S))
+        return MOTION_SETTINGS_INVALID;
+    if (window(S, p->dt) == 0)
+        return MOTION_SETTINGS_TAPS;
+    /* In flight the window is frozen, and the ring may still hold motion under any settings in force
      * during its last n calls (E32): it must bound a step between the largest of those accelerations
-     * and the largest the new limits allow. New limits larger than the history make this the plain
-     * frozen-window test, 2 max(amax, dmax) over n. */
-    if (!p->done && L.jmax != 0.0f) {
+     * and the largest the new settings allow. New ramps larger than the history make this the plain
+     * frozen-window test, 2 max(accel, decel) over n. */
+    if (!p->done && S.jerk != 0.0f) {
         /* On the landing call v_t still holds the landing step (E16) and the next call zeroes it, a
-         * step the new limits do not bound: it counts as an acceleration of its own. */
+         * step the new ramps do not bound: it counts as an acceleration of its own. */
         const float a_land = p->landed ? fabsf(p->v_t) / p->dt : 0.0f;
-        const float a_new = fmaxf(fmaxf(L.amax, L.dmax), a_land);
-        if ((a_new + fmaxf(a_new, acc_history(p))) / (L.jmax * p->dt) > (float)p->n)
-            return MOTION_LIMITS_WINDOW;
+        const float a_new = fmaxf(fmaxf(S.accel, S.decel), a_land);
+        if ((a_new + fmaxf(a_new, acc_history(p))) / (S.jerk * p->dt) > (float)p->n)
+            return MOTION_SETTINGS_WINDOW;
     }
-    return MOTION_LIMITS_OK;
+    return MOTION_SETTINGS_OK;
 }
 
-bool MotionProfile_setLimits(MotionProfile* p, MotionLimits L)
+bool MotionProfile_setSettings(MotionProfile* p, MotionSettings S)
 {
-    if (MotionProfile_checkLimits(p, L) != MOTION_LIMITS_OK)
+    if (MotionProfile_checkSettings(p, S) != MOTION_SETTINGS_OK)
         return false;
     if (p->done) {
-        p->n = window(L, p->dt);
+        p->n = window(S, p->dt);
         clear_ring(p);
-    } else {                              /* the replaced limits' motion stays in the ring for n calls */
+    } else {                              /* the replaced settings' motion stays in the ring for n calls */
         p->hist_acc = acc_history(p);
         p->hist_left = p->n;              /* restarted by each change: a set replaced twice within a
                                              window is kept up to 2n - 1 calls, which only refuses more */
     }
-    p->lim = L;
+    p->settings = S;
     return true;
 }
 
@@ -140,7 +140,7 @@ void MotionProfile_stop(MotionProfile* p)
 
 void MotionProfile_halt(MotionProfile* p)
 {
-    p->n = window(p->lim, p->dt);
+    p->n = window(p->settings, p->dt);
     clear_ring(p);
     p->v_t = p->vel = p->acc = 0.0f;
     p->p_t = p->target = p->pos;
@@ -187,8 +187,8 @@ static float toward(float v, float vc, float up, float down)
 /* One step of the trapezoid. Returns the velocity used over this step. */
 static float trapezoid(MotionProfile* p)
 {
-    const MotionLimits L = p->lim;
-    const float dt = p->dt, dd = L.dmax * dt;
+    const MotionSettings S = p->settings;
+    const float dt = p->dt, dd = S.decel * dt;
     if (p->landed) {
         p->v_t = 0.0f;                    /* at rest from the call after landing */
         return 0.0f;
@@ -200,7 +200,7 @@ static float trapezoid(MotionProfile* p)
         const float u = rem / dt, v = p->v_t;
         const bool same = v == 0.0f || rem == 0.0f || (u > 0.0f) == (v > 0.0f);
         const bool fits = fabsf(u) <= fabsf(v) ? fabsf(v) - fabsf(u) <= dd
-                                               : fabsf(u) - fabsf(v) <= L.amax * dt;
+                                               : fabsf(u) - fabsf(v) <= S.accel * dt;
         if (fabsf(rem) <= dd * dt && same && fits) {
             p->p_t = p->target;           /* assigned rather than integrated */
             p->p_c = 0.0f;
@@ -215,12 +215,12 @@ static float trapezoid(MotionProfile* p)
     if (p->stopping)
         vc = 0.0f;
     else if (p->endless)
-        vc = copysignf(fminf(fabsf(p->speed), L.vmax), p->speed);
-    else /* the discrete ceiling: do not simplify to sqrtf(2*dmax*|rem|) */
-        vc = copysignf(fminf(L.vmax, sqrtf(dd * dd + 2.0f * L.dmax * fabsf(rem)) - dd), rem);
+        vc = copysignf(fminf(fabsf(p->speed), S.speed), p->speed);
+    else /* the discrete ceiling: do not simplify to sqrtf(2*decel*|rem|) */
+        vc = copysignf(fminf(S.speed, sqrtf(dd * dd + 2.0f * S.decel * fabsf(rem)) - dd), rem);
 
-    p->v_t = toward(p->v_t, vc, L.amax * dt, dd);
-    /* Plain rounding of p_t misses the dmax*dt^2 landing window at large coordinates. */
+    p->v_t = toward(p->v_t, vc, S.accel * dt, dd);
+    /* Plain rounding of p_t misses the decel*dt^2 landing window at large coordinates. */
     kahan_add(&p->p_t, &p->p_c, p->v_t * dt);
     if (p->stopping && p->v_t == 0.0f) {
         p->target = p->p_t;
@@ -283,7 +283,7 @@ static void push(MotionProfile* p, float u)
 /* The ring has drained: exact rest at the target, where lag is already 0. */
 static void finish(MotionProfile* p)
 {
-    p->n = window(p->lim, p->dt);
+    p->n = window(p->settings, p->dt);
     clear_ring(p);
     p->vel = p->acc = 0.0f;
     p->pos = p->p_t = p->target;
@@ -297,7 +297,7 @@ void MotionProfile_advance(MotionProfile* p)
     if (p->done)
         return;
     if (p->hist_left > 0 && --p->hist_left == 0)
-        p->hist_acc = 0.0f;               /* the ring has turned over since the limits changed */
+        p->hist_acc = 0.0f;               /* the ring has turned over since the settings changed */
     const bool was_landed = p->landed;
     const float u = trapezoid(p);         /* 0 once landed: the ring drains through the same push */
     const float vel0 = p->vel, w0 = p->wsum;
@@ -327,7 +327,7 @@ void MotionProfile_advance(MotionProfile* p)
 float MotionProfile_stopDistance(const MotionProfile* p)
 {
     const float v = p->landed ? 0.0f : p->v_t;   /* a landing step's u is not motion to stop */
-    return lag(p) + v * fabsf(v) / (2.0f * p->lim.dmax);
+    return lag(p) + v * fabsf(v) / (2.0f * p->settings.decel);
 }
 
 /* D2: shift, never re-sync; the output follows p_t, and the lag stays with it. */
@@ -370,7 +370,7 @@ bool MotionProfile_seed(MotionProfile* p, float pos, float vel)
     return true;
 }
 
-float MotionProfile_minJerk(float amax, float dmax, float dt)
+float MotionProfile_minJerk(float accel, float decel, float dt)
 {
-    return acc_span(amax, dmax) / ((float)MOTION_PROFILE_MAX_TAPS * dt);
+    return acc_span(accel, decel) / ((float)MOTION_PROFILE_MAX_TAPS * dt);
 }

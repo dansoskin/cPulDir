@@ -129,13 +129,11 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
     }
 }
 
-/* Limits in user units to the generator, and to lim[] only if it takes them. */
-void puldir_take_limits(PulDir* a, const float l[4])
+/* Settings in user units to the generator, and to the axis's own only if it takes them. */
+void puldir_take_settings(PulDir* a, MotionSettings s)
 {
-    const float c = a->conv;
-    if (MotionProfile_setLimits(&a->prof, (MotionLimits){ l[0] * c, l[1] * c, l[2] * c, l[3] * c }))
-        for (int k = 0; k < 4; k++)
-            a->lim[k] = l[k];
+    if (MotionProfile_setSettings(&a->prof, puldir_in_pulses(a, s)))
+        a->settings = s;
 }
 
 static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int32_t live,
@@ -153,7 +151,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     MotionProfile_rebase(&a->prof, (float)shift, trel);
 
     /* 3. Requests, read after service: a latch's halt this tick is applied now (E17). Halt first, so
-     * commands start where the pulses stopped; a stream begin before the limits, so they reach an
+     * commands start where the pulses stopped; a stream begin before the settings, so they reach an
      * idle generator; a stop last. */
     uint16_t req = a->req;
     a->req = 0;
@@ -161,13 +159,11 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
         puldir_halt_generator(a, pb);
     if (req & REQ_STREAM_BEGIN)
         puldir_stream_begin(a, pb);
-    if (req & REQ_LIMITS) {
-        const float c = a->conv;
-        const MotionLimits L = { a->lim[0] * c, a->lim[1] * c, a->lim[2] * c, a->lim[3] * c };
-        /* apply_limits checked them as the generator does. A homing stop's restore
+    if (req & REQ_SETTINGS) {
+        /* apply_settings checked them as the generator does. A homing stop's restore
          * can meet a window frozen in flight: it waits for the generator to rest. */
-        if (!MotionProfile_setLimits(&a->prof, L))
-            a->req |= REQ_LIMITS;
+        if (!MotionProfile_setSettings(&a->prof, puldir_in_pulses(a, a->settings)))
+            a->req |= REQ_SETTINGS;
     }
     if (req & REQ_SETPOS)                       /* the datum is count, which is the origin */
         (void)MotionProfile_setPosition(&a->prof, 0.0f);

@@ -8,7 +8,7 @@
 void PulDir_consoleMenu(char* buf, size_t n)
 {
     static const char menu[] =
-        "Stepper commands:\n"
+        "Axis commands:\n"
         "E<0|1> - Enable/disable motor\n"
         "P<position> - Set current position\n"
         "p - Get current position\n"

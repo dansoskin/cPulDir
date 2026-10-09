@@ -1,6 +1,6 @@
 # puldir
 
-puldir drives several PUL/DIR motor drives (steppers, closed-loop steppers, servo drives) from one microcontroller. Every pulse is written from a timer interrupt, so the pulse train does not depend on how busy the main loop is. Each axis has an acceleration, deceleration and jerk limited motion profile, live retargeting, jogging, homing, fault input handling and optional enable and release timing. Axes can move together along a straight line (groups), or follow a stream of position and velocity setpoints. The core is plain C99 with no HAL. The STM32 port is in `port/stm32/`.
+puldir drives several PUL/DIR motor drives (steppers, closed-loop steppers, servo drives) from one microcontroller. Every pulse is written from a timer interrupt, so the pulse train does not depend on how busy the main loop is. Each axis has a jerk-limited motion profile with its own speed, acceleration and deceleration settings, live retargeting, jogging, homing, fault input handling and optional enable and release timing. Axes can move together along a straight line (groups), or follow a stream of position and velocity setpoints. The core is plain C99 with no HAL. The STM32 port is in `port/stm32/`.
 
 ## Adding it to a project
 
@@ -96,7 +96,7 @@ static uint32_t tilt_ms;                /* the last millisecond advanced */
 void tilt_setup(void)
 {
     MotionProfile_init(&tilt, 0.0f, 0.001f);        /* start at 0 deg, dt = 1 ms */
-    MotionProfile_setLimits(&tilt, (MotionLimits){ 15.0f, 30.0f, 30.0f, 300.0f });
+    MotionProfile_setSettings(&tilt, (MotionSettings){ 15.0f, 30.0f, 30.0f, 300.0f });
     MotionProfile_setTarget(&tilt, 20.0f);          /* deg */
     tilt_ms = HAL_GetTick();
 }
@@ -131,14 +131,14 @@ Read `tilt.pos` and `tilt.vel` after each advance, and `tilt.acc` if you need it
 
 ```c
 MotionProfile_setEndless(&tilt, -5.0f);   /* run at -5 deg/s with no target */
-MotionProfile_stop(&tilt);                /* ramp down at the decel limit; done once at rest */
+MotionProfile_stop(&tilt);                /* ramp down at the decel setting; done once at rest */
 ```
 
-The profile measures no time itself. `dt` is fixed at init, and each `advance` assumes exactly `dt` has passed. Call it late and the motion runs slow; call it twice and it runs fast. The limits are speed, acceleration, deceleration and jerk; a jerk of 0 means no jerk limit. Setters return false and change nothing if given a bad value. The jerk filter holds at most `MOTION_PROFILE_MAX_TAPS` (256) samples, so 2 × max(accel, decel) / (jerk × dt) must be 256 or less (a reversal puts both signs of the larger ramp one window apart): at these limits the jerk must be at least 234.4 deg/s³. Each profile is about 1 KB. `pos` is a float, so keep coordinates within about seven significant digits.
+The profile measures no time itself. `dt` is fixed at init, and each `advance` assumes exactly `dt` has passed. Call it late and the motion runs slow; call it twice and it runs fast. The settings are speed, acceleration, deceleration and jerk. Speed and the two ramps are what a move uses (a short move never reaches the speed). Jerk is a bound the filtered motion stays under: an ordinary move peaks near half of it, since the window is sized for a reversal (E31). A jerk of 0 means no jerk limit. Setters return false and change nothing if given a bad value. The jerk filter holds at most `MOTION_PROFILE_MAX_TAPS` (256) samples, so 2 × max(accel, decel) / (jerk × dt) must be 256 or less (a reversal puts both signs of the larger ramp one window apart): at these ramps the jerk must be at least 234.4 deg/s³. Each profile is about 1 KB. `pos` is a float, so keep coordinates within about seven significant digits.
 
 ### 2. One motor
 
-The full setup for one axis, in the order the library requires: the timers, the logger, `PulDir_init` with the conversion, then pins, limits and delays, `PulDir_register`, and `PulDir_start` last. The conversion is fixed at init, so every limit after it is in user units.
+The full setup for one axis, in the order the library requires: the timers, the logger, `PulDir_init` with the conversion, then pins, settings and delays, `PulDir_register`, and `PulDir_start` last. The conversion is fixed at init, so every setting after it is in user units.
 
 ```c
 #include <stdio.h>
@@ -196,7 +196,7 @@ At init the log reads `[tilt] max speed 89.2857 units/s, resolution 0.0036 units
 
 ```c
 PulDir_jog(&tilt, -5.0f);   /* run at -5 deg/s until told otherwise */
-PulDir_stop(&tilt);         /* ramp down at the decel limit */
+PulDir_stop(&tilt);         /* ramp down at the decel setting */
 PulDir_halt(&tilt);         /* stop at once, no ramp */
 ```
 
@@ -210,11 +210,11 @@ if (!PulDir_jog(&tilt, 100.0f)) {
 
 The cap is just under half the tick rate: 25,000 pulses/s at a 20 µs pulse, which is 89.3 deg/s here, the "max speed" init logged. Setup calls return false on refusal too, so check them. `PulDir_init` refuses a NULL name or one longer than 15 characters, a conversion that is not finite and positive, and missing or mismatched timing. It then writes nothing and logs the reason at once, for example `[tilt] init refused: timers not attached`. An axis whose init was refused is refused by `PulDir_register` too. A datum may be set with `PulDir_setPosition` before `PulDir_register`, which takes it over, but motion commands are refused until the axis is registered: `[tilt] moveTo refused: not registered`.
 
-`PulDir_stop` and `PulDir_halt` leave the drive enabled, unless auto-release is on: then it is released after the release delay, as after any move. A fault input latch halts the axis and always keeps the drive enabled; `PulDir_clearFault` and `PulDir_attachFaultClear` handle the clear. Homing is `PulDir_setHoming`, then `PulDir_homeStart`; while it runs the limit setters are refused. `PulDir_console(&tilt, cmd, arg)` is a one-letter command console for a UART, and `PulDir_consoleMenu` prints the verbs.
+`PulDir_stop` and `PulDir_halt` leave the drive enabled, unless auto-release is on: then it is released after the release delay, as after any move. A fault input latch halts the axis and always keeps the drive enabled; `PulDir_clearFault` and `PulDir_attachFaultClear` handle the clear. Homing is `PulDir_setHoming`, then `PulDir_homeStart`; while it runs the setters of speed, acceleration, deceleration and jerk are refused. `PulDir_console(&tilt, cmd, arg)` is a one-letter command console for a UART, and `PulDir_consoleMenu` prints the verbs.
 
 ### 3. Two motors, independent
 
-Two axes, each with its own limits, each commanded on its own. Use it when the axes do not need to arrive together. The includes, `log_line` and the timer handles are as in example 2.
+Two axes, each with its own settings, each commanded on its own. Use it when the axes do not need to arrive together. The includes, `log_line` and the timer handles are as in example 2.
 
 ```c
 static PulDir pan, tilt;
@@ -287,9 +287,9 @@ PulDirGroup_stop(&gimbal);              /* ramp down along the line */
 PulDirGroup_halt(&gimbal);              /* stop at once */
 ```
 
-What happens: each member's own limits bound the path, and the tightest wins. Pan has 60 deg to go at 15 deg/s and tilt 20 deg at 10 deg/s, so pan sets the pace and tilt runs at a third of pan's speed. Both land 4.7 s after the call, their last pulses on the same tick.
+What happens: each member's own settings, over its travel, bound the path's, and the smallest wins. Pan has 60 deg to go at 15 deg/s and tilt 20 deg at 10 deg/s, so pan sets the pace and tilt runs at a third of pan's speed. Both land 4.7 s after the call, their last pulses on the same tick.
 
-Members must be idle to join a move. While it runs they refuse their own commands and limit setters; `PulDir_halt` on a member halts the whole group. A fault on any member halts the group and `PulDirGroup_faulted` reports it. Each member's travel is limited to 2^24 pulses (59,918 deg here). After a `PulDirGroup_stop` each member ends within one pulse of the line, but the final edges need not share a tick.
+Members must be idle to join a move. While it runs they refuse their own commands and changes to their settings; `PulDir_halt` on a member halts the whole group. A fault on any member halts the group and `PulDirGroup_faulted` reports it. Each member's travel is limited to 2^24 pulses (59,918 deg here). After a `PulDirGroup_stop` each member ends within one pulse of the line, but the final edges need not share a tick.
 
 ### 5. Two motors in CSP, fed by a profile
 
@@ -308,8 +308,8 @@ static float pan0, tilt0;               /* where the circle starts */
 bool scan_start(void)
 {
     MotionProfile_init(&scan, 0.0f, 0.001f);
-    MotionProfile_setLimits(&scan, (MotionLimits){ 1.0f, 1.0f, 1.0f, 10.0f });  /* rad/s, rad/s², rad/s³ */
-    MotionProfile_setTarget(&scan, 6.2831853f);                                 /* one turn */
+    MotionProfile_setSettings(&scan, (MotionSettings){ 1.0f, 1.0f, 1.0f, 10.0f });  /* rad/s, rad/s², rad/s³ */
+    MotionProfile_setTarget(&scan, 6.2831853f);                                     /* one turn */
     pan0 = PulDir_position(&pan);
     tilt0 = PulDir_position(&tilt);
     scanning = PulDir_streamBegin(&pan) && PulDir_streamBegin(&tilt);
@@ -349,7 +349,7 @@ void scan_loop(void)                    /* every pass of the main loop */
 }
 ```
 
-What happens: the master turns 2π rad in 7.5 s. Each axis peaks at 10 deg/s and 10 deg/s², well inside its limits. Each tracks the master within 1.3 pulses, and both end at rest on the start of the circle 0.2 s after `streamEnd`.
+What happens: the master turns 2π rad in 7.5 s. Each axis peaks at 10 deg/s and 10 deg/s², well under its speed and acceleration settings. Each tracks the master within 1.3 pulses, and both end at rest on the start of the circle 0.2 s after `streamEnd`.
 
 - `PulDir_stream` is main-context only, so the beat lives in the main loop. Send a setpoint only on a new step; resending an old one would restart the hold from a stale point.
 - Setpoints may arrive at 200 Hz up to the plan rate. The axis holds each one to first order (position plus velocity times age) until the next.
@@ -435,5 +435,5 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E35) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E36) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.

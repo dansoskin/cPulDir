@@ -30,9 +30,9 @@ typedef struct {
 void puldir_stream_defaults(PulDir*);
 /* Plan tick: a halt stopped the generator, which no longer idles under a stream. */
 void puldir_stream_halt(PulDir*);
-/* Plan tick, streamBegin's request, before the limits: the generator idles where the pulses are. */
+/* Plan tick, streamBegin's request, before the settings: the generator idles where the pulses are. */
 void puldir_stream_begin(PulDir*, int64_t pb);
-/* Plan tick, after the limits and the datum: leaves STREAM for STOPPING after streamEnd or stop,
+/* Plan tick, after the settings and the datum: leaves STREAM for STOPPING after streamEnd or stop,
  * or on the setpoint timeout. */
 void puldir_stream_check(PulDir*, int64_t pb, uint32_t now);
 /* Plan tick: one interval of STREAM, aimed at t_b, where this set takes over. */

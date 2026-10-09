@@ -175,6 +175,11 @@ static bool wrote_at(uint8_t id, uint32_t tick)
 #define MAX_EDGES 60000u
 static uint32_t rise[MAX_EDGES], fall[MAX_EDGES];
 
+static bool same_settings(MotionSettings x, MotionSettings y)
+{
+    return x.speed == y.speed && x.accel == y.accel && x.decel == y.decel && x.jerk == y.jerk;
+}
+
 /* ---- setup ------------------------------------------------------------------- */
 
 static void t_setup(void)
@@ -189,17 +194,15 @@ static void t_setup(void)
     assert(PulDir_init(&a, "fifteen chars o", 1.0f));
     assert(strcmp(a.name, "fifteen chars o") == 0);
     assert(a.conv == 1.0f);
-    for (int i = 0; i < 4; i++) {
-        const float want = i < 3 ? 200.0f : 0.0f;
-        assert(a.def[i] == want && a.lim[i] == want);
-    }
+    const MotionSettings first = { 200.0f, 200.0f, 200.0f, 0.0f };
+    assert(same_settings(a.defaults, first) && same_settings(a.settings, first));
     assert(a.stream.catchup_ms == PULDIR_CATCHUP_MS);
     assert(a.log_on);
     assert(a.slot == PULDIR_MAX_AXES);
     assert(!a.has_pins && a.mode == PULDIR_MODE_IDLE && a.events == 0);
     assert(a.prof.dt == DT && a.prof.done && a.prof.pos == 0.0f);
-    assert(a.prof.lim.vmax == 200.0f && a.prof.lim.amax == 200.0f &&
-           a.prof.lim.dmax == 200.0f && a.prof.lim.jmax == 0.0f);
+    assert(a.prof.settings.speed == 200.0f && a.prof.settings.accel == 200.0f &&
+           a.prof.settings.decel == 200.0f && a.prof.settings.jerk == 0.0f);
 
     assert(PulDir_init(&a, "", 1.0f));
     assert(a.name[0] == '\0');
@@ -697,9 +700,9 @@ static uint32_t rnd(void)
 }
 static float frand(float lo, float hi) { return lo + (hi - lo) * (float)(rnd() >> 8) * (1.0f / 16777216.0f); }
 
-/* Limits in pulses, set in user units at a new conversion. The conversion is fixed at init, so the
+/* Settings in pulses, set in user units at a new conversion. The conversion is fixed at init, so the
  * test writes it into the axis, at rest, as init would. */
-static void set_limits(PulDir* a, float conv, float v, float acc, float dec, float jerk)
+static void set_settings(PulDir* a, float conv, float v, float acc, float dec, float jerk)
 {
     assert(!a->moving && a->mode == PULDIR_MODE_IDLE);
     a->conv = conv;
@@ -727,7 +730,7 @@ static void t_move_exact(void)
         const float v = frand(200.0f, fminf(20000.0f, 0.9f * cap));
         const float acc = frand(v / 0.2f, v / 0.02f), dec = frand(v / 0.2f, v / 0.02f);
         const float jerk = move % 2 ? 0.0f : 2.0f * fmaxf(acc, dec) / (frand(2.0f, 200.0f) * dt);
-        set_limits(a, conv, v, acc, dec, jerk);
+        set_settings(a, conv, v, acc, dec, jerk);
 
         const int32_t c0 = st(0).count;
         float d = rnd() % 8u == 0u ? frand(-3.0f, 3.0f) : frand(-0.3f, 0.3f) * v;
@@ -782,7 +785,7 @@ static void parity(float jerk)
     const int32_t dist = 2000;
     MotionProfile g;
     assert(MotionProfile_init(&g, 0.0f, DT));
-    assert(MotionProfile_setLimits(&g, (MotionLimits){ v, acc, dec, jerk }));
+    assert(MotionProfile_setSettings(&g, (MotionSettings){ v, acc, dec, jerk }));
     assert(MotionProfile_setTarget(&g, (float)dist));
     size_t k = 0;
     gen[k++] = 0.0f;
@@ -932,12 +935,12 @@ static void logger(const char* s)
 
 static void t_refusals(void)
 {
-    /* the natural setup order: the conversion at init, then limits in user units */
+    /* the natural setup order: the conversion at init, then settings in user units */
     PulDir b;
     assert(PulDir_init(&b, "b", 280.0f));
     assert(PulDir_setDefaults(&b, 15.0f, 30.0f, 30.0f, 0.0f));
     assert(PulDir_speed(&b) == 15.0f && PulDir_acceleration(&b) == 30.0f);
-    assert(PulDir_deceleration(&b) == 30.0f && PulDir_jerk(&b) == 0.0f && b.def[0] == 15.0f);
+    assert(PulDir_deceleration(&b) == 30.0f && PulDir_jerk(&b) == 0.0f && b.defaults.speed == 15.0f);
 
     setup_conv(1, 2.0f);
     PulDir* a = &ax[0];
@@ -949,11 +952,11 @@ static void t_refusals(void)
     PulDir_loop(a);
     assert(nlines == 1 && strstr(lines[0], "moveTo refused") && strncmp(lines[0], "[a0] ", 5) == 0);
 
-    /* init's limits are 200 pulses/s and 200 pulses/s^2: 100 units at conv 2 */
-    assert(PulDir_speed(a) == 100.0f && PulDir_acceleration(a) == 100.0f && a->def[2] == 100.0f);
+    /* init's settings are 200 pulses/s and 200 pulses/s^2: 100 units at conv 2 */
+    assert(PulDir_speed(a) == 100.0f && PulDir_acceleration(a) == 100.0f && a->defaults.decel == 100.0f);
     assert(PulDir_setAcceleration(a, 200.0f) && PulDir_setDeceleration(a, 200.0f));
 
-    /* every limit: refused on bad input, unchanged */
+    /* every setting: refused on bad input, unchanged */
     assert(!PulDir_setSpeed(a, 0.0f) && !PulDir_setSpeed(a, NAN) && PulDir_speed(a) == 100.0f);
     assert(!PulDir_setSpeed(a, (float)(TICK_HZ / 2u) / 2.0f) && PulDir_speed(a) == 100.0f);
     assert(PulDir_setSpeed(a, nextafterf((float)(TICK_HZ / 2u) / 2.0f, 0.0f)));
@@ -974,9 +977,9 @@ static void t_refusals(void)
     assert(nlines == 1 && strstr(lines[0], "setJerk refused: jerk below "));
     assert(PulDir_setJerk(a, jmin * 2.0f));
     assert(!PulDir_setDefaults(a, 100.0f, 200.0f, 200.0f, jmin * 0.5f));
-    assert(a->def[0] == 100.0f && a->def[1] == 100.0f && a->def[3] == 0.0f);
+    assert(a->defaults.speed == 100.0f && a->defaults.accel == 100.0f && a->defaults.jerk == 0.0f);
     assert(PulDir_setDefaults(a, 100.0f, 200.0f, 300.0f, 0.0f));
-    assert(a->def[2] == 300.0f && PulDir_deceleration(a) == 300.0f && PulDir_jerk(a) == 0.0f);
+    assert(a->defaults.decel == 300.0f && PulDir_deceleration(a) == 300.0f && PulDir_jerk(a) == 0.0f);
 
     /* logging off: the event is consumed, no line */
     PulDir_setLogging(a, false);
@@ -1183,7 +1186,7 @@ static void t_late_publish(void)
     printf("  late_publish: %u sets latched late (N = %u)\n", (unsigned)late, (unsigned)N);
 }
 
-/* ---- jog, stop, halt, the datum and live limits --------------------------------------------- */
+/* ---- jog, stop, halt, the datum and live settings ------------------------------------------- */
 
 static uint32_t plan_left(void) { return fake_plan_phase == 0u ? N : N - fake_plan_phase; }
 
@@ -1203,9 +1206,9 @@ static void check_ramps(bool after)
         vprev = ax[0].vel_out;
         return;
     }
-    const MotionLimits L = ax[0].prof.lim;
+    const MotionSettings S = ax[0].prof.settings;
     const float dv = fabsf(ax[0].vel_out - vprev);
-    assert(dv <= fmaxf(L.amax, L.dmax) * (DT) * 1.0001f + 1e-3f);
+    assert(dv <= fmaxf(S.accel, S.decel) * (DT) * 1.0001f + 1e-3f);
 }
 
 /* After every plan tick: axis 0's acceleration steps within its jerk (pulses/s^2 per interval). */
@@ -1217,9 +1220,9 @@ static void check_jerk(bool after)
         aprev = ax[0].prof.acc;
         return;
     }
-    const float jmax = ax[0].prof.lim.jmax;
-    if (jmax > 0.0f)
-        assert(fabsf(ax[0].prof.acc - aprev) <= jmax * DT * 1.001f + 1.0f);
+    const float jerk = ax[0].prof.settings.jerk;
+    if (jerk > 0.0f)
+        assert(fabsf(ax[0].prof.acc - aprev) <= jerk * DT * 1.001f + 1.0f);
 }
 
 /* At rest the pulse position is within a pulse of the count, on the side the
@@ -1280,7 +1283,7 @@ static void t_jog(void)
     /* a jog has no target: it reads where the profile is, an interval or two ahead of the pulses */
     assert(PulDir_target(a) > PulDir_position(a) && PulDir_target(a) - PulDir_position(a) < 0.25f);
 
-    /* D7: a lowered speed limit ramps the jog down at decel, a raised one back up
+    /* D7: a lowered speed setting ramps the jog down at decel, a raised one back up
      * at accel to the jog's own speed: 600 pulses/s at 10,000 pulses/s^2 a second */
     const float step = 100.0f / (float)PLAN_HZ;            /* user units/s per plan tick */
     const int nsteps = (int)(6u * PLAN_HZ / 100u);         /* 60 at 1 kHz */
@@ -1341,7 +1344,7 @@ static void t_stop(void)
         fake_run((60u + 13u * (uint32_t)k) * N + (uint32_t)k * 3u);   /* on the ramp or cruising */
         float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
         if (k >= 6) {                         /* a lower decel set just before the stop: the stop uses it */
-            const float v = a->prof.v_t, d1 = a->prof.lim.dmax;
+            const float v = a->prof.v_t, d1 = a->prof.settings.decel;
             assert(PulDir_setDeceleration(a, 5000.0f));
             expect += v * fabsf(v) * (1.0f / (2.0f * 5000.0f) - 1.0f / (2.0f * d1));
         }
@@ -1377,7 +1380,7 @@ static void t_stop(void)
     assert(a->mode == PULDIR_MODE_IDLE && a->req == 0 && !PulDir_isMoving(a));
 }
 
-/* Stops, jog stops and halts at random times and limits: every one reaches IDLE
+/* Stops, jog stops and halts at random times and settings: every one reaches IDLE
  * with target == position and the count on the last integer reached. */
 static void t_stop_random(void)
 {
@@ -1394,7 +1397,7 @@ static void t_stop_random(void)
         const float v = frand(200.0f, fminf(20000.0f, 0.9f * cap));
         const float acc = frand(v / 0.2f, v / 0.02f), dec = frand(v / 0.2f, v / 0.02f);
         const float jerk = n % 2 ? 0.0f : 2.0f * fmaxf(acc, dec) / (frand(2.0f, 200.0f) * dt);
-        set_limits(a, conv, v, acc, dec, jerk);
+        set_settings(a, conv, v, acc, dec, jerk);
 
         const int32_t c0 = st(0).count;
         const int64_t n0 = net[0];
@@ -1555,8 +1558,8 @@ static void t_rate_cap(void)
     track_until_idle(a, TICK_HZ);
 }
 
-/* 2.2 and test 24, the axis half: which limit changes are live. */
-static void t_live_limits(void)
+/* 2.2 and test 24, the axis half: which settings changes are live. */
+static void t_live_settings(void)
 {
     const float conv = 100.0f;
     setup_conv(1, conv);
@@ -1573,7 +1576,7 @@ static void t_live_limits(void)
     assert(PulDir_setAcceleration(a, 30.0f) && PulDir_setDeceleration(a, 30.0f));
     assert(PulDir_setSpeed(a, 10.0f));
     fake_run(N);
-    assert(a->prof.lim.amax == 3000.0f && a->prof.lim.dmax == 3000.0f && a->prof.lim.vmax == 1000.0f);
+    assert(a->prof.settings.accel == 3000.0f && a->prof.settings.decel == 3000.0f && a->prof.settings.speed == 1000.0f);
     assert(!PulDir_setJerk(a, 300.0f * hz) && a->refusal == PULDIR_R_WINDOW);   /* fits the taps, not the frozen window */
     assert(PulDir_jerk(a) == 0.0f && a->req == 0);
     fake_run(TICK_HZ / 2u);                       /* 500 ms */
@@ -1600,14 +1603,14 @@ static void t_live_limits(void)
     assert(PulDir_speed(a) == 20.0f && PulDir_acceleration(a) == 30.0f);
     assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 400.0f * hz);
     fake_run(N);
-    assert(a->prof.lim.jmax == 40000.0f * hz && a->prof.lim.amax == 3000.0f && a->prof.n == 207);
+    assert(a->prof.settings.jerk == 40000.0f * hz && a->prof.settings.accel == 3000.0f && a->prof.n == 207);
     run_until_idle(a, 30u * TICK_HZ);
     assert(st(0).count == 15000);
     assert(PulDir_restoreDefaults(a));                   /* idle: accepted */
     assert(PulDir_speed(a) == 20.0f && PulDir_acceleration(a) == 35.0f);
     assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 290.0f * hz);
     fake_run(N);
-    assert(a->prof.n == 242 && a->prof.lim.amax == 3500.0f);
+    assert(a->prof.n == 242 && a->prof.settings.accel == 3500.0f);
 
     /* a jerk needing more than the ring's taps: refused, the log names the smallest that fits */
     const float jmin = MotionProfile_minJerk(3500.0f, 3000.0f, DT) / conv;
@@ -1624,7 +1627,7 @@ static void t_live_limits(void)
     assert(logged >= floor_ && logged - floor_ <= 1e-4f + 3e-6f * floor_);
     assert(PulDir_setJerk(a, logged) && PulDir_jerk(a) == logged);   /* the logged value fits */
 
-    /* E32: in flight the ring still holds motion under the limits it was made under. Lowered
+    /* E32: in flight the ring still holds motion under the settings it was made under. Lowered
      * accel and decel with a jerk that cannot bound the retained ramp are refused; with one that
      * can, accepted, and the acceleration steps within it through the turnover. */
     fake_on_plan(check_jerk);
@@ -1633,19 +1636,19 @@ static void t_live_limits(void)
     assert(a->prof.n == 200);
     assert(PulDir_moveTo(a, 300.0f));
     fake_run(20u * N);
-    assert(!a->prof.done && a->prof.lim.amax == 3000.0f);
+    assert(!a->prof.done && a->prof.settings.accel == 3000.0f);
     assert(!PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 10.0f * hz) && a->refusal == PULDIR_R_WINDOW);
-    assert(PulDir_acceleration(a) == 30.0f && PulDir_jerk(a) == 300.0f * hz && a->def[1] == 30.0f);
+    assert(PulDir_acceleration(a) == 30.0f && PulDir_jerk(a) == 300.0f * hz && a->defaults.accel == 30.0f);
     assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz));   /* (100 + 3000) / (16000 dt) = 194 taps */
-    fake_run(300u * N);                       /* the ring turns over under the new limits */
-    assert(a->prof.lim.amax == 100.0f && a->prof.lim.jmax == 16000.0f * hz && a->prof.n == 200);
-    assert(a->def[1] == 1.0f && PulDir_jerk(a) == 160.0f * hz);
+    fake_run(300u * N);                       /* the ring turns over under the new settings */
+    assert(a->prof.settings.accel == 100.0f && a->prof.settings.jerk == 16000.0f * hz && a->prof.n == 200);
+    assert(a->defaults.accel == 1.0f && PulDir_jerk(a) == 160.0f * hz);
     PulDir_stop(a);
     run_until_idle(a, 30u * TICK_HZ);
 
     /* On a landing tick v_t still holds the landing step (E16): a change it does not fit is refused
      * until the next plan tick, and one it fits is applied by that tick, before its advance. The
-     * targets are tried until one lands with a step near dmax dt. */
+     * targets are tried until one lands with a step near decel dt. */
     bool found = false;
     for (int k = 1; k <= 60 && !found; k++) {
         assert(PulDir_setDefaults(a, 20.0f, 30.0f, 30.0f, 300.0f * hz));
@@ -1658,10 +1661,10 @@ static void t_live_limits(void)
             assert(!PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz) && a->refusal == PULDIR_R_WINDOW);
             assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 400.0f * hz));   /* (3000 + 3000) / 40 = 150 taps */
             fake_run(N);
-            assert(a->prof.lim.amax == 100.0f && a->prof.lim.jmax == 40000.0f * hz && a->prof.landed);
+            assert(a->prof.settings.accel == 100.0f && a->prof.settings.jerk == 40000.0f * hz && a->prof.landed);
             assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz));   /* v_t is 0 now: 194 taps */
             fake_run(N);
-            assert(a->prof.lim.jmax == 16000.0f * hz);
+            assert(a->prof.settings.jerk == 16000.0f * hz);
         }
         run_until_idle(a, 30u * TICK_HZ);
     }
@@ -2089,8 +2092,8 @@ static void t_stream_timeout(void)
         fake_run(1);
         assert(PulDir_ticks() - tb < 110u * MS);
     }
-    const uint32_t tt = PulDir_ticks() - tb, lim = PULDIR_STREAM_TIMEOUT_MS * MS;
-    assert(tt >= lim && tt <= lim + N);
+    const uint32_t tt = PulDir_ticks() - tb, tmo = PULDIR_STREAM_TIMEOUT_MS * MS;
+    assert(tt >= tmo && tt <= tmo + N);
     assert(a->mode == PULDIR_MODE_STOPPING && PulDir_streamTimedOut(a) && PulDir_isMoving(a));
     check_gaps(0, g);                             /* full speed up to the timeout */
     const size_t r0 = nrise;
@@ -2101,11 +2104,11 @@ static void t_stream_timeout(void)
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f && PulDir_streamTimedOut(a));
     assert(PulDir_target(a) == PulDir_position(a) && dirw[0] == d0);
     check_rest(0, 1);                             /* the count is the last integer reached */
-    /* at decel from 5,000: 250 pulses, the slope dmax */
+    /* at decel from 5,000: 250 pulses, the slope decel */
     assert(c - c0 >= 245 && c - c0 <= 258);
     const double slope = rate_slope(r0 > 0u ? r0 - 1u : 0u, 500.0, 4500.0);
     printf("  stream_timeout: timed out %.2f ms after streamBegin, stopped in %d pulses, "
-           "edge-rate slope %.0f pulses/s^2 (dmax 50000)\n",
+           "edge-rate slope %.0f pulses/s^2 (decel 50000)\n",
            (double)tt * 1000.0 / (double)TICK_HZ, (int)(c - c0), slope);
     assert(fabs(slope + 50000.0) <= 0.05 * 50000.0);
 
@@ -2170,8 +2173,8 @@ static void t_stream_end(void)
             ;
         /* ticks at v_end before the seeded set latches: to this plan tick, then to its boundary */
         const uint32_t run_on = (PulDir_ticks() - t_end) + left() % N;
-        assert(a->prof.lim.vmax == 5000.0f && a->prof.lim.dmax == 30000.0f);
-        assert(a->prof.lim.jmax == jerk * 100.0f && !a->prof.done);
+        assert(a->prof.settings.speed == 5000.0f && a->prof.settings.decel == 30000.0f);
+        assert(a->prof.settings.jerk == jerk * 100.0f && !a->prof.done);
         const float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
         run_until_idle(a, TICK_HZ);
         const int32_t c = st(0).count;
@@ -2181,8 +2184,8 @@ static void t_stream_end(void)
         check_rest(0, 1);
         if (!round) {
             /* The seed, independent of the generator's own stopDistance: from the
-             * pre-end count, the run-on at v_end, then v^2 / (2 dmax) less the
-             * discrete stop's v dt / 2 (its first step already sheds dmax dt). */
+             * pre-end count, the run-on at v_end, then v^2 / (2 decel) less the
+             * discrete stop's v dt / 2 (its first step already sheds decel dt). */
             const float dt = DT;
             const float seeded = (float)c_end + v_end * (float)run_on / (float)TICK_HZ
                                + v_end * v_end / (2.0f * 30000.0f) - v_end * dt / 2.0f;
@@ -2190,7 +2193,7 @@ static void t_stream_end(void)
                    (double)((float)c - seeded));
             assert(fabsf((float)c - seeded) <= 4.0f);
             const double slope = rate_slope(0, 1000.0, 5000.0);
-            printf("  stream_end: edge-rate slope %.0f pulses/s^2 (default dmax 30000)\n", slope);
+            printf("  stream_end: edge-rate slope %.0f pulses/s^2 (default decel 30000)\n", slope);
             assert(fabs(slope + 30000.0) <= 0.05 * 30000.0);
         }
     }
@@ -2291,7 +2294,7 @@ static void t_stream_transitions(void)
     while (!tick1())
         ;
     float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
-    assert(a->prof.lim.dmax == 40000.0f);
+    assert(a->prof.settings.decel == 40000.0f);
     run_until_idle(a, TICK_HZ);
     assert(fabsf((float)st(0).count - expect) <= 4.0f && dirw[0] == d0);
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_target(a) == PulDir_position(a));
@@ -2414,9 +2417,9 @@ static void t_request_order(void)
     }
 }
 
-/* 5.6: the configured speed limit bounds the stream, live. Setpoints asking for
- * twice the limit move the axis at the limit, never faster. */
-static void t_stream_speed_limit(void)
+/* 5.6: the speed setting bounds the stream, live. Setpoints asking for
+ * twice the setting move the axis at the setting, never faster. */
+static void t_stream_speed_setting(void)
 {
     setup(1);
     fake_on_write(count_write);
@@ -2432,7 +2435,7 @@ static void t_stream_speed_limit(void)
     for (size_t i = 1; i < nrise; i++)
         assert(rise[i] - rise[i - 1u] >= g);      /* never above 2,000 pulses/s */
     const int32_t c = st(0).count;
-    assert(c >= 395 && c <= 401);                 /* 200 ms at the limit, not at 4,000 */
+    assert(c >= 395 && c <= 401);                 /* 200 ms at the setting, not at 4,000 */
     assert(PulDir_streamError(a) > 300.0f);       /* the setpoints run away; the axis does not */
 
     /* lowered mid-stream, setpoints still running away: obeyed from the set after next */
@@ -2453,15 +2456,15 @@ static void t_stream_speed_limit(void)
 }
 
 /* Test 13 after real setpoints: the timeout counts from the last one, and the
- * stop is v^2 / (2 dmax) from where the axis is when it fires. */
+ * stop is v^2 / (2 decel) from where the axis is when it fires. */
 static void t_stream_loss(void)
 {
     setup(1);
     fake_on_write(count_write);
     PulDir_attachLogger(logger);
     PulDir* a = &ax[0];
-    const float dmax = 50000.0f, v = 3000.0f;
-    assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, dmax, 0.0f));
+    const float decel = 50000.0f, v = 3000.0f;
+    assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, decel, 0.0f));
     fake_run(N);
     assert(PulDir_streamBegin(a));
     const uint32_t last = stream_line(a, 0.0, (double)v, 400u, 11u);
@@ -2473,8 +2476,8 @@ static void t_stream_loss(void)
         fake_run(1);
         assert(PulDir_ticks() - last < 110u * MS);
     }
-    const uint32_t fired = PulDir_ticks() - last, lim = PULDIR_STREAM_TIMEOUT_MS * MS;
-    assert(fired >= lim && fired <= lim + N);
+    const uint32_t fired = PulDir_ticks() - last, tmo = PULDIR_STREAM_TIMEOUT_MS * MS;
+    assert(fired >= tmo && fired <= tmo + N);
     assert(a->mode == PULDIR_MODE_STOPPING && PulDir_streamTimedOut(a));
     check_gaps(0, TICK_HZ / 3000u);        /* still at v, within a tick */
     const int32_t c0 = st(0).count;
@@ -2484,11 +2487,11 @@ static void t_stream_loss(void)
     const int32_t c = st(0).count;
     const float dt = DT;
     const float want = (float)c0 + v * (float)ahead / (float)TICK_HZ
-                     + v * v / (2.0f * dmax) - v * dt / 2.0f;
+                     + v * v / (2.0f * decel) - v * dt / 2.0f;
     printf("  stream_loss: timed out %.2f ms after the last setpoint, stopped in %d pulses "
            "(v^2/2d = %.0f), %.2f from the expected count\n",
            (double)fired * 1000.0 / (double)TICK_HZ, (int)(c - c0),
-           (double)(v * v / (2.0f * dmax)), (double)((float)c - want));
+           (double)(v * v / (2.0f * decel)), (double)((float)c - want));
     assert(fabsf((float)c - want) <= 3.0f);
     assert(a->mode == PULDIR_MODE_IDLE && dirw[0] == d0);
     check_rest(0, 1);
@@ -2523,7 +2526,7 @@ static void t_stream_end_begin(void)
         assert(PulDir_inStream(a) && PulDir_velocity(a) == v);
     }
     check_gaps(0, TICK_HZ / 3000u);
-    assert(a->prof.done && a->prof.lim.dmax == 50000.0f && !a->arrived);
+    assert(a->prof.done && a->prof.settings.decel == 50000.0f && !a->arrived);
     PulDir_streamEnd(a);
     run_until_idle(a, TICK_HZ);
     assert(a->mode == PULDIR_MODE_IDLE);
@@ -2569,7 +2572,7 @@ static bool g_inc_seen;
  * where the members arrive, overwriting the final set before it latches; 2 runs it
  * again in the next interval, while the final set still runs. */
 static int g_twice, g_twice_stage;
-static float g_peak;                          /* the largest |velocity| / speed limit of any member */
+static float g_peak;                          /* the largest |velocity| / speed setting of any member */
 
 static void group_track(PulDirGroup* g, uint32_t ticks)
 {
@@ -2647,7 +2650,7 @@ static void group_move_sync(PulDirGroup* g, const int32_t* travel)
             /* each member's velocity is its share of the path's (conv 1) */
             const float vi = PulDir_velocity(&ax[i]);
             assert(vi == (float)travel[i] * g->s.vel || (vi == 0.0f && g->s.vel == 0.0f));
-            const float m = fabsf(vi) / ax[i].lim[0];
+            const float m = fabsf(vi) / ax[i].settings.speed;
             g_peak = m > g_peak ? m : g_peak;
         }
     }
@@ -2770,7 +2773,7 @@ static void t_group_rules(void)
     fake_on_write(group_write);
     for (uint8_t i = 0; i < 4; i++)
         assert(PulDir_setDefaults(&ax[i], 4000.0f + 1000.0f * (float)i, 40000.0f, 30000.0f, 0.0f));
-    fake_run(N);                              /* the limits applied: no request pending */
+    fake_run(N);                              /* the settings applied: no request pending */
     PulDir* m3[3] = { &ax[0], &ax[1], &ax[2] };
     PulDir* m2[2] = { &ax[2], &ax[3] };
 
@@ -3516,7 +3519,7 @@ static void t_group_fault(void)
     assert(!PulDirGroup_isMoving(&grp));
 }
 
-/* Group paths the other cases do not reach: the travel bound, members' limits
+/* Group paths the other cases do not reach: the travel bound, members' settings
  * refused, the underflow and taps refusals, and stops before the start, during
  * the stop and after landing. */
 static void t_group_paths(void)
@@ -3538,7 +3541,7 @@ static void t_group_paths(void)
     assert(!PulDirGroup_isMoving(&grp) && a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a));
     assert(edges[0] == 0u && dirw[0] == 0u && st(0).count == 0);
 
-    /* an underflowing path limit: refused */
+    /* an underflowing path setting: refused */
     assert(PulDir_setAcceleration(a, 1.0e-38f));
     tg[0] = -16777216.0f;
     a->refusal = PULDIR_R_NONE;
@@ -3553,7 +3556,7 @@ static void t_group_paths(void)
     assert(PulDirGroup_moveTo(&grp, tg) && a->mode == PULDIR_MODE_GROUP);
     fake_run(TICK_HZ / 20u);           /* 50 ms */
 
-    /* a member's limits belong to the path while it moves: refused, unchanged */
+    /* a member's settings belong to the path while it moves: refused, unchanged */
     const uint16_t req0 = a->req;
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setSpeed(a, 100.0f) && a->refusal == PULDIR_R_MODE);
@@ -3567,8 +3570,8 @@ static void t_group_paths(void)
     assert(!PulDir_restoreDefaults(a) && a->refusal == PULDIR_R_MODE);
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setDefaults(a, 100.0f, 100.0f, 100.0f, 0.0f) && a->refusal == PULDIR_R_MODE);
-    assert(a->lim[0] == 4000.0f && a->lim[1] == 40000.0f && a->lim[2] == 40000.0f && a->lim[3] == 0.0f);
-    assert(a->def[0] == 4000.0f && a->req == req0);
+    assert(a->settings.speed == 4000.0f && a->settings.accel == 40000.0f && a->settings.decel == 40000.0f && a->settings.jerk == 0.0f);
+    assert(a->defaults.speed == 4000.0f && a->req == req0);
 
     /* the target read during a stop is the path's position, not the old target */
     PulDirGroup_stop(&grp);
@@ -3633,7 +3636,7 @@ static int32_t seen_count[16];
 static int nseen;
 static float v_towards, v_away;               /* the fastest velocity in either moving phase */
 static int64_t adj_inc;                       /* the largest |live increment| during ADJUST_POSITION */
-static float lim_towards, lim_away;           /* the speed limit seen in either moving phase */
+static float set_towards, set_away;           /* the speed setting seen in either moving phase */
 static bool freeze_at_delay1;
 static void home_plan(bool after)
 {
@@ -3652,9 +3655,9 @@ static void home_plan(bool after)
     if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT && fabsf(a->vel_out) > fabsf(v_towards))
         v_towards = a->vel_out;
     if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT)
-        lim_towards = a->lim[0];
+        set_towards = a->settings.speed;
     if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT)
-        lim_away = a->lim[0];
+        set_away = a->settings.speed;
     if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && fabsf(a->vel_out) > fabsf(v_away))
         v_away = a->vel_out;
     if (h == PULDIR_HOME_ADJUST_POSITION) {
@@ -3703,7 +3706,7 @@ static void t_homing(void)
     assert(PulDir_setDefaults(a, 4000.0f, 40000.0f, 40000.0f, 0.0f));
     assert(PulDir_setDefaults(&ax[1], 4000.0f, 40000.0f, 40000.0f, 0.0f));
     assert(PulDir_setSpeed(a, 1000.0f));      /* below the homing speed: homing runs at its own */
-    fake_run(N);                              /* the limits applied: no request pending */
+    fake_run(N);                              /* the settings applied: no request pending */
 
     /* setHoming refuses bad input and changes nothing; homeStart needs it */
     const float cap = (float)(TICK_HZ / 2u);
@@ -3766,7 +3769,7 @@ static void t_homing(void)
     assert(seen_tick[4] - seen_tick[3] >= D && seen_tick[4] - seen_tick[3] <= D + N);
     assert(seen_tick[6] - seen_tick[5] >= D && seen_tick[6] - seen_tick[5] <= D + N);
     assert(v_towards == -2000.0f && v_away == 400.0f);          /* home speed, then 0.2x of it back */
-    assert(lim_towards == 2000.0f && lim_away == 400.0f);       /* applied as the speed limit */
+    assert(set_towards == 2000.0f && set_away == 400.0f);       /* applied as the speed setting */
     assert(seen_count[1] <= -1000 && seen_count[2] >= -1000 - 10);   /* stopped within an interval */
     assert(seen_count[3] >= -1000 + 20 && seen_count[3] <= -1000 + 22);
     assert(seen_count[5] - seen_count[4] == 50);                  /* the adjust, whole pulses from rest */
@@ -3894,13 +3897,13 @@ static void t_homing(void)
     assert(PulDir_setPosition(a, 3.0f) && !PulDir_isHomed(a));
 
     /* defaults the generator refuses (a jerk past the ring, set behind the API's
-     * back: the API cannot) are not copied: the adjust runs at the limits it has */
-    const float jerk_def = a->def[3];
-    a->def[3] = 1.0f;
+     * back: the API cannot) are not copied: the adjust runs at the settings it has */
+    const float jerk_def = a->defaults.jerk;
+    a->defaults.jerk = 1.0f;
     home_run(a, st(0).count - 500, 6000u);
-    assert(PulDir_isHomed(a) && a->lim[0] == 400.0f && a->lim[3] == 0.0f && a->prof.lim.jmax == 0.0f);
+    assert(PulDir_isHomed(a) && a->settings.speed == 400.0f && a->settings.jerk == 0.0f && a->prof.settings.jerk == 0.0f);
     assert(seen_count[5] - seen_count[4] == 50);
-    a->def[3] = jerk_def;
+    a->defaults.jerk = jerk_def;
 
     /* refused outside IDLE: in STREAM (test 19), in GROUP, and while moving */
     assert(PulDir_streamBegin(a));
@@ -3921,13 +3924,11 @@ static void t_homing(void)
     assert(PulDir_isHomed(a));                /* a refused homeStart leaves the datum alone */
 }
 
-/* The limits as the getters read them and, at conv 1, as the generator holds them. */
-static void limits_are(const PulDir* a, const float l[4], bool generator)
+/* The settings as the getters read them and, at conv 1, as the generator holds them. */
+static void settings_are(const PulDir* a, MotionSettings s, bool generator)
 {
-    for (int k = 0; k < 4; k++)
-        assert(a->lim[k] == l[k]);
-    const MotionLimits g = a->prof.lim;
-    assert(!generator || (g.vmax == l[0] && g.amax == l[1] && g.dmax == l[2] && g.jmax == l[3]));
+    assert(same_settings(a->settings, s));
+    assert(!generator || same_settings(a->prof.settings, s));
 }
 
 /* Runs until the axis has left HOMING. */
@@ -3939,9 +3940,9 @@ static void home_finish(PulDir* a, uint32_t max_ms)
     }
 }
 
-/* A run that ends unhomed, by any exit, puts back the limits homeStart found;
- * while it runs, the limit setters are refused, so nothing races the plan tick. */
-static void t_homing_limits(void)
+/* A run that ends unhomed, by any exit, puts back the settings homeStart found;
+ * while it runs, their setters are refused, so nothing races the plan tick. */
+static void t_homing_settings(void)
 {
     add_axis(0, false, false);
     PulDir* a = &ax[0];
@@ -3950,22 +3951,23 @@ static void t_homing_limits(void)
     start();
     fake_on_write(home_write);
     fake_on_plan(home_plan);
-    const float def[4] = { 4000.0f, 40000.0f, 40000.0f, 0.0f };
+    const MotionSettings dflt = { 4000.0f, 40000.0f, 40000.0f, 0.0f };
     /* A jerk whose window is wider than the one tap of the defaults. */
-    const float mine[4] = { 1000.0f, 30000.0f, 20000.0f,
-                            4.0f * MotionProfile_minJerk(30000.0f, 20000.0f, DT) };
-    assert(PulDir_setDefaults(a, def[0], def[1], def[2], def[3]));
-    assert(PulDir_setSpeed(a, mine[0]) && PulDir_setAcceleration(a, mine[1]));
-    assert(PulDir_setDeceleration(a, mine[2]) && PulDir_setJerk(a, mine[3]));
+    const MotionSettings mine = { 1000.0f, 30000.0f, 20000.0f,
+                                  4.0f * MotionProfile_minJerk(30000.0f, 20000.0f, DT) };
+    assert(PulDir_setDefaults(a, dflt.speed, dflt.accel, dflt.decel, dflt.jerk));
+    assert(PulDir_setSpeed(a, mine.speed) && PulDir_setAcceleration(a, mine.accel));
+    assert(PulDir_setDeceleration(a, mine.decel) && PulDir_setJerk(a, mine.jerk));
     assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 300u));
     fake_run(N);
-    limits_are(a, mine, true);
+    settings_are(a, mine, true);
 
-    /* refused while homing, limits and defaults unchanged */
+    /* refused while homing, settings and defaults unchanged */
     home_begin(a, -1000000);
     fake_run(20u * MS);
-    const float run[4] = { 2000.0f, mine[1], mine[2], mine[3] };   /* the homing speed as the limit */
-    limits_are(a, run, true);
+    MotionSettings run = mine;
+    run.speed = 2000.0f;                      /* the homing speed as the speed setting */
+    settings_are(a, run, true);
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setSpeed(a, 500.0f) && a->refusal == PULDIR_R_MODE);
     a->refusal = PULDIR_R_NONE;
@@ -3979,16 +3981,15 @@ static void t_homing_limits(void)
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setDefaults(a, 1.0f, 1.0f, 1.0f, 0.0f) && a->refusal == PULDIR_R_MODE);
     fake_run(N);
-    limits_are(a, run, true);
-    for (int k = 0; k < 4; k++)
-        assert(a->def[k] == def[k]);
+    settings_are(a, run, true);
+    assert(same_settings(a->defaults, dflt));
 
     /* halt, homeStop and stop put them back at once; the generator takes them */
     for (int k = 0; k < 3; k++) {
         if (k > 0) {
             home_begin(a, -1000000);
             fake_run(20u * MS);
-            limits_are(a, run, true);
+            settings_are(a, run, true);
         }
         if (k == 0)
             PulDir_halt(a);
@@ -3996,10 +3997,10 @@ static void t_homing_limits(void)
             PulDir_homeStop(a);
         else
             PulDir_stop(a);
-        limits_are(a, mine, false);
+        settings_are(a, mine, false);
         run_until_idle(a, TICK_HZ);
         fake_run(N);
-        limits_are(a, mine, true);
+        settings_are(a, mine, true);
         assert(PulDir_homeState(a) == PULDIR_HOME_IDLE && a->mode == PULDIR_MODE_IDLE);
     }
 
@@ -4011,18 +4012,18 @@ static void t_homing_limits(void)
         fake_run(1);
     }
     PulDir_stop(a);
-    limits_are(a, mine, false);
+    settings_are(a, mine, false);
     fake_run(N);
-    assert(a->prof.lim.jmax == 0.0f && a->prof.lim.vmax == def[0]);
+    assert(a->prof.settings.jerk == 0.0f && a->prof.settings.speed == dflt.speed);
     run_until_idle(a, TICK_HZ);
     fake_run(N);
-    limits_are(a, mine, true);
+    settings_are(a, mine, true);
 
     /* a phase timeout and a fault latch end the run from the plan tick */
     home_begin(a, -1000000);
     home_finish(a, 400u);
     assert(PulDir_homeState(a) == PULDIR_HOME_ERROR);
-    limits_are(a, mine, true);
+    settings_are(a, mine, true);
     run_until_idle(a, TICK_HZ);
     home_begin(a, -1000000);
     fake_run(20u * MS);
@@ -4032,7 +4033,7 @@ static void t_homing_limits(void)
         fake_run(1);
     }
     assert(PulDir_homeState(a) == PULDIR_HOME_ERROR && a->mode == PULDIR_MODE_IDLE);
-    limits_are(a, mine, true);
+    settings_are(a, mine, true);
     fake_set_input(FLT(0), false);
     assert(PulDir_clearFault(a));
     fake_run(12u * MS);
@@ -4042,7 +4043,7 @@ static void t_homing_limits(void)
     home_begin(a, st(0).count - 300);
     home_finish(a, 6000u);
     assert(PulDir_isHomed(a));
-    limits_are(a, def, true);
+    settings_are(a, dflt, true);
 }
 
 /* Test 22: with the counter started 1,000 ticks below its wrap, every timed
@@ -4345,17 +4346,17 @@ static void t_init_log(void)
     if (pulse_us == 20u && plan_us == 1000u)
         assert(strcmp(lines[0], "[tilt] max speed 89.2857 units/s, resolution 0.0036 units/pulse "
                                 "(pulse 20 us, plan 1000 us)") == 0);
-    float vmax = 0.0f, res = 0.0f;
+    float top = 0.0f, res = 0.0f;
     unsigned pu = 0, pl = 0;
     assert(sscanf(lines[0], "[tilt] max speed %f units/s, resolution %f units/pulse (pulse %u us, plan %u us)",
-                  &vmax, &res, &pu, &pl) == 4);
+                  &top, &res, &pu, &pl) == 4);
     const float cap = (float)(TICK_HZ / 2u) / 280.0f;
-    assert(fabsf(vmax - cap) <= 5.0e-5f + 1.0e-6f * cap && fabsf(res - 1.0f / 280.0f) <= 5.0e-5f);
+    assert(fabsf(top - cap) <= 5.0e-5f + 1.0e-6f * cap && fabsf(res - 1.0f / 280.0f) <= 5.0e-5f);
     assert(pu == pulse_us && pl == plan_us);
     assert(!PulDir_setSpeed(&a, cap) && PulDir_setSpeed(&a, nextafterf(cap, 0.0f)));   /* "max" is just under */
     assert(PulDir_init(&a, "tilt", 280.0f) && a.conv == 280.0f);
-    assert(PulDir_speed(&a) == 200.0f / 280.0f && a.def[1] == 200.0f / 280.0f && a.lim[3] == 0.0f);
-    assert(a.prof.lim.vmax == 200.0f && a.prof.lim.amax == 200.0f && a.prof.dt == DT);
+    assert(PulDir_speed(&a) == 200.0f / 280.0f && a.defaults.accel == 200.0f / 280.0f && a.settings.jerk == 0.0f);
+    assert(a.prof.settings.speed == 200.0f && a.prof.settings.accel == 200.0f && a.prof.dt == DT);
 
     PulDir_attachLogger(NULL);                /* no logger: no line, init still works */
     nlines = 0;
@@ -4394,7 +4395,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "stop_random", t_stop_random },
     { "halt", t_halt },
     { "rate_cap", t_rate_cap },
-    { "live_limits", t_live_limits },
+    { "live_settings", t_live_settings },
     { "setpos_idle_only", t_setpos },
     { "settle_twice", t_settle_twice },
     { "late_publish", t_late_publish },
@@ -4406,7 +4407,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "stream_timeout", t_stream_timeout },
     { "stream_end", t_stream_end },
     { "stream_transitions", t_stream_transitions },
-    { "stream_speed_limit", t_stream_speed_limit },
+    { "stream_speed_setting", t_stream_speed_setting },
     { "stream_loss", t_stream_loss },
     { "stream_end_begin", t_stream_end_begin },
     { "jerk_floor", t_jerk_floor },
@@ -4421,7 +4422,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "group_fault", t_group_fault },
     { "group_paths", t_group_paths },
     { "homing", t_homing },
-    { "homing_limits", t_homing_limits },
+    { "homing_settings", t_homing_settings },
     { "rollover", t_rollover },
     { "console", t_console },
 };

@@ -1,6 +1,5 @@
 /* Homing (5.8): setup and commands from main, cFlexyStepper's phases from the plan tick. */
 #include <math.h>
-#include <string.h>
 #include "puldir_internal.h"
 
 #define DELAY_TICKS puldir_ms_ticks(PULDIR_HOMING_DELAY_MS)
@@ -72,7 +71,7 @@ bool PulDir_homeStart(PulDir* a)
             why = PULDIR_R_NOT_IDLE;
         } else {
             h->homed = false;
-            memcpy(h->saved_lim, a->lim, sizeof h->saved_lim);
+            h->saved = a->settings;
             a->req |= REQ_HOME;
             a->mode = PULDIR_MODE_HOMING;
             a->moving = true;
@@ -103,8 +102,8 @@ bool PulDir_isHomed(PulDir* a)              { return a->home.homed; }
 
 void puldir_home_restore(PulDir* a)
 {
-    memcpy(a->lim, a->home.saved_lim, sizeof a->lim);
-    a->req |= REQ_LIMITS;
+    a->settings = a->home.saved;
+    a->req |= REQ_SETTINGS;
 }
 
 void puldir_home_cancel(PulDir* a)
@@ -131,7 +130,7 @@ void puldir_home_fault(PulDir* a)
 }
 
 /* A phase timed out: the run ends unhomed, the pulses stop now. The next plan tick
- * applies the halt's REQ_HALT and REQ_LIMITS (the limits homeStart found) to the generator. */
+ * applies the halt's REQ_HALT and REQ_SETTINGS (the settings homeStart found) to the generator. */
 static void home_fail(PulDir* a, PulDirInc* out, int64_t pb)
 {
     a->home.fail = a->home.state;
@@ -140,9 +139,9 @@ static void home_fail(PulDir* a, PulDirInc* out, int64_t pb)
     port_lock();
     puldir_halt_locked(a);
     port_unlock();
-    /* The requests it left apply next tick; the generator stops and takes its limits back now. */
+    /* The requests it left apply next tick; the generator stops and takes its settings back now. */
     puldir_halt_generator(a, pb);
-    puldir_take_limits(a, a->home.saved_lim);
+    puldir_take_settings(a, a->home.saved);
     puldir_set_inc(a, out, 0);
 }
 
@@ -153,14 +152,15 @@ static void home_course(PulDir* a)
     a->settle = 0;
 }
 
-/* A moving phase: the homing speed toward the switch, or 0.2x back, as the speed limit, as
- * cFlexyStepper's jog did. The generator is at rest, so only vmax changes. */
+/* A moving phase: the homing speed toward the switch, or 0.2x back, as the speed setting, as
+ * cFlexyStepper's jog did. The generator is at rest, so only the speed changes. */
 static void home_jog(PulDir* a, bool away)
 {
     const PulDirHoming* h = &a->home;
     const float speed = away ? 0.2f * h->speed : h->speed;
-    const float l[4] = { speed, a->lim[1], a->lim[2], a->lim[3] };
-    puldir_take_limits(a, l);
+    MotionSettings s = a->settings;
+    s.speed = speed;
+    puldir_take_settings(a, s);
     const float dir = away ? -(float)h->dir : (float)h->dir;
     (void)MotionProfile_setEndless(&a->prof, dir * speed * a->conv);   /* finite: homeStart checked it */
     home_course(a);
@@ -243,7 +243,7 @@ void puldir_home_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
                 home_fail(a, out, pb);
                 return;
             }
-            puldir_take_limits(a, a->def);      /* the defaults, for the adjust */
+            puldir_take_settings(a, a->defaults); /* the defaults, for the adjust */
             a->target = (uint64_t)t << 32;
             (void)MotionProfile_setTarget(p, puldir_to_pulses((int64_t)(a->target - base)));
             home_course(a);

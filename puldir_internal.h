@@ -22,7 +22,7 @@ typedef struct {
 
 /* main -> plan requests (D17): set under the lock, applied by the next plan tick */
 enum {
-    REQ_LIMITS = 1u << 0, REQ_TARGET = 1u << 1, REQ_ENDLESS = 1u << 2, REQ_STOP = 1u << 3,
+    REQ_SETTINGS = 1u << 0, REQ_TARGET = 1u << 1, REQ_ENDLESS = 1u << 2, REQ_STOP = 1u << 3,
     REQ_HALT = 1u << 4, REQ_SETPOS = 1u << 5, REQ_STREAM_BEGIN = 1u << 6,
     REQ_HOME = 1u << 8
 };
@@ -93,8 +93,8 @@ bool puldir_steer(PulDir*, PulDirInc* out, int64_t T, int64_t end, int64_t pb, b
 int64_t puldir_to_fix(float pulses);          /* float pulses to 32.32 */
 float puldir_to_pulses(int64_t q);            /* 32.32 to float pulses, saturated to +-2^24 (D2) */
 int32_t puldir_div_trunc(int64_t d);          /* a 32.32 distance over one interval, as an increment */
-/* Limits in user units to the generator, and to lim[] only if it takes them. */
-void puldir_take_limits(PulDir*, const float l[4]);
+/* Settings in user units to the generator, and to the axis's own only if it takes them. */
+void puldir_take_settings(PulDir*, MotionSettings);
 /* The generator stops dead where the pulses are (pb, relative to the origin): a
  * new goal (E17), and a stream's idle generator stays put. */
 void puldir_halt_generator(PulDir*, int64_t pb);
@@ -105,11 +105,12 @@ bool puldir_run_generator(PulDir*, PulDirInc* out, uint64_t base, int64_t pb, in
 
 /* main context (puldir.c) */
 float puldir_rate_cap(float conv);            /* in user units: speeds at or above it are refused */
+MotionSettings puldir_in_pulses(const PulDir*, MotionSettings);   /* user units times the conversion */
 /* Under the lock, for every motion command: the fault latch and the mode at one instant (D17). */
 PulDirRefusal puldir_motion_check(const PulDir*);
 /* Under the lock, from main or the plan tick, for an axis outside a group's move: no rising edge
  * after this tick, the target where the pulses stopped, IDLE, REQ_HALT for the generator. A homing
- * run gets back the limits homeStart saved; its homing state is the caller's to set. */
+ * run gets back the settings homeStart saved; its homing state is the caller's to set. */
 void puldir_halt_locked(PulDir*);
 
 /* events (puldir_loop.c) */
