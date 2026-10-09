@@ -5,9 +5,9 @@
 #include "puldir_internal.h"
 
 /* The rate cap in user units: speeds at or above it are refused. */
-float puldir_rate_cap(float conv)
+float puldir_rate_cap(float pulses_per_unit)
 {
-    return (float)(puldir_timing.tick_hz / 2u) / conv;
+    return (float)(puldir_timing.tick_hz / 2u) / pulses_per_unit;
 }
 
 /* Init's refusal: no axis holds an event yet, so the line goes out now. */
@@ -35,7 +35,7 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
                                   : "plan period not 2 to 4096 whole pulse periods");
     memset(a, 0, sizeof *a);              /* every module at rest: drive off, no latch, homing IDLE */
     memcpy(a->name, name, len);
-    a->conv = c;
+    a->pulses_per_unit = c;
     /* The starting settings are 200 pulses/s, 200 pulses/s^2, no jerk: under the rate cap at any
      * timing, whatever the conversion. */
     const MotionSettings d = { 200.0f, 200.0f, 200.0f, 0.0f };
@@ -48,8 +48,8 @@ bool PulDir_init(PulDir* a, const char* name, float pulses_per_unit)
     a->refusal = PULDIR_R_NONE;
     /* puldir_timing_plan kept dt inside MotionProfile_init's range and the
      * settings are finite and positive, so neither call can refuse. */
-    (void)MotionProfile_init(&a->prof, 0.0f, puldir_timing.dt);
-    (void)MotionProfile_setSettings(&a->prof, d);
+    (void)MotionProfile_init(&a->profile, 0.0f, puldir_timing.dt);
+    (void)MotionProfile_setSettings(&a->profile, d);
 
     char b[PULDIR_LINE];
     snprintf(b, sizeof b, "[%s] max speed %.4f units/s, resolution %.4f units/pulse (pulse %lu us, plan %lu us)",
@@ -92,7 +92,7 @@ bool PulDir_register(PulDir* a)
 
 MotionSettings puldir_in_pulses(const PulDir* a, MotionSettings s)
 {
-    const float c = a->conv;
+    const float c = a->pulses_per_unit;
     return (MotionSettings){ s.speed * c, s.accel * c, s.decel * c, s.jerk * c };
 }
 
@@ -109,12 +109,12 @@ static bool settings_busy(PulDirMode m)
  * compares, a ceilf and two divisions, about 100 cycles. */
 static bool apply_settings(PulDir* a, MotionSettings s, bool defaults, const char* call)
 {
-    const float cap = puldir_rate_cap(a->conv);
+    const float cap = puldir_rate_cap(a->pulses_per_unit);
     const MotionSettings S = puldir_in_pulses(a, s);
     PulDirRefusal why = PULDIR_R_NONE;
     float value = 0.0f;
     port_lock();
-    const MotionSettingsCheck check = MotionProfile_checkSettings(&a->prof, S);
+    const MotionSettingsCheck check = MotionProfile_checkSettings(&a->profile, S);
     if (check == MOTION_SETTINGS_INVALID)
         why = PULDIR_R_ARG;
     else if (!(s.speed < cap))
@@ -135,7 +135,7 @@ static bool apply_settings(PulDir* a, MotionSettings s, bool defaults, const cha
     if (why == PULDIR_R_RATE)
         value = cap;
     else if (why == PULDIR_R_TAPS)          /* the log rounds the floor up to fit */
-        value = MotionProfile_minJerk(S.accel, S.decel, puldir_timing.dt) / a->conv;
+        value = MotionProfile_minJerk(S.accel, S.decel, puldir_timing.dt) / a->pulses_per_unit;
     if (why != PULDIR_R_NONE) {
         puldir_refuse(a, call, why, value);
         return false;
@@ -143,20 +143,17 @@ static bool apply_settings(PulDir* a, MotionSettings s, bool defaults, const cha
     return true;
 }
 
-/* One setting, at its offset in MotionSettings. The copy and the mode at one instant: a copy taken
+/* For a one-setting setter: the current settings into *s and the mode, at one instant. A copy taken
  * in HOMING could be stale by the time the run ends, so it is refused here, not by apply_settings. */
-static bool set_one(PulDir* a, size_t field, float x, const char* call)
+static bool current_settings(PulDir* a, MotionSettings* s, const char* call)
 {
     port_lock();
-    MotionSettings s = a->settings;
+    *s = a->settings;
     const bool busy = settings_busy(a->mode);
     port_unlock();
-    if (busy) {
+    if (busy)
         puldir_refuse(a, call, PULDIR_R_MODE, 0.0f);
-        return false;
-    }
-    memcpy((char*)&s + field, &x, sizeof x);
-    return apply_settings(a, s, false, call);
+    return !busy;
 }
 
 bool PulDir_setDefaults(PulDir* a, float speed, float accel, float decel, float jerk)
@@ -172,11 +169,42 @@ bool PulDir_restoreDefaults(PulDir* a)
     return apply_settings(a, d, false, "restoreDefaults");
 }
 
-#define FIELD(f) offsetof(MotionSettings, f)
-bool  PulDir_setSpeed(PulDir* a, float x)        { return set_one(a, FIELD(speed), x, "setSpeed"); }
-bool  PulDir_setAcceleration(PulDir* a, float x) { return set_one(a, FIELD(accel), x, "setAcceleration"); }
-bool  PulDir_setDeceleration(PulDir* a, float x) { return set_one(a, FIELD(decel), x, "setDeceleration"); }
-bool  PulDir_setJerk(PulDir* a, float x)         { return set_one(a, FIELD(jerk), x, "setJerk"); }
+bool PulDir_setSpeed(PulDir* a, float x)
+{
+    MotionSettings s;
+    if (!current_settings(a, &s, "setSpeed"))
+        return false;
+    s.speed = x;
+    return apply_settings(a, s, false, "setSpeed");
+}
+
+bool PulDir_setAcceleration(PulDir* a, float x)
+{
+    MotionSettings s;
+    if (!current_settings(a, &s, "setAcceleration"))
+        return false;
+    s.accel = x;
+    return apply_settings(a, s, false, "setAcceleration");
+}
+
+bool PulDir_setDeceleration(PulDir* a, float x)
+{
+    MotionSettings s;
+    if (!current_settings(a, &s, "setDeceleration"))
+        return false;
+    s.decel = x;
+    return apply_settings(a, s, false, "setDeceleration");
+}
+
+bool PulDir_setJerk(PulDir* a, float x)
+{
+    MotionSettings s;
+    if (!current_settings(a, &s, "setJerk"))
+        return false;
+    s.jerk = x;
+    return apply_settings(a, s, false, "setJerk");
+}
+
 float PulDir_speed(PulDir* a)                    { return a->settings.speed; }
 float PulDir_acceleration(PulDir* a)             { return a->settings.accel; }
 float PulDir_deceleration(PulDir* a)             { return a->settings.decel; }
@@ -215,7 +243,7 @@ static PulDirRefusal take_target(PulDir* a, uint64_t target)
 /* Targets are whole pulses (D4). */
 bool PulDir_moveTo(PulDir* a, float position)
 {
-    const float x = roundf(position * a->conv);
+    const float x = roundf(position * a->pulses_per_unit);
     PulDirRefusal why = PULDIR_R_ARG;
     if (x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX) {
         port_lock();
@@ -231,7 +259,7 @@ bool PulDir_moveTo(PulDir* a, float position)
 
 bool PulDir_moveBy(PulDir* a, float distance)
 {
-    const float dx = roundf(distance * a->conv);
+    const float dx = roundf(distance * a->pulses_per_unit);
     PulDirRefusal why = PULDIR_R_ARG;
     if (dx >= -2.0f * PULDIR_PULSES_MAX && dx <= 2.0f * PULDIR_PULSES_MAX) {   /* finite, and the sum fits */
         port_lock();
@@ -253,7 +281,7 @@ bool PulDir_moveBy(PulDir* a, float distance)
  * same check. */
 bool PulDir_jog(PulDir* a, float speed)
 {
-    const float cap = puldir_rate_cap(a->conv);
+    const float cap = puldir_rate_cap(a->pulses_per_unit);
     PulDirRefusal why = PULDIR_R_NONE;
     if (!isfinite(speed)) {
         why = PULDIR_R_ARG;
@@ -268,7 +296,7 @@ bool PulDir_jog(PulDir* a, float speed)
                 a->mode = PULDIR_MODE_STOPPING;
             }
         } else if (why == PULDIR_R_NONE) {
-            a->req_speed = speed * a->conv;
+            a->req_speed = speed * a->pulses_per_unit;
             a->req = (uint16_t)((a->req & ~REQ_MOTION) | REQ_ENDLESS);
             a->mode = PULDIR_MODE_PROFILE;
             a->moving = true;
@@ -315,7 +343,7 @@ void puldir_halt_locked(PulDir* a)
         puldir_home_restore(a);
     a->req = (uint16_t)((a->req & ~REQ_COURSE) | REQ_HALT);
     a->mode = PULDIR_MODE_IDLE;
-    a->vel_out = 0.0f;
+    a->velocity = 0.0f;
 }
 
 /* Immediate (D17): no rising edge after this tick, the target where the pulses stopped. A member
@@ -348,8 +376,8 @@ static int32_t emitted(const PulDir* a)
 }
 
 /* D18: the pulses the drive has been told, not the profile. */
-float PulDir_position(PulDir* a) { return (float)emitted(a) / a->conv; }
-float PulDir_velocity(PulDir* a) { return a->vel_out / a->conv; }
+float PulDir_position(PulDir* a) { return (float)emitted(a) / a->pulses_per_unit; }
+float PulDir_velocity(PulDir* a) { return a->velocity / a->pulses_per_unit; }
 
 float PulDir_target(PulDir* a)
 {
@@ -357,14 +385,14 @@ float PulDir_target(PulDir* a)
     const uint64_t t = a->target;
     port_unlock();
     const int32_t whole = (int32_t)(uint32_t)(t >> 32);
-    return ((float)whole + (float)(uint32_t)t * (1.0f / PULDIR_FIX)) / a->conv;
+    return ((float)whole + (float)(uint32_t)t * (1.0f / PULDIR_FIX)) / a->pulses_per_unit;
 }
 
 /* D18: the datum, in IDLE only. The pulse tick's count, position and edge move
  * together under the lock; the plan tick moves the generator (REQ_SETPOS). */
 bool PulDir_setPosition(PulDir* a, float pos)
 {
-    const float x = roundf(pos * a->conv);
+    const float x = roundf(pos * a->pulses_per_unit);
     PulDirRefusal why = PULDIR_R_NONE;
     if (!(x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX)) {
         why = PULDIR_R_ARG;

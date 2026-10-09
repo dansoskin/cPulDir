@@ -9,7 +9,7 @@ uint32_t fake_plan_phase;
 uint32_t fake_preempt;
 uint32_t fake_preempt_unlock;
 
-static uint32_t n_ticks;                /* pulse ticks per plan period, as the timers would run them */
+static uint32_t ticks_per_plan;         /* pulse ticks per plan period, as the timers would run them */
 
 static bool level[FAKE_PINS];
 static bool motion[FAKE_PINS];
@@ -27,8 +27,8 @@ bool fake_attach(uint32_t pulse_us, uint32_t plan_us)
 {
     if (!puldir_timing_pulse(pulse_us) || !puldir_timing_plan(plan_us))
         return false;
-    n_ticks = plan_us / pulse_us;
-    fake_plan_phase = n_ticks / 2u;
+    ticks_per_plan = plan_us / pulse_us;
+    fake_plan_phase = ticks_per_plan / 2u;
     return true;
 }
 
@@ -124,7 +124,7 @@ void fake_run(uint32_t ticks)
 {
     for (uint32_t i = 0; i < ticks; i++) {
         fake_pulse(false);
-        if (since_start % n_ticks == fake_plan_phase)
+        if (since_start % ticks_per_plan == fake_plan_phase)
             fake_plan();
     }
 }

@@ -25,7 +25,7 @@ static volatile uint8_t pub;            /* index of the last published set */
 static volatile uint8_t seq, latched;   /* publish count; publish count last latched */
 static volatile uint32_t due;           /* the tick the published set is due at: its boundary */
 static volatile uint32_t ticks = PULDIR_TICK_START;
-static volatile uint32_t left;          /* ticks left in this interval: N from puldir_timing_take on */
+static volatile uint32_t left;          /* ticks left in this interval, ticks_per_plan at a boundary */
 static volatile uint32_t overruns;
 static volatile uint32_t late_sets;     /* sets latched after their boundary: published too late */
 
@@ -56,13 +56,13 @@ bool puldir_timing_take(void)
     PulDirTiming* t = &puldir_timing;
     if (!timing_open() || t->pulse_us == 0u || t->plan_us % t->pulse_us != 0u)
         return t->set;
-    const uint32_t n = t->plan_us / t->pulse_us;
-    if (n < 2u || n > 4096u)
+    const uint32_t ticks_per_plan = t->plan_us / t->pulse_us;
+    if (ticks_per_plan < 2u || ticks_per_plan > 4096u)
         return false;
     t->tick_hz = PULDIR_TIMER_HZ / t->pulse_us;
-    t->n = n;
+    t->ticks_per_plan = ticks_per_plan;
     t->dt = (float)t->plan_us / (float)PULDIR_TIMER_HZ;   /* a division rounds to the nearest float */
-    left = n;
+    left = ticks_per_plan;
     t->set = true;
     return true;
 }
@@ -108,10 +108,10 @@ void puldir_pulse_tick(bool overrun)
     if (overrun)
         overruns++;
     const uint32_t n = puldir_naxes;
-    const uint32_t n_plan = puldir_timing.n;
+    const uint32_t ticks_per_plan = puldir_timing.ticks_per_plan;
     /* A boundary latches the whole set; so does any tick at or past the set's due tick, so a set
      * published late runs the rest of its interval rather than a whole one later. */
-    if (latched != seq && (left == n_plan || (int32_t)(ticks - due) >= 0)) {
+    if (latched != seq && (left == ticks_per_plan || (int32_t)(ticks - due) >= 0)) {
         const PulDirInc* s = sets[pub];
         for (uint32_t i = 0; i < n; i++) {
             ax[i].inc = s[i].inc;
@@ -147,7 +147,7 @@ void puldir_pulse_tick(bool overrun)
     }
     ticks++;
     if (--left == 0)
-        left = n_plan;
+        left = ticks_per_plan;
 }
 
 /* Before PulDir_start: take the next slot at rest, inc 0, dir +1, at the datum. */

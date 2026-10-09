@@ -46,7 +46,7 @@ typedef struct PulDir {
     puldir_pin_t pul, dir;
     bool  pul_active_low, dir_inverted;
     bool  has_pins;
-    float conv;                          /* pulses per user unit, > 0 */
+    float pulses_per_unit;               /* > 0, fixed at init */
     MotionSettings defaults;             /* user units */
     MotionSettings settings;             /* the ones in force, user units */
     bool  log_on;
@@ -58,11 +58,11 @@ typedef struct PulDir {
 
     /* plan tick state */
     volatile PulDirMode mode;
-    MotionProfile prof;                  /* pulses, relative to origin */
+    MotionProfile profile;               /* pulses, relative to origin */
     uint64_t target;                     /* absolute, 32.32 pulses */
     int32_t  origin;
     volatile bool moving;
-    volatile float vel_out;              /* pulses/s, exactly 0.0f when stopped */
+    volatile float velocity;             /* commanded, pulses/s; exactly 0.0f when stopped */
     uint8_t  settle;                     /* plan runs left before IDLE (D19) */
     int8_t   dir_out;                    /* the last published direction, +1 or -1 */
     bool     arrived;                    /* the final interval is published; settling */

@@ -13,18 +13,18 @@
 
 /* The timing main hands to fake_attach, from the command line: pulse_us plan_us. */
 static uint32_t pulse_us = 20u, plan_us = 1000u;
-#define N       puldir_timing.n
-#define TICK_HZ puldir_timing.tick_hz
-#define PLAN_HZ (1000000u / plan_us)
-#define DT      puldir_timing.dt
+#define TICKS_PER_PLAN puldir_timing.ticks_per_plan
+#define TICK_HZ        puldir_timing.tick_hz
+#define PLAN_HZ        (1000000u / plan_us)
+#define DT             puldir_timing.dt
 
 /* The hand-built timing tests make whole-interval moves of up to 10.25 pulses and
- * run 10,000 ticks as whole intervals: at another N they skip. */
-static bool n_fits(void)
+ * run 10,000 ticks as whole intervals: at other ticks per plan they skip. */
+static bool whole_intervals_fit(void)
 {
-    if (N >= 32u && 10000u % N == 0u)
+    if (TICKS_PER_PLAN >= 32u && 10000u % TICKS_PER_PLAN == 0u)
         return true;
-    printf("  skipped at N = %u\n", (unsigned)N);
+    printf("  skipped at %u ticks per plan\n", (unsigned)TICKS_PER_PLAN);
     return false;
 }
 
@@ -95,9 +95,9 @@ static void setup(uint8_t k)
     start();
 }
 
-static void setup_conv(uint8_t k, float conv)
+static void setup_conv(uint8_t k, float pulses_per_unit)
 {
-    next_conv = conv;
+    next_conv = pulses_per_unit;
     setup(k);
 }
 
@@ -124,7 +124,7 @@ static PulDirSnap st(uint8_t slot)
 static bool high(uint8_t slot) { return st(slot).high; }
 
 /* The next boundary's tick: the due tick of a set published now, as the plan tick computes it. */
-static uint32_t next_boundary(void) { return PulDir_ticks() + left() % N; }
+static uint32_t next_boundary(void) { return PulDir_ticks() + left() % TICKS_PER_PLAN; }
 
 /* Write every registered axis's shadow entry, then publish. */
 static void publish_all(const int32_t* inc, const int8_t* dir)
@@ -148,7 +148,7 @@ static void pulse(uint32_t n)
 /* Run until the next tick is a boundary (none if it already is). */
 static void to_boundary(void)
 {
-    while (left() != N)
+    while (left() != TICKS_PER_PLAN)
         fake_pulse(false);
 }
 
@@ -193,16 +193,16 @@ static void t_setup(void)
     assert(memcmp(&a, &junk, sizeof a) == 0);
     assert(PulDir_init(&a, "fifteen chars o", 1.0f));
     assert(strcmp(a.name, "fifteen chars o") == 0);
-    assert(a.conv == 1.0f);
+    assert(a.pulses_per_unit == 1.0f);
     const MotionSettings first = { 200.0f, 200.0f, 200.0f, 0.0f };
     assert(same_settings(a.defaults, first) && same_settings(a.settings, first));
     assert(a.stream.catchup_ms == PULDIR_CATCHUP_MS);
     assert(a.log_on);
     assert(a.slot == PULDIR_MAX_AXES);
     assert(!a.has_pins && a.mode == PULDIR_MODE_IDLE && a.events == 0);
-    assert(a.prof.dt == DT && a.prof.done && a.prof.pos == 0.0f);
-    assert(a.prof.settings.speed == 200.0f && a.prof.settings.accel == 200.0f &&
-           a.prof.settings.decel == 200.0f && a.prof.settings.jerk == 0.0f);
+    assert(a.profile.dt == DT && a.profile.done && a.profile.pos == 0.0f);
+    assert(a.profile.settings.speed == 200.0f && a.profile.settings.accel == 200.0f &&
+           a.profile.settings.decel == 200.0f && a.profile.settings.jerk == 0.0f);
 
     assert(PulDir_init(&a, "", 1.0f));
     assert(a.name[0] == '\0');
@@ -232,7 +232,7 @@ static void t_setup(void)
 
     /* live and published entries start at dir +1, inc 0: no pulse, no direction write */
     start();
-    pulse(3u * N);
+    pulse(3u * TICKS_PER_PLAN);
     assert(nw == 0);
     for (uint8_t i = 0; i < PULDIR_MAX_AXES; i++) {
         const PulDirSnap s = st(i);
@@ -251,15 +251,15 @@ static void t_register_after_start(void)
     assert((b.events & PULDIR_EV_REFUSED) && b.refusal == PULDIR_R_BUSY);
 }
 
-/* The timing the attach calls handed over, fixed by init: the plan period is N pulse periods, one
+/* The timing the attach calls handed over, fixed by init: the plan period is ticks_per_plan pulse periods, one
  * count per microsecond. Once fixed, no attach call is taken. */
 static void t_timer_counts(void)
 {
     setup(1);
     assert(puldir_timing.set && puldir_timing.pulse_us == pulse_us && puldir_timing.plan_us == plan_us);
-    assert(N * pulse_us == plan_us && TICK_HZ == 1000000u / pulse_us);
-    assert(DT == (float)plan_us / 1.0e6f && ax[0].prof.dt == DT);
-    assert(left() == N);
+    assert(TICKS_PER_PLAN * pulse_us == plan_us && TICK_HZ == 1000000u / pulse_us);
+    assert(DT == (float)plan_us / 1.0e6f && ax[0].profile.dt == DT);
+    assert(left() == TICKS_PER_PLAN);
     assert(!fake_attach(pulse_us, plan_us) && !puldir_timing_pulse(10u) && !puldir_timing_plan(500u));
     assert(puldir_timing.pulse_us == pulse_us && puldir_timing.plan_us == plan_us);
 }
@@ -298,20 +298,20 @@ static void publish2(int32_t inc0, int8_t dir0, int32_t inc1, int8_t dir1)
  * made just before the boundary tick b. Returns the tick of the direction write. */
 static uint32_t reverse_at(uint8_t i, uint32_t b)
 {
-    assert(PulDir_ticks() == b && left() == N);
+    assert(PulDir_ticks() == b && left() == TICKS_PER_PLAN);
     const uint8_t pul = (uint8_t)(2u * i), dir = (uint8_t)(2u * i + 1u);
     const size_t from = nw;
     if (i == 0)
         publish2(-(1 << 30), -1, 0, st(1).dir);
     else
         publish2(0, st(0).dir, -(1 << 30), -1);
-    pulse(2u * N);
+    pulse(2u * TICKS_PER_PLAN);
     uint32_t td[4];
     assert(writes(from, dir, false, td, 4) == 1);
     assert(!wrote_at(pul, td[0]));        /* never on a tick with a pulse edge */
     const size_t r = writes(from, pul, true, rise, MAX_EDGES);
     assert(r > 0);
-    assert(rise[0] - td[0] >= 1u && rise[0] - td[0] < 2u * N);   /* setup: at least one tick */
+    assert(rise[0] - td[0] >= 1u && rise[0] - td[0] < 2u * TICKS_PER_PLAN);   /* setup: at least one tick */
     assert(st(i).dir == -1 && !fake_level(dir));
     return td[0];
 }
@@ -323,18 +323,18 @@ static void t_dir_change(void)
 
     /* axis 0: up just short of 4 pulses in one interval, so its third edge is
      * long past when the boundary comes: the direction moves on the boundary tick */
-    publish2((int32_t)(four / N), 1, 0, 1);
+    publish2((int32_t)(four / TICKS_PER_PLAN), 1, 0, 1);
     to_boundary();
-    pulse(N);
+    pulse(TICKS_PER_PLAN);
     assert(st(0).count == 3 && !high(0));
     uint32_t b = PulDir_ticks();
     assert(reverse_at(0, b) == b);
 
     /* axis 1: up just over 4 pulses, so its fourth edge rises on the interval's
      * last tick and the boundary tick lowers it: the direction moves one tick later */
-    publish2(0, -1, (int32_t)((four + N - 1u) / N), 1);
+    publish2(0, -1, (int32_t)((four + TICKS_PER_PLAN - 1u) / TICKS_PER_PLAN), 1);
     to_boundary();
-    pulse(N);
+    pulse(TICKS_PER_PLAN);
     assert(st(1).count == 4 && high(1));
     b = PulDir_ticks();
     const size_t from = nw;
@@ -358,7 +358,7 @@ static void t_polarity(void)
     for (int leg = 0; leg < 2; leg++) {
         publish_all(leg ? inc_down : inc_up, leg ? down : up);
         to_boundary();
-        for (uint32_t i = 0; i < 4u * N; i++) {
+        for (uint32_t i = 0; i < 4u * TICKS_PER_PLAN; i++) {
             fake_pulse(false);
             assert(fake_level(2) == !fake_level(0));
             assert(fake_level(3) == !fake_level(1));
@@ -381,7 +381,7 @@ static void t_polarity(void)
 /* Run one tick; return true if the live increments changed (all four at once). */
 static bool tick_and_check(const int32_t* before_set, const int32_t* after_set, bool* latched)
 {
-    const bool boundary = left() == N;
+    const bool boundary = left() == TICKS_PER_PLAN;
     fake_pulse(false);
     int changed = 0;
     for (uint8_t i = 0; i < 4; i++) {
@@ -404,7 +404,7 @@ static void t_latch(void)
     int32_t cur[4] = { 0, 0, 0, 0 }, next[4];
     /* the four writes start at every tick of the interval, so a pulse tick
      * falls at every point of the writes and publish lands at every phase */
-    for (uint32_t phase = 0; phase < N; phase++) {
+    for (uint32_t phase = 0; phase < TICKS_PER_PLAN; phase++) {
         for (uint8_t i = 0; i < 4; i++)
             next[i] = (int32_t)(1000u * (phase + 1u) + i);
         to_boundary();
@@ -416,12 +416,12 @@ static void t_latch(void)
             s[i].dir = dir[i];
             assert(!tick_and_check(cur, next, &latched));   /* not before publish */
         }
-        const bool boundary_next = left() == N;
+        const bool boundary_next = left() == TICKS_PER_PLAN;
         puldir_publish(next_boundary());
         if (boundary_next) {                 /* published one tick before a boundary */
             assert(tick_and_check(cur, next, &latched));
         } else {
-            while (left() != N)
+            while (left() != TICKS_PER_PLAN)
                 assert(!tick_and_check(cur, next, &latched));
             assert(tick_and_check(cur, next, &latched));
         }
@@ -449,14 +449,14 @@ static void t_inc_max(void)
 {
     /* axis 0 up and axis 1 down from rest, for 10,000 ticks (whole intervals) */
     setup(2);
-    if (!n_fits())
+    if (!whole_intervals_fit())
         return;
-    const uint32_t T = 10000u;            /* whole intervals: n_fits */
+    const uint32_t T = 10000u;            /* whole intervals: whole_intervals_fit */
     publish2(PULDIR_INC_MAX, 1, -PULDIR_INC_MAX, -1);
     to_boundary();
     pulse(T);
     publish2(0, 1, 0, -1);
-    assert(left() == N);
+    assert(left() == TICKS_PER_PLAN);
     pulse(1);                             /* the boundary: lowers a pulse raised on the last tick */
     check_max_rate(0, st(0).count);
     check_max_rate(2, st(1).count);
@@ -465,14 +465,14 @@ static void t_inc_max(void)
 
 /* ---- D3: hysteretic edges ---------------------------------------------------------------- */
 
-/* One interval (N ticks) at inc; every edge must come on the first tick the
+/* One interval (ticks_per_plan ticks) at inc; every edge must come on the first tick the
  * position reaches the next edge in the direction of travel. */
 static size_t interval(int32_t inc, int8_t dir)
 {
     publish1(inc, dir);
     to_boundary();
     size_t edges = 0;
-    for (uint32_t i = 0; i < N; i++) {
+    for (uint32_t i = 0; i < TICKS_PER_PLAN; i++) {
         const uint32_t c = (uint32_t)st(0).count;
         const uint64_t before = st(0).Pb;
         fake_pulse(false);
@@ -491,25 +491,25 @@ static size_t interval(int32_t inc, int8_t dir)
 static void t_hysteresis(void)
 {
     setup(1);
-    if (!n_fits())
+    if (!whole_intervals_fit())
         return;
     const int64_t one = (int64_t)PULDIR_ONE;
     /* up to 10.25 in one interval */
-    const int32_t inc_up = (int32_t)((41 * one / 4) / N);
+    const int32_t inc_up = (int32_t)((41 * one / 4) / TICKS_PER_PLAN);
     assert(inc_up <= PULDIR_INC_MAX);
     assert(interval(inc_up, 1) == 10);
     assert(st(0).count == 10 && (int64_t)st(0).Pb > 10 * one);
 
     /* down 1.5: through 10.0 with no edge, one edge at 9.0. The first tick of a
      * reversal writes the direction and does not move. */
-    const int32_t inc_down = (int32_t)((3 * one / 2) / (N - 1));
+    const int32_t inc_down = (int32_t)((3 * one / 2) / (TICKS_PER_PLAN - 1));
     assert(interval(-inc_down, -1) == 1);
     assert(st(0).count == 9 && (int64_t)st(0).Pb < 9 * one && (int64_t)st(0).Pb > 8 * one);
 
     /* dither across 9.0 and 9.5, between 8.75 and 9.75, for at least 1,000 ticks: no edges */
     const size_t from = nw;
-    const int32_t inc_d = (int32_t)(one / (N - 1));
-    const uint32_t cycles = (1000u + 2u * N - 1u) / (2u * N);
+    const int32_t inc_d = (int32_t)(one / (TICKS_PER_PLAN - 1));
+    const uint32_t cycles = (1000u + 2u * TICKS_PER_PLAN - 1u) / (2u * TICKS_PER_PLAN);
     for (uint32_t k = 0; k < cycles; k++) {
         assert(interval(inc_d, 1) == 0);
         assert((int64_t)st(0).Pb > 9 * one + one / 2);
@@ -529,7 +529,7 @@ static void t_kill(void)
     const int32_t q = 1 << 30, q2 = 1 << 29;
     publish2(q, 1, q, 1);
     to_boundary();
-    pulse(N / 2u);
+    pulse(TICKS_PER_PLAN / 2u);
     publish2(q, 1, q2, 1);                /* pending until the next boundary */
     port_lock();
     puldir_kill(0);
@@ -538,7 +538,7 @@ static void t_kill(void)
     const size_t from = nw;
     assert(st(0).inc == 0 && st(1).inc == q);
     to_boundary();
-    pulse(2u * N);
+    pulse(2u * TICKS_PER_PLAN);
     assert(st(0).inc == 0 && st(1).inc == q2);   /* the pending set lost axis 0's inc only */
     assert(st(0).Pb == P0);
     assert(writes(from, 0, true, rise, MAX_EDGES) == 0);    /* no edge after the kill */
@@ -554,8 +554,8 @@ static void t_datum(void)
     port_unlock();
     PulDirSnap s = st(0);
     assert(s.count == -5 && s.Pb == (uint64_t)(int64_t)-5 << 32 && s.dir == 1);
-    assert(interval(q, 1) == N / 4u);     /* first edge at -4.0 */
-    assert(st(0).count == -5 + (int32_t)(N / 4u));
+    assert(interval(q, 1) == TICKS_PER_PLAN / 4u);     /* first edge at -4.0 */
+    assert(st(0).count == -5 + (int32_t)(TICKS_PER_PLAN / 4u));
 
     (void)interval(-q, -1);
     assert(interval(0, -1) == 0);
@@ -564,8 +564,8 @@ static void t_datum(void)
     port_unlock();
     s = st(0);
     assert(s.count == 3 && s.Pb == (uint64_t)3 << 32 && s.dir == -1);
-    assert(interval(-q, -1) == N / 4u);   /* first edge at 2.0 */
-    assert(st(0).count == 3 - (int32_t)(N / 4u));
+    assert(interval(-q, -1) == TICKS_PER_PLAN / 4u);   /* first edge at 2.0 */
+    assert(st(0).count == 3 - (int32_t)(TICKS_PER_PLAN / 4u));
 
     /* the count wraps: from INT32_MAX - 2 up through INT32_MAX to INT32_MIN */
     (void)interval(q, 1);
@@ -575,10 +575,10 @@ static void t_datum(void)
     port_unlock();
     s = st(0);
     assert(s.count == INT32_MAX - 2 && s.Pb == (uint64_t)(INT32_MAX - 2) << 32 && s.dir == 1);
-    assert(interval(q, 1) == N / 4u);     /* every edge at its crossing, across the wrap */
-    assert(st(0).count == (int32_t)((uint32_t)(INT32_MAX - 2) + N / 4u));
+    assert(interval(q, 1) == TICKS_PER_PLAN / 4u);     /* every edge at its crossing, across the wrap */
+    assert(st(0).count == (int32_t)((uint32_t)(INT32_MAX - 2) + TICKS_PER_PLAN / 4u));
     assert(st(0).count < 0);
-    assert(interval(-q, -1) == N / 4u - 1u);   /* back down across it; the reversal skips one tick */
+    assert(interval(-q, -1) == TICKS_PER_PLAN / 4u - 1u);   /* back down across it; the reversal skips one tick */
     assert(st(0).count == INT32_MAX - 1);
 }
 
@@ -596,7 +596,7 @@ static void t_overrun(void)
 
 /* ---- the plan tick ------------------------------------------------------------------------- */
 
-#define M ((int64_t)N * N)                    /* D6's margin, in 2^-32 pulse */
+#define M ((int64_t)TICKS_PER_PLAN * TICKS_PER_PLAN)                    /* D6's margin, in 2^-32 pulse */
 
 /* Rising edges per axis (active-high pins), signed by the direction pin's level,
  * and the ticks of axis 0's rising and falling edges. */
@@ -628,18 +628,18 @@ static void count_write(uint32_t tick, uint8_t id, bool level)
 
 static void run_until_idle(PulDir* a, uint32_t max_ticks)
 {
-    for (uint32_t t = 0; PulDir_isMoving(a); t += N) {
+    for (uint32_t t = 0; PulDir_isMoving(a); t += TICKS_PER_PLAN) {
         assert(t < max_ticks);
-        fake_run(N);
+        fake_run(TICKS_PER_PLAN);
     }
 }
 
-/* Tracking (test 11): a plan tick aims its set at origin + prof.pos; when that
+/* Tracking (test 11): a plan tick aims its set at origin + profile.pos; when that
  * set's interval ends, the pulse position must be within one increment of it.
  * D6 holds the end up to M short while the profile is within M of the target.
  * Guideline 5.4's "one increment" holds except on an interval whose set reverses
  * the direction: the direction write costs a tick, and one more when the latch
- * tick lowers a pulse, so there P may trail by 2 |inc| + N. */
+ * tick lowers a pulse, so there P may trail by 2 |inc| + ticks_per_plan. */
 typedef struct { bool valid; uint64_t aim; bool near; int8_t dir; bool reversal; } Aim;
 static Aim aim_next, aim_cur;
 static int64_t worst_track, worst_rev;        /* the largest |P - aim| - |inc| away from the target */
@@ -647,9 +647,9 @@ static int64_t worst_raw;                     /* the largest |P - aim| itself, l
 
 static void track_run(PulDir* a, uint32_t ticks)
 {
-    const uint32_t plan_left = fake_plan_phase == 0u ? N : N - fake_plan_phase;
+    const uint32_t plan_left = fake_plan_phase == 0u ? TICKS_PER_PLAN : TICKS_PER_PLAN - fake_plan_phase;
     for (uint32_t k = 0; k < ticks; k++) {
-        if (left() == N) {                    /* this tick latches: the running set has finished */
+        if (left() == TICKS_PER_PLAN) {                    /* this tick latches: the running set has finished */
             const PulDirSnap s = st(0);
             if (aim_cur.valid) {
                 int64_t err = (int64_t)(s.Pb - aim_cur.aim);
@@ -661,7 +661,7 @@ static void track_run(PulDir* a, uint32_t ticks)
                     *worst = err - inc;
                 if (!aim_cur.near && !aim_cur.reversal && err > worst_raw)
                     worst_raw = err;
-                assert(err <= (aim_cur.reversal ? 2 : 1) * inc + (int64_t)N + (aim_cur.near ? M : 0));
+                assert(err <= (aim_cur.reversal ? 2 : 1) * inc + (int64_t)TICKS_PER_PLAN + (aim_cur.near ? M : 0));
             }
             aim_cur = aim_next;
             aim_cur.reversal = aim_cur.dir != s.dir;    /* the set about to latch turns the pin */
@@ -670,7 +670,7 @@ static void track_run(PulDir* a, uint32_t ticks)
         if (left() == plan_left) {
             fake_plan();
             const uint64_t aim = ((uint64_t)(uint32_t)a->origin << 32)
-                               + (uint64_t)(int64_t)(a->prof.pos * PULDIR_FIX);
+                               + (uint64_t)(int64_t)(a->profile.pos * PULDIR_FIX);
             int64_t gap = (int64_t)(a->target - aim);
             if (gap < 0)
                 gap = -gap;
@@ -684,9 +684,9 @@ static void track_run(PulDir* a, uint32_t ticks)
 
 static void track_until_idle(PulDir* a, uint32_t max_ticks)
 {
-    for (uint32_t t = 0; PulDir_isMoving(a); t += N) {
+    for (uint32_t t = 0; PulDir_isMoving(a); t += TICKS_PER_PLAN) {
         assert(t < max_ticks);
-        track_run(a, N);
+        track_run(a, TICKS_PER_PLAN);
     }
 }
 
@@ -702,11 +702,12 @@ static float frand(float lo, float hi) { return lo + (hi - lo) * (float)(rnd() >
 
 /* Settings in pulses, set in user units at a new conversion. The conversion is fixed at init, so the
  * test writes it into the axis, at rest, as init would. */
-static void set_settings(PulDir* a, float conv, float v, float acc, float dec, float jerk)
+static void set_settings(PulDir* a, float pulses_per_unit, float v, float acc, float dec, float jerk)
 {
     assert(!a->moving && a->mode == PULDIR_MODE_IDLE);
-    a->conv = conv;
-    assert(PulDir_setDefaults(a, v / conv, acc / conv, dec / conv, jerk / conv));
+    a->pulses_per_unit = pulses_per_unit;
+    assert(PulDir_setDefaults(a, v / pulses_per_unit, acc / pulses_per_unit, dec / pulses_per_unit,
+                              jerk / pulses_per_unit));
 }
 
 static void t_move_exact(void)
@@ -723,19 +724,20 @@ static void t_move_exact(void)
         if (move == 0)
             rng = seeds[n / 1000];
         if (move % 250 == 0)
-            fake_plan_phase = (uint32_t)move / 250u * (N / 3u);   /* 0, N/3, 2N/3, 3N/3 - 1 */
-        if (fake_plan_phase >= N)
-            fake_plan_phase = N - 1u;
-        const float conv = frand(10.0f, 500.0f);
+            /* 0, 1/3, 2/3 and 3/3 of an interval, the last capped below */
+            fake_plan_phase = (uint32_t)move / 250u * (TICKS_PER_PLAN / 3u);
+        if (fake_plan_phase >= TICKS_PER_PLAN)
+            fake_plan_phase = TICKS_PER_PLAN - 1u;
+        const float pulses_per_unit = frand(10.0f, 500.0f);
         const float v = frand(200.0f, fminf(20000.0f, 0.9f * cap));
         const float acc = frand(v / 0.2f, v / 0.02f), dec = frand(v / 0.2f, v / 0.02f);
         const float jerk = move % 2 ? 0.0f : 2.0f * fmaxf(acc, dec) / (frand(2.0f, 200.0f) * dt);
-        set_settings(a, conv, v, acc, dec, jerk);
+        set_settings(a, pulses_per_unit, v, acc, dec, jerk);
 
         const int32_t c0 = st(0).count;
         float d = rnd() % 8u == 0u ? frand(-3.0f, 3.0f) : frand(-0.3f, 0.3f) * v;
-        const float target = ((float)c0 + d) / conv;
-        const int32_t want = (int32_t)roundf(target * conv);
+        const float target = ((float)c0 + d) / pulses_per_unit;
+        const int32_t want = (int32_t)roundf(target * pulses_per_unit);
         const uint64_t e0 = edges[0];
         const int64_t n0 = net[0];
 
@@ -745,11 +747,11 @@ static void t_move_exact(void)
         int32_t final = want;
         if (retarget) {
             /* part way there, a target behind the axis: it must reverse */
-            track_run(a, (rnd() % 100u + 20u) * N);
+            track_run(a, (rnd() % 100u + 20u) * TICKS_PER_PLAN);
             const int32_t c = st(0).count;
             const float back = (float)(want > c0 ? -1 : 1) * frand(1.0f, 0.3f * v);
-            const float t2 = ((float)c + back) / conv;
-            final = (int32_t)roundf(t2 * conv);
+            const float t2 = ((float)c + back) / pulses_per_unit;
+            final = (int32_t)roundf(t2 * pulses_per_unit);
             retargets++;
             if (PulDir_isMoving(a)) {
                 assert(PulDir_moveTo(a, t2));
@@ -766,14 +768,14 @@ static void t_move_exact(void)
         assert(net[0] - n0 == (int64_t)s.count - c0);
         if (!retarget)
             assert(edges[0] - e0 == (uint64_t)(s.count > c0 ? s.count - c0 : c0 - s.count));
-        assert(PulDir_target(a) == (float)final / conv);
+        assert(PulDir_target(a) == (float)final / pulses_per_unit);
         if (s.count != c0)                    /* D6: the final edge is the arrival interval's last tick */
-            assert((last_rise[0] - PULDIR_TICK_START) % N == N - 1u);
+            assert((last_rise[0] - PULDIR_TICK_START) % TICKS_PER_PLAN == TICKS_PER_PLAN - 1u);
         assert(a->mode == PULDIR_MODE_IDLE && !high(0));
     }
     assert(reversals > 150);
-    printf("  move_exact: %d retargets, %d reversals, worst |P - aim| - |inc| = %lld units, %lld on reversals (N = %u)\n",
-           retargets, reversals, (long long)worst_track, (long long)worst_rev, (unsigned)N);
+    printf("  move_exact: %d retargets, %d reversals, worst |P - aim| - |inc| = %lld units, %lld on reversals (%u ticks per plan)\n",
+           retargets, reversals, (long long)worst_track, (long long)worst_rev, (unsigned)TICKS_PER_PLAN);
 }
 
 /* Test 10: the axis's rising edges against a bare generator's integer crossings. */
@@ -815,7 +817,7 @@ static void parity(float jerk)
         while (gen[j] < (float)m)
             j++;
         const double c = ((double)(j - 1u) + ((double)m - (double)gen[j - 1u])
-                          / ((double)gen[j] - (double)gen[j - 1u])) * (double)N;
+                          / ((double)gen[j] - (double)gen[j - 1u])) * (double)TICKS_PER_PLAN;
         const double e = (double)(rise[m - 1] - rise[0]);
         if (m == 1)
             lat = -c;
@@ -879,14 +881,14 @@ static void t_arrival_twice(void)
     fake_on_write(count_write);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 2000.0f, 20000.0f, 20000.0f, 0.0f));
-    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 6; k++) {
         fake_plan_phase = phases[k % 3];
         assert(PulDir_setJerk(a, k < 3 ? 0.0f : 2.0e6f));      /* jerk: a 20-tap window */
         const int32_t c0 = st(0).count, want = c0 + (k % 2 ? -300 : 300);
         const int64_t n0 = net[0];
         assert(PulDir_moveTo(a, (float)want));
-        const uint32_t plan_left = fake_plan_phase == 0u ? N : N - fake_plan_phase;
+        const uint32_t plan_left = fake_plan_phase == 0u ? TICKS_PER_PLAN : TICKS_PER_PLAN - fake_plan_phase;
         bool twice = false;
         for (uint32_t t = 0; PulDir_isMoving(a); t++) {
             assert(t < 10u * TICK_HZ);
@@ -915,12 +917,12 @@ static void t_creep(void)
     assert(PulDir_setDefaults(a, 50.0f, 20.0f, 20.0f, jerk));
     const int32_t steps[4] = { 3, -1, 2, -4 };
     for (int k = 0; k < 8; k++) {
-        fake_plan_phase = (uint32_t)k * (N / 8u);
+        fake_plan_phase = (uint32_t)k * (TICKS_PER_PLAN / 8u);
         const int32_t c0 = st(0).count, want = c0 + steps[k % 4];
         assert(PulDir_moveTo(a, (float)want));
         run_until_idle(a, 10u * TICK_HZ);
         assert(st(0).count == want);
-        assert((last_rise[0] - PULDIR_TICK_START) % N == N - 1u);
+        assert((last_rise[0] - PULDIR_TICK_START) % TICKS_PER_PLAN == TICKS_PER_PLAN - 1u);
     }
 }
 
@@ -952,7 +954,7 @@ static void t_refusals(void)
     PulDir_loop(a);
     assert(nlines == 1 && strstr(lines[0], "moveTo refused") && strncmp(lines[0], "[a0] ", 5) == 0);
 
-    /* init's settings are 200 pulses/s and 200 pulses/s^2: 100 units at conv 2 */
+    /* init's settings are 200 pulses/s and 200 pulses/s^2: 100 units at 2 pulses per unit */
     assert(PulDir_speed(a) == 100.0f && PulDir_acceleration(a) == 100.0f && a->defaults.decel == 100.0f);
     assert(PulDir_setAcceleration(a, 200.0f) && PulDir_setDeceleration(a, 200.0f));
 
@@ -990,7 +992,7 @@ static void t_refusals(void)
     PulDir_setLogging(a, true);
 
     /* a landing, with the position formatted from integers */
-    assert(PulDir_moveTo(a, -12.25f));     /* conv 2: -24.5 pulses rounds to -25 (away from zero) */
+    assert(PulDir_moveTo(a, -12.25f));     /* 2 pulses per unit: -24.5 pulses rounds to -25 (away from zero) */
     assert(PulDir_target(a) == -12.5f);
     nlines = 0;
     run_until_idle(a, 10u * TICK_HZ);
@@ -1082,7 +1084,7 @@ static void t_setup_order(void)
     run_until_idle(a, TICK_HZ);
     assert(st(0).count == 101 && edges[0] == 1 && net[0] == 1 && !high(0));
     assert(PulDir_position(a) == 101.0f && PulDir_target(a) == 101.0f);
-    assert(a->origin == 101 && a->prof.done && a->prof.pos == 0.0f);
+    assert(a->origin == 101 && a->profile.done && a->profile.pos == 0.0f);
 }
 
 /* One move under the late-publish fault, tick by tick: the count never leaves the span between
@@ -1124,7 +1126,7 @@ static void t_late_publish(void)
     const float v = 9.0f * (float)PLAN_HZ;      /* about 9 pulses per interval */
     for (uint8_t i = 0; i < 2; i++)
         assert(PulDir_setDefaults(&ax[i], v, 50.0f * v, 50.0f * v, 0.0f));
-    fake_plan_phase = N - 1u;                   /* one tick of slack before the boundary */
+    fake_plan_phase = TICKS_PER_PLAN - 1u;                   /* one tick of slack before the boundary */
     fake_preempt_unlock = 2u;                   /* and two ticks run before the publish */
 
     /* the review's reproduction, then the same with jerk on */
@@ -1177,18 +1179,18 @@ static void t_late_publish(void)
      * late sets are one per plan tick run under it, and a normal move adds none */
     const uint32_t faulted = plan_ticks;
     fake_preempt_unlock = 0u;
-    fake_plan_phase = N / 2u;
-    fake_run(2u * N);
+    fake_plan_phase = TICKS_PER_PLAN / 2u;
+    fake_run(2u * TICKS_PER_PLAN);
     const uint32_t late0 = PulDir_lateSets();
     assert(late0 == faulted);
     late_move(a, 0);
     assert(PulDir_lateSets() == late0);
-    printf("  late_publish: %u sets latched late (N = %u)\n", (unsigned)late, (unsigned)N);
+    printf("  late_publish: %u sets latched late (%u ticks per plan)\n", (unsigned)late, (unsigned)TICKS_PER_PLAN);
 }
 
 /* ---- jog, stop, halt, the datum and live settings ------------------------------------------- */
 
-static uint32_t plan_left(void) { return fake_plan_phase == 0u ? N : N - fake_plan_phase; }
+static uint32_t plan_left(void) { return fake_plan_phase == 0u ? TICKS_PER_PLAN : TICKS_PER_PLAN - fake_plan_phase; }
 
 /* One pulse tick, and the plan tick if it is due; returns whether it ran. */
 static bool tick1(void)
@@ -1203,11 +1205,11 @@ static void check_ramps(bool after)
 {
     check_published(after);
     if (!after) {
-        vprev = ax[0].vel_out;
+        vprev = ax[0].velocity;
         return;
     }
-    const MotionSettings S = ax[0].prof.settings;
-    const float dv = fabsf(ax[0].vel_out - vprev);
+    const MotionSettings S = ax[0].profile.settings;
+    const float dv = fabsf(ax[0].velocity - vprev);
     assert(dv <= fmaxf(S.accel, S.decel) * (DT) * 1.0001f + 1e-3f);
 }
 
@@ -1217,12 +1219,12 @@ static void check_jerk(bool after)
 {
     check_published(after);
     if (!after) {
-        aprev = ax[0].prof.acc;
+        aprev = ax[0].profile.acc;
         return;
     }
-    const float jerk = ax[0].prof.settings.jerk;
+    const float jerk = ax[0].profile.settings.jerk;
     if (jerk > 0.0f)
-        assert(fabsf(ax[0].prof.acc - aprev) <= jerk * DT * 1.001f + 1.0f);
+        assert(fabsf(ax[0].profile.acc - aprev) <= jerk * DT * 1.001f + 1.0f);
 }
 
 /* At rest the pulse position is within a pulse of the count, on the side the
@@ -1241,18 +1243,18 @@ static void check_rest(uint8_t i, int travel)
  * the ramps, and jog(0) stops at target == position. */
 static void t_jog(void)
 {
-    const float conv = 100.0f;
-    setup_conv(1, conv);
+    const float pulses_per_unit = 100.0f;
+    setup_conv(1, pulses_per_unit);
     fake_on_write(count_write);
     fake_on_plan(check_ramps);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 20.0f, 100.0f, 100.0f, 0.0f));   /* 2,000 pulses/s, 10,000 pulses/s^2 */
     assert(PulDir_setPosition(a, 10.0f));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     assert(st(0).count == 1000 && PulDir_position(a) == 10.0f);
 
     /* refused at or above the rate cap and when not finite; nothing changes */
-    const float cap = (float)(TICK_HZ / 2u) / conv;
+    const float cap = (float)(TICK_HZ / 2u) / pulses_per_unit;
     assert(!PulDir_jog(a, cap) && a->refusal == PULDIR_R_RATE && a->refused_value == cap);
     assert(!PulDir_jog(a, -cap) && a->refusal == PULDIR_R_RATE);
     assert(!PulDir_jog(a, NAN) && a->refusal == PULDIR_R_ARG);
@@ -1264,7 +1266,7 @@ static void t_jog(void)
     assert(PulDir_isMoving(a) && a->mode == PULDIR_MODE_PROFILE);
     int32_t c = st(0).count;
     for (uint32_t k = 0; k < PLAN_HZ; k++) {           /* 1 s */
-        fake_run(N);
+        fake_run(TICKS_PER_PLAN);
         assert(st(0).count >= c);
         c = st(0).count;
     }
@@ -1275,7 +1277,7 @@ static void t_jog(void)
     /* jog(10): the speed changes live */
     assert(PulDir_jog(a, 10.0f));
     for (uint32_t k = 0; k < PLAN_HZ / 2u; k++) {
-        fake_run(N);
+        fake_run(TICKS_PER_PLAN);
         assert(st(0).count >= c);
         c = st(0).count;
     }
@@ -1293,13 +1295,13 @@ static void t_jog(void)
         int steps = 0;
         for (float v = PulDir_velocity(a); v != to; steps++) {
             assert(steps < 2 * nsteps);
-            fake_run(N);
+            fake_run(TICKS_PER_PLAN);
             const float w = PulDir_velocity(a), dv = way == 0 ? v - w : w - v;
             assert(dv > step * 0.999f && dv < step * 1.001f);
             v = w;
         }
         assert(steps == nsteps);
-        fake_run(20u * N);
+        fake_run(20u * TICKS_PER_PLAN);
         assert(PulDir_velocity(a) == to && a->mode == PULDIR_MODE_PROFILE);
     }
     c = st(0).count;
@@ -1308,7 +1310,7 @@ static void t_jog(void)
     assert(PulDir_jog(a, -5.0f));
     int32_t top = c;
     for (uint32_t k = 0; k < PLAN_HZ; k++) {
-        fake_run(N);
+        fake_run(TICKS_PER_PLAN);
         if (st(0).count > top)
             top = st(0).count;
     }
@@ -1333,7 +1335,7 @@ static void t_stop(void)
     fake_on_write(count_write);
     fake_on_plan(check_ramps);
     PulDir* a = &ax[0];
-    const uint32_t phases[3] = { 0u, N / 3u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 3u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 12; k++) {
         fake_plan_phase = phases[k % 3];
         /* jerk on odd k: a 10-tap window */
@@ -1341,10 +1343,10 @@ static void t_stop(void)
         const int32_t c0 = st(0).count, dir = k % 4 < 2 ? 1 : -1, want = c0 + dir * 3000;
         const int64_t n0 = net[0];
         assert(PulDir_moveTo(a, (float)want));
-        fake_run((60u + 13u * (uint32_t)k) * N + (uint32_t)k * 3u);   /* on the ramp or cruising */
-        float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
+        fake_run((60u + 13u * (uint32_t)k) * TICKS_PER_PLAN + (uint32_t)k * 3u);   /* on the ramp or cruising */
+        float expect = (float)a->origin + a->profile.pos + MotionProfile_stopDistance(&a->profile);
         if (k >= 6) {                         /* a lower decel set just before the stop: the stop uses it */
-            const float v = a->prof.v_t, d1 = a->prof.settings.decel;
+            const float v = a->profile.v_t, d1 = a->profile.settings.decel;
             assert(PulDir_setDeceleration(a, 5000.0f));
             expect += v * fabsf(v) * (1.0f / (2.0f * 5000.0f) - 1.0f / (2.0f * d1));
         }
@@ -1363,12 +1365,12 @@ static void t_stop(void)
     }
 
     /* moveTo during STOPPING is accepted and lands exactly, here behind the stop */
-    fake_plan_phase = N / 2u;
+    fake_plan_phase = TICKS_PER_PLAN / 2u;
     const int32_t c0 = st(0).count;
     assert(PulDir_moveTo(a, (float)(c0 + 3000)));
-    fake_run(150u * N);
+    fake_run(150u * TICKS_PER_PLAN);
     PulDir_stop(a);
-    fake_run(5u * N);
+    fake_run(5u * TICKS_PER_PLAN);
     assert(a->mode == PULDIR_MODE_STOPPING);
     assert(PulDir_moveTo(a, (float)(c0 + 100)));
     assert(a->mode == PULDIR_MODE_PROFILE && PulDir_target(a) == (float)(c0 + 100));
@@ -1392,12 +1394,12 @@ static void t_stop_random(void)
     rng = 0x13579BDFu;
     int kinds[3] = { 0, 0, 0 }, fractional = 0;
     for (int n = 0; n < 300; n++) {
-        fake_plan_phase = rnd() % N;
-        const float conv = frand(10.0f, 500.0f);
+        fake_plan_phase = rnd() % TICKS_PER_PLAN;
+        const float pulses_per_unit = frand(10.0f, 500.0f);
         const float v = frand(200.0f, fminf(20000.0f, 0.9f * cap));
         const float acc = frand(v / 0.2f, v / 0.02f), dec = frand(v / 0.2f, v / 0.02f);
         const float jerk = n % 2 ? 0.0f : 2.0f * fmaxf(acc, dec) / (frand(2.0f, 200.0f) * dt);
-        set_settings(a, conv, v, acc, dec, jerk);
+        set_settings(a, pulses_per_unit, v, acc, dec, jerk);
 
         const int32_t c0 = st(0).count;
         const int64_t n0 = net[0];
@@ -1405,17 +1407,17 @@ static void t_stop_random(void)
         kinds[kind]++;
         const float pos0 = PulDir_position(a);
         if (kind == 0)
-            assert(PulDir_moveTo(a, ((float)c0 + frand(-0.3f, 0.3f) * v) / conv));
+            assert(PulDir_moveTo(a, ((float)c0 + frand(-0.3f, 0.3f) * v) / pulses_per_unit));
         else
-            assert(PulDir_jog(a, frand(-1.0f, 1.0f) * v / conv));
+            assert(PulDir_jog(a, frand(-1.0f, 1.0f) * v / pulses_per_unit));
         const float tg = PulDir_target(a);
         const int travel = kind == 0 ? (tg > pos0) - (tg < pos0) : (a->req_speed > 0.0f) - (a->req_speed < 0.0f);
-        fake_run(rnd() % (300u * N));
+        fake_run(rnd() % (300u * TICKS_PER_PLAN));
         if (kind == 2) {
             const uint64_t e0 = edges[0];
             PulDir_halt(a);
-            run_until_idle(a, 3u * N);
-            fake_run(2u * N);
+            run_until_idle(a, 3u * TICKS_PER_PLAN);
+            fake_run(2u * TICKS_PER_PLAN);
             assert(edges[0] == e0);
         } else {
             PulDir_stop(a);
@@ -1426,13 +1428,13 @@ static void t_stop_random(void)
         assert(PulDir_target(a) == PulDir_position(a));
         assert(net[0] - n0 == c - c0);
         check_rest(0, c != c0 ? travel : 0);  /* the count is the last integer reached */
-        if (kind != 2 && fabsf(a->prof.pos) > 1e-3f)
+        if (kind != 2 && fabsf(a->profile.pos) > 1e-3f)
             fractional++;                     /* the stop ended between two pulses */
 
         if (kind == 2) {                  /* after a halt, the next move lands exactly */
             const int32_t want = c + (int32_t)(rnd() % 201u) - 100;
-            assert(PulDir_moveTo(a, (float)want / conv));
-            const int32_t w = (int32_t)roundf(((float)want / conv) * conv);
+            assert(PulDir_moveTo(a, (float)want / pulses_per_unit));
+            const int32_t w = (int32_t)roundf(((float)want / pulses_per_unit) * pulses_per_unit);
             run_until_idle(a, 10u * TICK_HZ);
             assert(st(0).count == w && net[0] - n0 == w - c0);
         }
@@ -1447,14 +1449,14 @@ static void t_halt(void)
     fake_on_write(count_write);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 5000.0f, 50000.0f, 50000.0f, 0.0f));
-    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 12; k++) {
         fake_plan_phase = phases[k % 3];
         assert(PulDir_setJerk(a, k % 6 < 3 ? 0.0f : 1.0e7f));     /* a 10-tap window at 1 kHz */
         const int32_t c0 = st(0).count, dir = k % 2 ? -1 : 1;
         assert(PulDir_moveTo(a, (float)(c0 + dir * 20000)));
         fake_run(TICK_HZ / 5u);        /* 200 ms: cruising, the ramp takes 100 ms */
-        assert(a->prof.vel == (float)dir * 5000.0f);
+        assert(a->profile.vel == (float)dir * 5000.0f);
         if (k % 4 < 2)
             while (!high(0))                  /* just after a rising edge */
                 fake_run(1);
@@ -1479,12 +1481,12 @@ static void t_halt(void)
             assert(plans <= 2);
         }
         assert(!high(0));
-        fake_run(3u * N);
+        fake_run(3u * TICKS_PER_PLAN);
         assert(edges[0] == e0 && st(0).count == ch && st(0).inc == 0);   /* no rising edge since */
         assert(PulDir_target(a) == (float)ch && PulDir_velocity(a) == 0.0f && a->mode == PULDIR_MODE_IDLE);
         /* the generator is at rest where the pulses stopped, not where it was aiming */
         const float frac = (float)(int64_t)(st(0).Pb - ((uint64_t)(uint32_t)a->origin << 32)) / PULDIR_FIX;
-        assert(a->prof.done && a->prof.vel == 0.0f && fabsf(a->prof.pos - frac) < 1e-6f);
+        assert(a->profile.done && a->profile.vel == 0.0f && fabsf(a->profile.pos - frac) < 1e-6f);
         assert(a->origin == ch && fabsf(frac) < 1.0f);
 
         /* the next move starts where the pulses stopped and lands exactly */
@@ -1500,8 +1502,8 @@ static void t_halt(void)
         const int32_t c0 = st(0).count;
         assert(k == 0 ? PulDir_moveTo(a, (float)(c0 + 5000)) : PulDir_jog(a, -3000.0f));
         PulDir_halt(a);
-        fake_run(3u * N);
-        assert(!PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE && a->prof.done);
+        fake_run(3u * TICKS_PER_PLAN);
+        assert(!PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE && a->profile.done);
         assert(edges[0] == e0 && PulDir_target(a) == (float)c0);
     }
 }
@@ -1512,22 +1514,22 @@ static int32_t abs_inc(void)
     return (int32_t)(i < 0 ? -i : i);
 }
 
-/* Test 15: the cap refuses at TICK_HZ / 2 / conv and accepts one ulp below,
+/* Test 15: the cap refuses at TICK_HZ / 2 / pulses_per_unit and accepts one ulp below,
  * and no live increment ever exceeds PULDIR_INC_MAX. */
 static void t_rate_cap(void)
 {
-    const float conv = 3.0f;
-    setup_conv(1, conv);
+    const float pulses_per_unit = 3.0f;
+    setup_conv(1, pulses_per_unit);
     fake_on_write(count_write);
     PulDir* a = &ax[0];
-    const float cap = (float)(TICK_HZ / 2u) / conv, below = nextafterf(cap, 0.0f);
+    const float cap = (float)(TICK_HZ / 2u) / pulses_per_unit, below = nextafterf(cap, 0.0f);
     const float s0 = PulDir_speed(a);
     assert(!PulDir_setSpeed(a, cap) && a->refusal == PULDIR_R_RATE && PulDir_speed(a) == s0);
     assert(PulDir_setSpeed(a, below) && PulDir_speed(a) == below);
-    assert(PulDir_setAcceleration(a, 2.0e6f / conv) && PulDir_setDeceleration(a, 2.0e6f / conv));
+    assert(PulDir_setAcceleration(a, 2.0e6f / pulses_per_unit) && PulDir_setDeceleration(a, 2.0e6f / pulses_per_unit));
 
-    const float to = (float)(TICK_HZ / 4u) / conv;     /* half a second at the cap */
-    const int32_t want = (int32_t)roundf(to * conv);
+    const float to = (float)(TICK_HZ / 4u) / pulses_per_unit;     /* half a second at the cap */
+    const int32_t want = (int32_t)roundf(to * pulses_per_unit);
     assert(PulDir_moveTo(a, to));
     /* sat() clamps every increment, so a clamp shows only as lag: test 11's tracking */
     int32_t worst = 0;
@@ -1541,7 +1543,7 @@ static void t_rate_cap(void)
     assert(st(0).count == want && worst > PULDIR_INC_MAX - PULDIR_INC_MAX / 1000);
     /* Unclamped, each boundary is within a few truncation remainders (3N seen);
      * a clamp of even 1000 units a tick accumulates to ~10^7. */
-    assert(worst_raw <= 4 * (int64_t)N && worst_rev == 0);
+    assert(worst_raw <= 4 * (int64_t)TICKS_PER_PLAN && worst_rev == 0);
 
     /* the same cap for a jog */
     assert(!PulDir_jog(a, cap) && a->refusal == PULDIR_R_RATE && !PulDir_isMoving(a));
@@ -1561,8 +1563,8 @@ static void t_rate_cap(void)
 /* 2.2 and test 24, the axis half: which settings changes are live. */
 static void t_live_settings(void)
 {
-    const float conv = 100.0f;
-    setup_conv(1, conv);
+    const float pulses_per_unit = 100.0f;
+    setup_conv(1, pulses_per_unit);
     PulDir_attachLogger(logger);
     PulDir* a = &ax[0];
     /* Jerks scale with the plan rate, so every window below has the same taps at any rate. */
@@ -1571,12 +1573,13 @@ static void t_live_settings(void)
     /* jerk off, in flight: accel, decel and speed are live; switching jerk on is not */
     assert(PulDir_setDefaults(a, 20.0f, 40.0f, 40.0f, 0.0f));
     assert(PulDir_moveTo(a, 100.0f));
-    fake_run(20u * N);
-    assert(!a->prof.done);
+    fake_run(20u * TICKS_PER_PLAN);
+    assert(!a->profile.done);
     assert(PulDir_setAcceleration(a, 30.0f) && PulDir_setDeceleration(a, 30.0f));
     assert(PulDir_setSpeed(a, 10.0f));
-    fake_run(N);
-    assert(a->prof.settings.accel == 3000.0f && a->prof.settings.decel == 3000.0f && a->prof.settings.speed == 1000.0f);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->profile.settings.accel == 3000.0f && a->profile.settings.decel == 3000.0f
+           && a->profile.settings.speed == 1000.0f);
     assert(!PulDir_setJerk(a, 300.0f * hz) && a->refusal == PULDIR_R_WINDOW);   /* fits the taps, not the frozen window */
     assert(PulDir_jerk(a) == 0.0f && a->req == 0);
     fake_run(TICK_HZ / 2u);                       /* 500 ms */
@@ -1587,11 +1590,11 @@ static void t_live_settings(void)
     /* jerk 290 at 1 kHz in flight: the window holds 207 taps, 2 * 30 / (290 * dt) = 206.9 */
     assert(PulDir_setDefaults(a, 20.0f, 35.0f, 30.0f, 290.0f * hz));  /* 2 * 3500 / 29 = 241.4 */
     assert(PulDir_setAcceleration(a, 30.0f));
-    fake_run(N);
-    assert(a->prof.n == 207);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->profile.window == 207);
     assert(PulDir_moveTo(a, 150.0f));
-    fake_run(20u * N);
-    assert(!a->prof.done && a->prof.n == 207);
+    fake_run(20u * TICKS_PER_PLAN);
+    assert(!a->profile.done && a->profile.window == 207);
     assert(PulDir_setAcceleration(a, 25.0f));            /* lowered: live */
     assert(PulDir_setAcceleration(a, 30.0f));            /* raised within the slack: live */
     assert(!PulDir_setAcceleration(a, 31.0f) && a->refusal == PULDIR_R_WINDOW);   /* 213.8 taps */
@@ -1602,18 +1605,19 @@ static void t_live_settings(void)
     assert(!PulDir_restoreDefaults(a) && a->refusal == PULDIR_R_WINDOW);   /* accel 35: 241.4 taps */
     assert(PulDir_speed(a) == 20.0f && PulDir_acceleration(a) == 30.0f);
     assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 400.0f * hz);
-    fake_run(N);
-    assert(a->prof.settings.jerk == 40000.0f * hz && a->prof.settings.accel == 3000.0f && a->prof.n == 207);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->profile.settings.jerk == 40000.0f * hz && a->profile.settings.accel == 3000.0f
+           && a->profile.window == 207);
     run_until_idle(a, 30u * TICK_HZ);
     assert(st(0).count == 15000);
     assert(PulDir_restoreDefaults(a));                   /* idle: accepted */
     assert(PulDir_speed(a) == 20.0f && PulDir_acceleration(a) == 35.0f);
     assert(PulDir_deceleration(a) == 30.0f && PulDir_jerk(a) == 290.0f * hz);
-    fake_run(N);
-    assert(a->prof.n == 242 && a->prof.settings.accel == 3500.0f);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->profile.window == 242 && a->profile.settings.accel == 3500.0f);
 
     /* a jerk needing more than the ring's taps: refused, the log names the smallest that fits */
-    const float jmin = MotionProfile_minJerk(3500.0f, 3000.0f, DT) / conv;
+    const float jmin = MotionProfile_minJerk(3500.0f, 3000.0f, DT) / pulses_per_unit;
     nlines = 0;
     PulDir_loop(a);
     nlines = 0;
@@ -1632,16 +1636,17 @@ static void t_live_settings(void)
      * can, accepted, and the acceleration steps within it through the turnover. */
     fake_on_plan(check_jerk);
     assert(PulDir_setDefaults(a, 20.0f, 30.0f, 30.0f, 300.0f * hz));
-    fake_run(N);
-    assert(a->prof.n == 200);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->profile.window == 200);
     assert(PulDir_moveTo(a, 300.0f));
-    fake_run(20u * N);
-    assert(!a->prof.done && a->prof.settings.accel == 3000.0f);
+    fake_run(20u * TICKS_PER_PLAN);
+    assert(!a->profile.done && a->profile.settings.accel == 3000.0f);
     assert(!PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 10.0f * hz) && a->refusal == PULDIR_R_WINDOW);
     assert(PulDir_acceleration(a) == 30.0f && PulDir_jerk(a) == 300.0f * hz && a->defaults.accel == 30.0f);
     assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz));   /* (100 + 3000) / (16000 dt) = 194 taps */
-    fake_run(300u * N);                       /* the ring turns over under the new settings */
-    assert(a->prof.settings.accel == 100.0f && a->prof.settings.jerk == 16000.0f * hz && a->prof.n == 200);
+    fake_run(300u * TICKS_PER_PLAN);                       /* the ring turns over under the new settings */
+    assert(a->profile.settings.accel == 100.0f && a->profile.settings.jerk == 16000.0f * hz
+           && a->profile.window == 200);
     assert(a->defaults.accel == 1.0f && PulDir_jerk(a) == 160.0f * hz);
     PulDir_stop(a);
     run_until_idle(a, 30u * TICK_HZ);
@@ -1654,17 +1659,18 @@ static void t_live_settings(void)
         assert(PulDir_setDefaults(a, 20.0f, 30.0f, 30.0f, 300.0f * hz));
         assert(PulDir_moveTo(a, PulDir_position(a) + 0.4f + 0.013f * (float)k));
         do                                    /* the first plan tick takes the target; then to the landing tick */
-            fake_run(N);
-        while (a->prof.done || !a->prof.landed);
-        found = fabsf(a->prof.v_t) >= 0.8f * 3000.0f * DT;
+            fake_run(TICKS_PER_PLAN);
+        while (a->profile.done || !a->profile.landed);
+        found = fabsf(a->profile.v_t) >= 0.8f * 3000.0f * DT;
         if (found) {
             assert(!PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz) && a->refusal == PULDIR_R_WINDOW);
             assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 400.0f * hz));   /* (3000 + 3000) / 40 = 150 taps */
-            fake_run(N);
-            assert(a->prof.settings.accel == 100.0f && a->prof.settings.jerk == 40000.0f * hz && a->prof.landed);
+            fake_run(TICKS_PER_PLAN);
+            assert(a->profile.settings.accel == 100.0f && a->profile.settings.jerk == 40000.0f * hz
+                   && a->profile.landed);
             assert(PulDir_setDefaults(a, 20.0f, 1.0f, 1.0f, 160.0f * hz));   /* v_t is 0 now: 194 taps */
-            fake_run(N);
-            assert(a->prof.settings.jerk == 16000.0f * hz);
+            fake_run(TICKS_PER_PLAN);
+            assert(a->profile.settings.jerk == 16000.0f * hz);
         }
         run_until_idle(a, 30u * TICK_HZ);
     }
@@ -1681,11 +1687,11 @@ static void t_jerk_floor(void)
     PulDir* a = &ax[0];
     rng = 0x5EEDF00Du;
     for (int k = 0; k < 3000; k++) {
-        const float conv = frand(0.5f, 500.0f);
-        a->conv = conv;                       /* fixed at init: the test writes it, at rest */
-        const float acc = frand(10.0f, 1.0e5f) / conv, dec = frand(10.0f, 1.0e5f) / conv;
-        assert(PulDir_setDefaults(a, 100.0f / conv, acc, dec, 0.0f));
-        const float jmin = MotionProfile_minJerk(acc * conv, dec * conv, DT) / conv;
+        const float pulses_per_unit = frand(0.5f, 500.0f);
+        a->pulses_per_unit = pulses_per_unit;   /* fixed at init: the test writes it, at rest */
+        const float acc = frand(10.0f, 1.0e5f) / pulses_per_unit, dec = frand(10.0f, 1.0e5f) / pulses_per_unit;
+        assert(PulDir_setDefaults(a, 100.0f / pulses_per_unit, acc, dec, 0.0f));
+        const float jmin = MotionProfile_minJerk(acc * pulses_per_unit, dec * pulses_per_unit, DT) / pulses_per_unit;
         nlines = 0;
         assert(!PulDir_setJerk(a, 0.5f * jmin) && a->refusal == PULDIR_R_TAPS);
         const float floor_ = a->refused_value;
@@ -1713,7 +1719,7 @@ static void t_setpos(void)
 
     /* refused while moving */
     assert(PulDir_moveTo(a, 2.0f));
-    fake_run(10u * N);
+    fake_run(10u * TICKS_PER_PLAN);
     assert(!PulDir_setPosition(a, 7.0f) && a->refusal == PULDIR_R_NOT_IDLE);
     assert(a->home.homed && PulDir_target(a) == 2.0f);
     run_until_idle(a, TICK_HZ);
@@ -1721,13 +1727,13 @@ static void t_setpos(void)
 
     /* after a halt, refused until the plan tick has seen the pin low */
     assert(PulDir_moveTo(a, 5.0f));
-    fake_run(100u * N);
+    fake_run(100u * TICKS_PER_PLAN);
     while (!high(0))
         fake_run(1);
     PulDir_halt(a);
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_isMoving(a));
     assert(!PulDir_setPosition(a, 7.0f) && a->refusal == PULDIR_R_NOT_IDLE && a->home.homed);
-    run_until_idle(a, 3u * N);
+    run_until_idle(a, 3u * TICKS_PER_PLAN);
     assert(st(0).Pb != (uint64_t)(uint32_t)st(0).count << 32);   /* halted between pulses */
 
     /* accepted in IDLE: count, pulse position, target and generator move together */
@@ -1735,8 +1741,8 @@ static void t_setpos(void)
     PulDirSnap s = st(0);
     assert(s.count == -300 && s.Pb == (uint64_t)(int64_t)-300 << 32);
     assert(PulDir_position(a) == -3.0f && PulDir_target(a) == -3.0f && !a->home.homed);
-    fake_run(N);
-    assert(a->origin == -300 && a->prof.pos == 0.0f && a->prof.target == 0.0f && a->prof.done);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->origin == -300 && a->profile.pos == 0.0f && a->profile.target == 0.0f && a->profile.done);
     assert(!PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
 
     /* the next move is relative to the new datum */
@@ -1755,7 +1761,7 @@ static void t_settle_twice(void)
     fake_on_write(count_write);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 2000.0f, 20000.0f, 20000.0f, 0.0f));
-    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 6; k++) {
         fake_plan_phase = phases[k % 3];
         const int32_t c0 = st(0).count, want = c0 + (k % 2 ? -300 : 300);
@@ -1775,7 +1781,7 @@ static void t_settle_twice(void)
         assert(stage == 2);
         assert(st(0).count == want && !high(0));   /* isMoving fell after the final pulse */
         const uint64_t e = edges[0];
-        fake_run(3u * N);
+        fake_run(3u * TICKS_PER_PLAN);
         assert(edges[0] == e && st(0).count == want);
     }
 }
@@ -1789,14 +1795,14 @@ static void t_jog_settling(void)
     fake_on_plan(check_ramps);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 2000.0f, 20000.0f, 20000.0f, 0.0f));
-    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 12; k++) {
         fake_plan_phase = phases[k % 3];
         const int32_t c0 = st(0).count, want = c0 + (k % 2 ? -300 : 300);
         const int64_t n0 = net[0];
         const float speed = (k % 4 < 2 ? 1000.0f : -1000.0f);   /* on past the target, or back */
         assert(PulDir_moveTo(a, (float)want));
-        fake_run(N);                          /* applied: arrived is left set by the last stop */
+        fake_run(TICKS_PER_PLAN);                          /* applied: arrived is left set by the last stop */
         while (!a->arrived)
             fake_run(1);
         if (k >= 6)                           /* one settle run later */
@@ -1845,19 +1851,19 @@ static void t_halt_any_tick(void)
     const float v = 0.4f * (float)TICK_HZ;          /* an edge every 2 or 3 ticks */
     assert(PulDir_setDefaults(a, v, 100.0f * v, 100.0f * v, 0.0f));
     int k = 0;
-    for (uint32_t off = 0; off < N; off += N / 25u) {
+    for (uint32_t off = 0; off < TICKS_PER_PLAN; off += TICKS_PER_PLAN / 25u) {
         for (int before_plan = 0; before_plan < 2; before_plan++, k++) {
             const float speed = k % 2 ? -v : v;
-            fake_plan_phase = before_plan ? off : (off * 7u) % N;
+            fake_plan_phase = before_plan ? off : (off * 7u) % TICKS_PER_PLAN;
             assert(PulDir_jog(a, speed));
-            fake_run(20u * N);
+            fake_run(20u * TICKS_PER_PLAN);
             assert(PulDir_velocity(a) == speed);
             if (before_plan) {
                 halt_on_plan = a;
                 while (halt_on_plan)
                     fake_run(1);
             } else {
-                while (left() != N)
+                while (left() != TICKS_PER_PLAN)
                     fake_run(1);
                 fake_run(off);
                 PulDir_halt(a);
@@ -1868,11 +1874,11 @@ static void t_halt_any_tick(void)
             assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
             assert(PulDir_target(a) == (float)halt_count && PulDir_position(a) == (float)halt_count);
             for (uint32_t t = 0; PulDir_isMoving(a); t++) {
-                assert(t < 3u * N);
+                assert(t < 3u * TICKS_PER_PLAN);
                 fake_run(1);
             }
             assert(plan_runs - p0 <= 2u && !high(0));
-            fake_run(2u * N);
+            fake_run(2u * TICKS_PER_PLAN);
             assert(edges[0] == halt_edges && st(0).count == halt_count);   /* no rising edge since */
             assert(PulDir_target(a) == (float)halt_count && a->mode == PULDIR_MODE_IDLE);
             check_rest(0, speed > 0.0f ? 1 : -1);
@@ -1921,12 +1927,12 @@ static double rate_slope(size_t from, double lo, double hi)
  * ticks after each plan tick, for `ms` milliseconds. Returns the last one's tick. */
 static uint32_t stream_line(PulDir* a, double p0, double v, uint32_t ms, uint32_t offset)
 {
-    uint32_t since = N, t0 = 0, last = 0;
+    uint32_t since = TICKS_PER_PLAN, t0 = 0, last = 0;
     bool first = true;
     for (uint32_t k = 0; k < ms * MS; k++) {
         if (tick1())
             since = 0;
-        else if (since < N)
+        else if (since < TICKS_PER_PLAN)
             since++;
         if (since == offset) {
             const uint32_t now = PulDir_ticks();
@@ -1949,7 +1955,7 @@ static uint32_t stream_line(PulDir* a, double p0, double v, uint32_t ms, uint32_
  * The guideline's bound is 2 pulses. At the default T_CATCHUP of 50 ms this
  * controller does not meet it, at either stream rate. The first-order hold
  * holds the velocity between setpoints, so on the sine's peak acceleration
- * (A w^2 conv = 27,600 pulses/s^2) the feedforward falls short by a * age, and
+ * (A w^2 times pulses_per_unit = 27,600 pulses/s^2) the feedforward falls short by a * age, and
  * the proportional catch-up settles where P - p = a * age * T_c. The age is the
  * setpoint's at the middle of the interval it steers: about 1.8 ms at 1 kHz,
  * 3.3 to 3.9 ms at 200 Hz. The count trails P by up to a pulse more (D3).
@@ -1963,22 +1969,22 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
     setup_conv(1, 280.0f);
     fake_on_write(count_write);
     PulDir* a = &ax[0];
-    const double conv = 280.0, A = 10.0, w = 2.0 * PI_D * 0.5;
+    const double pulses_per_unit = 280.0, A = 10.0, w = 2.0 * PI_D * 0.5;
     assert(PulDir_setDefaults(a, 50.0f, 1000.0f, 1000.0f, 0.0f));
     assert(PulDir_setStreamCatchup(a, catchup_ms));
-    assert(offset < N && PLAN_HZ % sp_hz == 0u);
+    assert(offset < TICKS_PER_PLAN && PLAN_HZ % sp_hz == 0u);
     assert(PulDir_streamBegin(a));
     nrise = 0;
 
     const uint32_t every = PLAN_HZ / sp_hz;    /* plan ticks per setpoint */
-    uint32_t plans = 0, since = N, t0 = 0, t_v100 = 0;
+    uint32_t plans = 0, since = TICKS_PER_PLAN, t0 = 0, t_v100 = 0;
     bool started = false, have_v100 = false;
     double worst = 0.0, worst_p = 0.0;            /* |count - p| and |P - p|, pulses */
     for (;;) {
         if (tick1()) {
             if (started) {
                 const double t = (double)(uint32_t)(PulDir_ticks() - t0) / (double)TICK_HZ;
-                const double p = A * (1.0 - cos(w * t)) * conv;
+                const double p = A * (1.0 - cos(w * t)) * pulses_per_unit;
                 const PulDirSnap s = st(0);
                 const double e = fabs((double)s.count - p);
                 const double ep = fabs((double)(int64_t)s.Pb / (double)PULDIR_FIX - p);
@@ -1990,7 +1996,7 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
             }
             plans++;
             since = 0;
-        } else if (since < N) {
+        } else if (since < TICKS_PER_PLAN) {
             since++;
         }
         if (since == offset && plans % every == 0u) {
@@ -2004,7 +2010,7 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
                 break;
             const double p = A * (1.0 - cos(w * t)), v = A * w * sin(w * t);
             PulDir_stream(a, (float)p, (float)v);
-            if (!have_v100 && fabs(v * conv) > 100.0) {
+            if (!have_v100 && fabs(v * pulses_per_unit) > 100.0) {
                 have_v100 = true;
                 t_v100 = now;
             }
@@ -2022,7 +2028,7 @@ static void stream_sine(uint32_t sp_hz, uint32_t offset, uint32_t catchup_ms, do
     for (size_t i = 1; i < nrise; i++) {
         const double ta = (double)(uint32_t)(rise[i - 1u] - t0) / (double)TICK_HZ;
         const double tb = (double)(uint32_t)(rise[i] - t0) / (double)TICK_HZ;
-        const double va = fabs(A * w * sin(w * ta)) * conv, vb = fabs(A * w * sin(w * tb)) * conv;
+        const double va = fabs(A * w * sin(w * ta)) * pulses_per_unit, vb = fabs(A * w * sin(w * tb)) * pulses_per_unit;
         const double vmin = fmin(va, vb);
         if (floor(ta) != floor(tb) || vmin <= 200.0)  /* the velocity's zeros are the whole seconds */
             continue;
@@ -2069,7 +2075,7 @@ static void t_stream_timeout(void)
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, 50000.0f, 0.0f));
     assert(PulDir_jog(a, 5000.0f));
-    fake_run(200u * N);
+    fake_run(200u * TICKS_PER_PLAN);
     assert(PulDir_velocity(a) == 5000.0f);
     nrise = 0;
     fake_run(10u * MS);
@@ -2093,7 +2099,7 @@ static void t_stream_timeout(void)
         assert(PulDir_ticks() - tb < 110u * MS);
     }
     const uint32_t tt = PulDir_ticks() - tb, tmo = PULDIR_STREAM_TIMEOUT_MS * MS;
-    assert(tt >= tmo && tt <= tmo + N);
+    assert(tt >= tmo && tt <= tmo + TICKS_PER_PLAN);
     assert(a->mode == PULDIR_MODE_STOPPING && PulDir_streamTimedOut(a) && PulDir_isMoving(a));
     check_gaps(0, g);                             /* full speed up to the timeout */
     const size_t r0 = nrise;
@@ -2126,7 +2132,7 @@ static void t_stream_timeout(void)
     assert(a->refusal == PULDIR_R_DROPPED && !PulDir_inStream(a) && !PulDir_isMoving(a));
     PulDir_loop(a);
     assert(nlines == 3 && strcmp(lines[2], "[a0] stream refused: dropped") == 0);
-    fake_run(20u * N);
+    fake_run(20u * TICKS_PER_PLAN);
     assert(st(0).count == c && !PulDir_isMoving(a));
 
     /* streamBegin restores service: 1,000 pulses/s for 200 ms */
@@ -2154,7 +2160,7 @@ static void t_stream_end(void)
         assert(PulDir_setDefaults(a, 50.0f, 200.0f, 300.0f, jerk));
         assert(PulDir_setSpeed(a, 80.0f) && PulDir_setAcceleration(a, 150.0f));
         assert(PulDir_setDeceleration(a, 100.0f) && PulDir_setJerk(a, round ? 50000.0f : 0.0f));
-        fake_run(N);
+        fake_run(TICKS_PER_PLAN);
         const double p0 = (double)PulDir_position(a);
         assert(PulDir_streamBegin(a));
         (void)stream_line(a, p0, 60.0, 300u, 11u);      /* 6,000 pulses/s, above the default speed */
@@ -2172,10 +2178,10 @@ static void t_stream_end(void)
         while (!tick1())                          /* the plan tick that applies it */
             ;
         /* ticks at v_end before the seeded set latches: to this plan tick, then to its boundary */
-        const uint32_t run_on = (PulDir_ticks() - t_end) + left() % N;
-        assert(a->prof.settings.speed == 5000.0f && a->prof.settings.decel == 30000.0f);
-        assert(a->prof.settings.jerk == jerk * 100.0f && !a->prof.done);
-        const float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
+        const uint32_t run_on = (PulDir_ticks() - t_end) + left() % TICKS_PER_PLAN;
+        assert(a->profile.settings.speed == 5000.0f && a->profile.settings.decel == 30000.0f);
+        assert(a->profile.settings.jerk == jerk * 100.0f && !a->profile.done);
+        const float expect = (float)a->origin + a->profile.pos + MotionProfile_stopDistance(&a->profile);
         run_until_idle(a, TICK_HZ);
         const int32_t c = st(0).count;
         assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f && !PulDir_streamTimedOut(a));
@@ -2206,7 +2212,7 @@ static void t_stream_transitions(void)
     fake_on_write(count_write);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, 50000.0f, 0.0f));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
 
     /* catch-up: at least five plan intervals */
     const uint32_t min_ms = (5000u + PLAN_HZ - 1u) / PLAN_HZ;
@@ -2229,7 +2235,7 @@ static void t_stream_transitions(void)
     const float here[1] = { 0.0f };               /* a real group move, of zero travel */
     assert(PulDirGroup_init(&grp, members, 1) && PulDirGroup_moveTo(&grp, here));
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_GROUP);
-    run_until_idle(a, 3u * N);
+    run_until_idle(a, 3u * TICKS_PER_PLAN);
     assert(!PulDirGroup_isMoving(&grp) && a->mode == PULDIR_MODE_IDLE);
     a->mode = PULDIR_MODE_HOMING;
     assert(!PulDir_streamBegin(a) && a->refusal == PULDIR_R_MODE && a->mode == PULDIR_MODE_HOMING);
@@ -2263,7 +2269,7 @@ static void t_stream_transitions(void)
     a->refusal = PULDIR_R_NONE;
     PulDir_stream(a, 3.0e9f, 0.0f);
     assert(a->refusal == PULDIR_R_DROPPED && !a->stream.have);
-    fake_run(5u * N);
+    fake_run(5u * TICKS_PER_PLAN);
     assert(st(0).count == 0 && nrise == 0 && PulDir_inStream(a));   /* streamBegin changed nothing */
     PulDir_streamEnd(a);
     run_until_idle(a, TICK_HZ);
@@ -2275,7 +2281,7 @@ static void t_stream_transitions(void)
     const uint32_t g = TICK_HZ / 5000u;
     assert(PulDir_moveTo(a, 100000.0f));
     assert(PulDir_setSpeed(a, 5000.0f));
-    fake_run(200u * N);
+    fake_run(200u * TICKS_PER_PLAN);
     assert(PulDir_velocity(a) == 5000.0f);
     nrise = 0;
     fake_run(10u * MS);
@@ -2293,8 +2299,8 @@ static void t_stream_transitions(void)
     assert(a->mode == PULDIR_MODE_STOPPING && !PulDir_inStream(a) && PulDir_isMoving(a));
     while (!tick1())
         ;
-    float expect = (float)a->origin + a->prof.pos + MotionProfile_stopDistance(&a->prof);
-    assert(a->prof.settings.decel == 40000.0f);
+    float expect = (float)a->origin + a->profile.pos + MotionProfile_stopDistance(&a->profile);
+    assert(a->profile.settings.decel == 40000.0f);
     run_until_idle(a, TICK_HZ);
     assert(fabsf((float)st(0).count - expect) <= 4.0f && dirw[0] == d0);
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_target(a) == PulDir_position(a));
@@ -2303,9 +2309,9 @@ static void t_stream_transitions(void)
 
     /* from STOPPING: the velocity at that instant is kept */
     assert(PulDir_jog(a, -5000.0f));
-    fake_run(200u * N);
+    fake_run(200u * TICKS_PER_PLAN);
     PulDir_stop(a);
-    fake_run(30u * N + 7u);
+    fake_run(30u * TICKS_PER_PLAN + 7u);
     const float v0 = PulDir_velocity(a);
     assert(v0 < -2000.0f && v0 > -4500.0f && a->mode == PULDIR_MODE_STOPPING);
     assert(PulDir_streamBegin(a));
@@ -2322,8 +2328,8 @@ static void t_stream_transitions(void)
     const int32_t ch = st(0).count;
     PulDir_halt(a);
     assert(a->mode == PULDIR_MODE_IDLE && !PulDir_inStream(a) && PulDir_velocity(a) == 0.0f);
-    fake_run(3u * N);
-    assert(!PulDir_isMoving(a) && edges[0] == e0 && st(0).count == ch && a->prof.done);
+    fake_run(3u * TICKS_PER_PLAN);
+    assert(!PulDir_isMoving(a) && edges[0] == e0 && st(0).count == ch && a->profile.done);
 
     /* and streams again from rest: a setpoint where the axis is moves nothing */
     assert(PulDir_streamBegin(a));
@@ -2344,7 +2350,7 @@ static void t_request_order(void)
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 5000.0f, 50000.0f, 50000.0f, 0.0f));
     const float dv = 50000.0f / (float)PLAN_HZ * 1.0001f;   /* one interval at accel */
-    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 6; k++) {
         fake_plan_phase = phases[k % 3];
         const int32_t c0 = st(0).count, dir = k % 2 ? -1 : 1;
@@ -2382,7 +2388,7 @@ static void t_request_order(void)
         assert(PulDir_streamBegin(a));
         PulDir_halt(a);
         assert(a->mode == PULDIR_MODE_IDLE && !PulDir_inStream(a));
-        fake_run(3u * N);
+        fake_run(3u * TICKS_PER_PLAN);
         assert(!PulDir_isMoving(a) && edges[0] == e2 && st(0).count == ch);
         assert(PulDir_jog(a, (float)dir * 3000.0f));
         fake_run(TICK_HZ / 10u);       /* 100 ms: past the 60 ms ramp */
@@ -2390,7 +2396,7 @@ static void t_request_order(void)
         ch = st(0).count;
         PulDir_halt(a);
         assert(PulDir_streamBegin(a));
-        fake_run(20u * N);                    /* no setpoint: the stream holds the halted rest */
+        fake_run(20u * TICKS_PER_PLAN);                    /* no setpoint: the stream holds the halted rest */
         assert(PulDir_inStream(a) && PulDir_velocity(a) == 0.0f && edges[0] == e2);
         PulDir_streamEnd(a);
         run_until_idle(a, TICK_HZ);
@@ -2409,7 +2415,7 @@ static void t_request_order(void)
         assert(a->mode == PULDIR_MODE_STOPPING);
         while (!tick1())
             ;
-        assert(fabsf(PulDir_velocity(a)) >= 3000.0f - dv && a->prof.stopping);
+        assert(fabsf(PulDir_velocity(a)) >= 3000.0f - dv && a->profile.stopping);
         run_until_idle(a, TICK_HZ);
         assert(dirw[0] == d3 && a->mode == PULDIR_MODE_IDLE && PulDir_target(a) == PulDir_position(a));
         assert(dir > 0 ? st(0).count > c3 + 200 : st(0).count < c3 - 200);
@@ -2425,7 +2431,7 @@ static void t_stream_speed_setting(void)
     fake_on_write(count_write);
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 2000.0f, 50000.0f, 50000.0f, 0.0f));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     assert(PulDir_streamBegin(a));
     nrise = 0;
     (void)stream_line(a, 0.0, 4000.0, 200u, 11u);
@@ -2446,7 +2452,7 @@ static void t_stream_speed_setting(void)
     assert(PulDir_velocity(a) == 1000.0f);
     size_t checked = 0;
     for (size_t i = from + 1u; i < nrise; i++)
-        if (rise[i - 1u] - t_low >= 2u * N) {
+        if (rise[i - 1u] - t_low >= 2u * TICKS_PER_PLAN) {
             assert(rise[i] - rise[i - 1u] >= 2u * g);
             checked++;
         }
@@ -2465,7 +2471,7 @@ static void t_stream_loss(void)
     PulDir* a = &ax[0];
     const float decel = 50000.0f, v = 3000.0f;
     assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, decel, 0.0f));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     assert(PulDir_streamBegin(a));
     const uint32_t last = stream_line(a, 0.0, (double)v, 400u, 11u);
     assert(PulDir_inStream(a) && fabsf(PulDir_velocity(a) - v) < 1.0f);
@@ -2477,11 +2483,11 @@ static void t_stream_loss(void)
         assert(PulDir_ticks() - last < 110u * MS);
     }
     const uint32_t fired = PulDir_ticks() - last, tmo = PULDIR_STREAM_TIMEOUT_MS * MS;
-    assert(fired >= tmo && fired <= tmo + N);
+    assert(fired >= tmo && fired <= tmo + TICKS_PER_PLAN);
     assert(a->mode == PULDIR_MODE_STOPPING && PulDir_streamTimedOut(a));
     check_gaps(0, TICK_HZ / 3000u);        /* still at v, within a tick */
     const int32_t c0 = st(0).count;
-    const uint32_t ahead = left() % N;            /* the stream's last set runs on this long */
+    const uint32_t ahead = left() % TICKS_PER_PLAN;            /* the stream's last set runs on this long */
     const uint32_t d0 = dirw[0];
     run_until_idle(a, TICK_HZ);
     const int32_t c = st(0).count;
@@ -2510,13 +2516,13 @@ static void t_stream_end_begin(void)
     PulDir* a = &ax[0];
     assert(PulDir_setDefaults(a, 6000.0f, 50000.0f, 50000.0f, 0.0f));
     assert(PulDir_setDeceleration(a, 20000.0f));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     assert(PulDir_streamBegin(a));
     (void)stream_line(a, 0.0, 3000.0, 400u, 11u);
     while (!tick1())                              /* just after a plan tick */
         ;
     const float v = PulDir_velocity(a);
-    assert(fabsf(v - 3000.0f) < 1.0f && a->prof.done && a->prof.vel == 0.0f);
+    assert(fabsf(v - 3000.0f) < 1.0f && a->profile.done && a->profile.vel == 0.0f);
     PulDir_streamEnd(a);
     assert(PulDir_deceleration(a) == 50000.0f && a->mode == PULDIR_MODE_STOPPING);
     assert(PulDir_streamBegin(a) && PulDir_inStream(a));
@@ -2526,7 +2532,7 @@ static void t_stream_end_begin(void)
         assert(PulDir_inStream(a) && PulDir_velocity(a) == v);
     }
     check_gaps(0, TICK_HZ / 3000u);
-    assert(a->prof.done && a->prof.settings.decel == 50000.0f && !a->arrived);
+    assert(a->profile.done && a->profile.settings.decel == 50000.0f && !a->arrived);
     PulDir_streamEnd(a);
     run_until_idle(a, TICK_HZ);
     assert(a->mode == PULDIR_MODE_IDLE);
@@ -2562,7 +2568,7 @@ static uint64_t group_aim(const PulDirGroup* g, uint8_t i, float s)
  * that set's interval ends, each member is checked against the same s. The pulse
  * position P must be within one pulse of the aim. The count is P's last whole pulse
  * in the direction of travel, so it trails P by up to a pulse: it is held to one
- * pulse plus the truncation the aim allows (N units, D5), and measured. */
+ * pulse plus the truncation the aim allows (ticks_per_plan units, D5), and measured. */
 static float gs_next, gs_cur;
 static bool gs_next_valid, gs_cur_valid;
 static int64_t g_worst_P, g_worst_count;
@@ -2577,7 +2583,7 @@ static float g_peak;                          /* the largest |velocity| / speed 
 static void group_track(PulDirGroup* g, uint32_t ticks)
 {
     for (uint32_t k = 0; k < ticks; k++) {
-        if (left() == N) {                    /* this tick latches: the running set has finished */
+        if (left() == TICKS_PER_PLAN) {                    /* this tick latches: the running set has finished */
             if (gs_cur_valid)
                 for (uint8_t i = 0; i < g->count; i++) {
                     const PulDirSnap s = st(g->axes[i]->slot);
@@ -2589,7 +2595,7 @@ static void group_track(PulDirGroup* g, uint32_t ticks)
                     g_worst_P = e > g_worst_P ? e : g_worst_P;
                     g_worst_count = c > g_worst_count ? c : g_worst_count;
                     assert(e <= (int64_t)PULDIR_ONE);
-                    assert(c <= (int64_t)PULDIR_ONE + (int64_t)N);
+                    assert(c <= (int64_t)PULDIR_ONE + (int64_t)TICKS_PER_PLAN);
                 }
             gs_cur = gs_next;
             gs_cur_valid = gs_next_valid;
@@ -2616,7 +2622,7 @@ static void group_track(PulDirGroup* g, uint32_t ticks)
     }
 }
 
-/* One group move of travel[i] pulses from where the members are (conv 1). */
+/* One group move of travel[i] pulses from where the members are (1 pulse per unit). */
 static void group_move_sync(PulDirGroup* g, const int32_t* travel)
 {
     const uint8_t n = g->count;
@@ -2647,7 +2653,7 @@ static void group_move_sync(PulDirGroup* g, const int32_t* travel)
         for (uint8_t i = 0; i < n; i++) {     /* the zero-travel member too, throughout */
             assert(PulDir_isMoving(&ax[i]) == moving
                    && ax[i].mode == (moving ? PULDIR_MODE_GROUP : PULDIR_MODE_IDLE));
-            /* each member's velocity is its share of the path's (conv 1) */
+            /* each member's velocity is its share of the path's (1 pulse per unit) */
             const float vi = PulDir_velocity(&ax[i]);
             assert(vi == (float)travel[i] * g->s.vel || (vi == 0.0f && g->s.vel == 0.0f));
             const float m = fabsf(vi) / ax[i].settings.speed;
@@ -2662,7 +2668,7 @@ static void group_move_sync(PulDirGroup* g, const int32_t* travel)
         const int32_t mag = travel[i] < 0 ? -travel[i] : travel[i];
         assert(st(i).count == c0[i] + travel[i] && !high(i));
         /* the generator rests on the target, the origin on the count, as after an axis's landing */
-        assert(ax[i].origin == st(i).count && ax[i].prof.done && ax[i].prof.pos == 0.0f);
+        assert(ax[i].origin == st(i).count && ax[i].profile.done && ax[i].profile.pos == 0.0f);
         assert(edges[i] - e0[i] == (uint64_t)mag && net[i] - n0[i] == travel[i]);
         assert(PulDir_target(&ax[i]) == (float)(c0[i] + travel[i]) && PulDir_velocity(&ax[i]) == 0.0f);
         if (travel[i] == 0) {
@@ -2674,7 +2680,8 @@ static void group_move_sync(PulDirGroup* g, const int32_t* travel)
         have = true;
         assert(last_rise[i] == last);         /* every final rising edge on one tick */
     }
-    assert(have && (last - PULDIR_TICK_START) % N == N - 1u);   /* the arrival interval's last tick */
+    /* the arrival interval's last tick */
+    assert(have && (last - PULDIR_TICK_START) % TICKS_PER_PLAN == TICKS_PER_PLAN - 1u);
     /* The start tick (5.7): every direction pin was set before the first set with
      * an increment latched, so no member loses ticks to a reversal (E14). */
     assert(g_inc_seen);
@@ -2698,7 +2705,7 @@ static void t_group_sync(void)
     }
     assert(PulDirGroup_init(&grp, m, 5));
     const int32_t go[5] = { 1000, 250, -60000, 0, 1 }, back[5] = { -1000, -250, 60000, 0, -1 };
-    const uint32_t phases[4] = { N / 2u, 0u, N - 1u, N / 3u };
+    const uint32_t phases[4] = { TICKS_PER_PLAN / 2u, 0u, TICKS_PER_PLAN - 1u, TICKS_PER_PLAN / 3u };
     for (int k = 0; k < 4; k++) {             /* back reverses every moving member */
         fake_plan_phase = phases[k];
         if (k == 2)
@@ -2706,10 +2713,10 @@ static void t_group_sync(void)
                 assert(PulDir_setJerk(&ax[i], jerk[i]));
         group_move_sync(&grp, k % 2 ? back : go);
     }
-    assert(grp.s.n > 1);                      /* the jerk runs had a window */
+    assert(grp.s.window > 1);                      /* the jerk runs had a window */
     assert(g_peak > 0.999f && g_peak < 1.0001f);   /* the tightest member reached its own speed, no more */
-    printf("  group_sync: worst |P - aim| = %.2e pulses, |count - aim| = %.4f pulses (N = %u)\n",
-           (double)g_worst_P / 4294967296.0, (double)g_worst_count / 4294967296.0, (unsigned)N);
+    printf("  group_sync: worst |P - aim| = %.2e pulses, |count - aim| = %.4f pulses (%u ticks per plan)\n",
+           (double)g_worst_P / 4294967296.0, (double)g_worst_count / 4294967296.0, (unsigned)TICKS_PER_PLAN);
 }
 
 /* D19 for the group: the plan tick run twice where the members arrive (the final
@@ -2728,7 +2735,7 @@ static void t_group_twice(void)
     }
     assert(PulDirGroup_init(&grp, m, 3));
     const int32_t go[3] = { 300, -170, 1 }, back[3] = { -300, 170, -1 };
-    const uint32_t phases[3] = { 0u, N / 2u, N - 1u };
+    const uint32_t phases[3] = { 0u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
     for (int k = 0; k < 12; k++) {
         fake_plan_phase = phases[k % 3];
         g_twice = k < 6 ? 1 : 2;
@@ -2740,7 +2747,7 @@ static void t_group_twice(void)
                 assert(PulDir_setJerk(&ax[i], 0.0f));
         group_move_sync(&grp, k % 2 ? back : go);
         const uint64_t e = edges[0] + edges[1] + edges[2];
-        fake_run(3u * N);
+        fake_run(3u * TICKS_PER_PLAN);
         assert(edges[0] + edges[1] + edges[2] == e);
     }
     g_twice = 0;
@@ -2761,7 +2768,7 @@ static void t_group_creep(void)
     assert(PulDirGroup_init(&grp, m, 3));
     const int32_t steps[4][3] = { { 3, 1, 1 }, { -1, 2, -1 }, { 2, -1, 1 }, { -4, -2, 2 } };
     for (int k = 0; k < 8; k++) {
-        fake_plan_phase = (uint32_t)k * (N / 8u);
+        fake_plan_phase = (uint32_t)k * (TICKS_PER_PLAN / 8u);
         group_move_sync(&grp, steps[k % 4]);
     }
 }
@@ -2773,7 +2780,7 @@ static void t_group_rules(void)
     fake_on_write(group_write);
     for (uint8_t i = 0; i < 4; i++)
         assert(PulDir_setDefaults(&ax[i], 4000.0f + 1000.0f * (float)i, 40000.0f, 30000.0f, 0.0f));
-    fake_run(N);                              /* the settings applied: no request pending */
+    fake_run(TICKS_PER_PLAN);                              /* the settings applied: no request pending */
     PulDir* m3[3] = { &ax[0], &ax[1], &ax[2] };
     PulDir* m2[2] = { &ax[2], &ax[3] };
 
@@ -2870,7 +2877,7 @@ static void t_group_rules(void)
             tg[2] = (float)(c[2] - 2000);
             assert(PulDirGroup_moveTo(&grp, tg));
         }
-        fake_run(150u * N);
+        fake_run(150u * TICKS_PER_PLAN);
         while (!high(1))                      /* just after a rising edge of member 1 */
             fake_run(1);
         uint64_t e0[3];
@@ -2893,12 +2900,12 @@ static void t_group_rules(void)
         fake_plan();                          /* a plan tick before member 1's pin is lowered */
         assert(high(1) && PulDirGroup_isMoving(&grp) && PulDir_isMoving(&ax[1]));
         for (uint32_t t = 0; PulDirGroup_isMoving(&grp); t++) {
-            assert(t < 3u * N);
+            assert(t < 3u * TICKS_PER_PLAN);
             fake_run(1);
         }
         for (uint8_t i = 0; i < 3; i++)
             assert(!PulDir_isMoving(&ax[i]) && !high(i));
-        fake_run(3u * N);
+        fake_run(3u * TICKS_PER_PLAN);
         for (uint8_t i = 0; i < 3; i++)
             assert(edges[i] == e0[i] && st(i).count == ch[i] && st(i).inc == 0);   /* no rising edge since */
     }
@@ -2917,7 +2924,7 @@ static void t_group_rules(void)
     tg[1] = (float)(c[1] - 9000);
     tg[2] = (float)(c[2] + 3000);
     assert(PulDirGroup_moveTo(&grp, tg));
-    fake_run(400u * N);
+    fake_run(400u * TICKS_PER_PLAN);
     PulDirGroup_stop(&grp);
     for (uint8_t i = 0; i < 3; i++)
         assert(ax[i].mode == PULDIR_MODE_GROUP && PulDir_isMoving(&ax[i]));
@@ -2934,7 +2941,7 @@ static void t_group_rules(void)
         check_rest(i, grp.delta[i]);
         /* the generator rests on the line, as an axis's rests where its stop ended */
         const double line = (double)c[i] + (double)grp.delta[i] * (double)s;
-        assert(a->origin == st(i).count && fabs((double)a->origin + (double)a->prof.pos - line) < 1e-4);
+        assert(a->origin == st(i).count && fabs((double)a->origin + (double)a->profile.pos - line) < 1e-4);
     }
 
     /* and the next group move from there lands exactly */
@@ -3011,7 +3018,7 @@ static void t_enable_release(void)
         assert(PulDir_setDefaults(&ax[i], 5000.0f, 1.0e5f, 1.0e5f, 0.0f));
     assert(PulDir_setDelays(a, 50u, 200u));
     PulDir_setAutoRelease(a, true);
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     assert(PulDir_status(a) == PULDIR_IDLE && !a->enable.enabled && !PulDir_isMoving(a));
 
     /* refused: a delay beyond half the tick counter, and enable without a pin */
@@ -3038,9 +3045,9 @@ static void t_enable_release(void)
     w = nw;
     while (fake_level(ENA(0))) {
         fake_run(1);
-        assert(PulDir_ticks() - f <= 200u * MS + N);
+        assert(PulDir_ticks() - f <= 200u * MS + TICKS_PER_PLAN);
     }
-    assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + N);
+    assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + TICKS_PER_PLAN);
     assert(nrise == 1000 && !high(0) && !a->enable.enabled && PulDir_status(a) == PULDIR_IDLE);
     printf("  enable_release: first edge %.2f ms after enable, released %.2f ms after the last fall\n",
            (double)(rise[0] - t_cmd) * 1000.0 / TICK_HZ, (double)(t - f) * 1000.0 / TICK_HZ);
@@ -3060,7 +3067,7 @@ static void t_enable_release(void)
     f = fall[nfall - 1u];
     while (fake_level(ENA(0)))
         fake_run(1);
-    assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + N);
+    assert(find_write(w, ENA(0), false, &t) && t - f >= 200u * MS && t - f <= 200u * MS + TICKS_PER_PLAN);
     assert(st(0).count == 500 && nrise == r1 + 500u);
 
     /* an explicit enable holds the drive: no release without a move */
@@ -3083,10 +3090,10 @@ static void t_enable_release(void)
     assert(PulDir_status(a) == PULDIR_MOVING);
     while (fake_level(ENA(0))) {
         fake_run(1);
-        assert(PulDir_ticks() - t_cmd <= N + 1u);
+        assert(PulDir_ticks() - t_cmd <= TICKS_PER_PLAN + 1u);
     }
     assert(find_write(w, ENA(0), false, &t) && t > fall[nfall - 1u] && fall[nfall - 1u] == t_cmd);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(nrise == r2 && st(0).count == ch && !PulDir_isMoving(a) && PulDir_status(a) == PULDIR_IDLE);
     assert(PulDir_target(a) == (float)ch);
 
@@ -3102,7 +3109,7 @@ static void t_enable_release(void)
         fake_run(1);
     assert(PulDir_enable(a, false) && a->enable.off_due && fake_level(ENA(0)));
     assert(PulDir_moveTo(a, (float)(st(0).count + 10)) && a->enable.enabled && fake_level(ENA(0)));
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(fake_level(ENA(0)) && a->enable.enabled);
     run_until_idle(a, TICK_HZ);
     assert(PulDir_enable(a, false) && !fake_level(ENA(0)));
@@ -3157,11 +3164,11 @@ static void t_fault(void)
      * fault pins before its snapshot, so moves still land exactly (D6). */
     fake_preempt = 3;
     for (int k = 0; k < 3; k++) {
-        fake_plan_phase = (uint32_t)k * (N / 3u);
+        fake_plan_phase = (uint32_t)k * (TICKS_PER_PLAN / 3u);
         const int32_t want = k % 2 ? 0 : 2000;
         assert(PulDir_moveTo(a, (float)want));
         run_until_idle(a, TICK_HZ);
-        assert(st(0).count == want && (last_rise[0] - WRAP_START) % N == N - 1u);
+        assert(st(0).count == want && (last_rise[0] - WRAP_START) % TICKS_PER_PLAN == TICKS_PER_PLAN - 1u);
     }
     assert(!ax[1].fault.latched && ax[1].fault.count == 0);
     PulDir_loop(a);
@@ -3175,17 +3182,17 @@ static void t_fault(void)
     fake_run(5u * MS);
     assert(!a->fault.latched && a->fault.count == 0 && PulDir_isMoving(a) && PulDir_velocity(a) == 4000.0f);
 
-    /* held: latched 2 ms after onset, within one plan interval; the axis halts */
+    /* a fault input held on: latched 2 ms after onset, within one plan interval; the axis halts */
     a->home.homed = true;
     const uint32_t on = PulDir_ticks();
     fake_set_input(FLT(0), true);
     while (!a->fault.latched) {
         fake_run(1);
-        assert(PulDir_ticks() - on <= 2u * MS + N + 8u);
+        assert(PulDir_ticks() - on <= 2u * MS + TICKS_PER_PLAN + 8u);
     }
     const size_t r0 = nrise;
     const int32_t ch = st(0).count;
-    assert(a->fault.last_tick - on >= 2u * MS && a->fault.last_tick - on <= 2u * MS + N);
+    assert(a->fault.last_tick - on >= 2u * MS && a->fault.last_tick - on <= 2u * MS + TICKS_PER_PLAN);
     assert(a->fault.count == 1 && PulDir_status(a) == PULDIR_FAULT && !a->home.homed);
     assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
     fake_run(10u * MS);
@@ -3223,13 +3230,13 @@ static void t_fault(void)
     while (fake_level(CLR(0))) {
         assert(a->fault.latched);
         fake_run(1);
-        assert(PulDir_ticks() - tc <= 10u * MS + N);
+        assert(PulDir_ticks() - tc <= 10u * MS + TICKS_PER_PLAN);
     }
     uint32_t tl;
-    assert(find_write(w, CLR(0), false, &tl) && tl - tc >= 10u * MS && tl - tc <= 10u * MS + N);
+    assert(find_write(w, CLR(0), false, &tl) && tl - tc >= 10u * MS && tl - tc <= 10u * MS + TICKS_PER_PLAN);
     for (uint32_t k = 0; k < 20u * MS; k++) {
         assert(a->fault.latched && PulDir_status(a) == PULDIR_FAULT && a->fault.count == 1);
-        if (k % N == 0u) {
+        if (k % TICKS_PER_PLAN == 0u) {
             a->refusal = PULDIR_R_NONE;
             assert(!PulDir_moveTo(a, 0.0f) && a->refusal == PULDIR_R_FAULT);
         }
@@ -3244,7 +3251,7 @@ static void t_fault(void)
     const uint32_t t_off = PulDir_ticks();
     while (a->fault.latched) {
         fake_run(1);
-        assert(PulDir_ticks() - t_off <= N + 8u);
+        assert(PulDir_ticks() - t_off <= TICKS_PER_PLAN + 8u);
     }
     assert(PulDir_status(a) == PULDIR_ENABLED && a->fault.count == 1);
     nlines = 0;
@@ -3259,7 +3266,7 @@ static void t_fault(void)
     fake_set_input(FLT(0), true);
     while (!a->fault.seen)
         fake_run(1);
-    while (PulDir_ticks() - a->fault.since < 2u * MS - N / 2u)
+    while (PulDir_ticks() - a->fault.since < 2u * MS - TICKS_PER_PLAN / 2u)
         fake_run(1);
     assert(!a->fault.latched);
     const int32_t c1 = st(0).count;
@@ -3267,14 +3274,14 @@ static void t_fault(void)
     assert(PulDir_moveTo(a, (float)(c1 + 5000)) && PulDir_isMoving(a));
     while (!a->fault.latched)
         fake_run(1);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(nrise == r1 && st(0).count == c1 && !PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
-    assert(PulDir_target(a) == (float)c1 && a->prof.done && a->fault.count == 2);
+    assert(PulDir_target(a) == (float)c1 && a->profile.done && a->fault.count == 2);
 
     /* the usual order, the alarm gone first: the latch holds until clearFault and
      * lifts at the first sample after the pulse */
     fake_set_input(FLT(0), false);
-    fake_run(10u * N);
+    fake_run(10u * TICKS_PER_PLAN);
     assert(a->fault.latched);
     w = nw;
     assert(PulDir_clearFault(a));
@@ -3283,7 +3290,7 @@ static void t_fault(void)
     assert(find_write(w, CLR(0), false, &tl) && a->fault.latched);
     while (a->fault.latched) {
         fake_run(1);
-        assert(PulDir_ticks() - tl <= N + 8u);
+        assert(PulDir_ticks() - tl <= TICKS_PER_PLAN + 8u);
     }
     assert(a->fault.count == 2);
     nlines = 0;
@@ -3296,7 +3303,7 @@ static void t_fault(void)
     assert(PulDir_clearFault(a));
     while (a->fault.clearing)
         fake_run(1);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(find_write(w, CLR(0), true, &tl) && find_write(w, CLR(0), false, &tl));
     nlines = 0;
     PulDir_loop(a);
@@ -3323,7 +3330,7 @@ static void t_fault(void)
     plan_on_lock = true;
     assert(!PulDir_jog(a, 100.0f) && a->refusal == PULDIR_R_FAULT && a->fault.latched);
     fake_on_lock(NULL);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(nrise == r1 && st(0).count == c1 && !PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
     assert(a->fault.count == 4);
 
@@ -3351,7 +3358,7 @@ static void t_fault_cases(void)
 
     /* the pin active at start: latched 2 ms after the first sample, motion refused */
     for (uint32_t t = 0; !ax[1].fault.latched; t++) {
-        assert(t < 2u * MS + N);
+        assert(t < 2u * MS + TICKS_PER_PLAN);
         fake_run(1);
     }
     assert(ax[1].fault.last_tick - WRAP_START >= 2u * MS && ax[1].fault.count == 1);
@@ -3361,9 +3368,9 @@ static void t_fault_cases(void)
     PulDir* a = &ax[0];
     while (!tick1())
         ;
-    fake_run(N - 2u);                         /* the next sample two ticks away */
+    fake_run(TICKS_PER_PLAN - 2u);                         /* the next sample two ticks away */
     fake_set_input(FLT(0), true);
-    fake_run(19u * N / 10u);                  /* samples at +2 and +N+2 */
+    fake_run(19u * TICKS_PER_PLAN / 10u);   /* samples at +2 and one interval later */
     assert(a->fault.seen);
     fake_set_input(FLT(0), false);
     fake_run(5u * MS);
@@ -3392,7 +3399,7 @@ static void t_fault_cases(void)
     const uint64_t e2 = edges[2];
     const int32_t c2 = st(2).count;
     assert(b->mode == PULDIR_MODE_IDLE && !PulDir_inStream(b) && !b->stream.live && PulDir_velocity(b) == 0.0f);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(edges[2] == e2 && st(2).count == c2 && !PulDir_isMoving(b) && PulDir_target(b) == (float)c2);
     b->refusal = PULDIR_R_NONE;
     assert(!PulDir_streamBegin(b) && b->refusal == PULDIR_R_FAULT);
@@ -3431,13 +3438,13 @@ static void t_group_fault(void)
     assert(PulDirGroup_init(&grp, m, 3));
     float tg[3] = { 3000.0f, -2000.0f, 1500.0f };
     assert(PulDirGroup_moveTo(&grp, tg));
-    fake_run(150u * N);
+    fake_run(150u * TICKS_PER_PLAN);
     for (uint8_t i = 0; i < 3; i++)
         assert(st(i).count != 0);             /* every member under way */
 
     fake_set_input(FLT(1), true);
     for (uint32_t t = 0; !ax[1].fault.latched; t++) {
-        assert(t < 3u * MS + N);
+        assert(t < 3u * MS + TICKS_PER_PLAN);
         fake_run(1);
     }
     uint64_t e0[3];
@@ -3451,16 +3458,16 @@ static void t_group_fault(void)
     }
     assert(PulDirGroup_faulted(&grp) && !ax[0].fault.latched && !ax[2].fault.latched);
     for (uint32_t t = 0; PulDirGroup_isMoving(&grp); t++) {
-        assert(t < 3u * N);
+        assert(t < 3u * TICKS_PER_PLAN);
         fake_run(1);
     }
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     for (uint8_t i = 0; i < 3; i++)
         assert(edges[i] == e0[i] && st(i).count == ch[i] && !PulDir_isMoving(&ax[i]) && !high(i));
     /* D12: no member released, faulted or not, for three release delays */
     fake_run(15u * MS);
     for (uint8_t i = 0; i < 3; i++)
-        assert(fake_level(ENA(i)) && ax[i].enable.enabled && ax[i].enable.held);
+        assert(fake_level(ENA(i)) && ax[i].enable.enabled && ax[i].enable.fault_hold);
 
     /* the group is refused while a member is latched */
     ax[1].refusal = PULDIR_R_NONE;
@@ -3483,7 +3490,7 @@ static void t_group_fault(void)
         assert(t < 12u * MS);
         fake_run(1);
     }
-    assert(fake_level(ENA(1)));                /* held until its own command */
+    assert(fake_level(ENA(1)));                /* fault hold until its own command */
     assert(PulDir_moveTo(&ax[1], (float)(ch[1] - 100)));   /* the faulted member's too */
     assert(edges_over(1, 4u) <= 1u);
     run_until_idle(&ax[1], TICK_HZ);
@@ -3499,11 +3506,11 @@ static void t_group_fault(void)
     for (uint8_t i = 0; i < 3; i++)
         tg[i] = (float)(st(i).count - 3000 + 1000 * i);
     assert(PulDirGroup_moveTo(&grp, tg));
-    fake_run(150u * N);
+    fake_run(150u * TICKS_PER_PLAN);
     fake_set_input(FLT(0), true);
     fake_set_input(FLT(1), true);
     for (uint32_t t = 0; !ax[0].fault.latched; t++) {
-        assert(t < 3u * MS + N);
+        assert(t < 3u * MS + TICKS_PER_PLAN);
         fake_run(1);
     }
     assert(ax[1].fault.latched && ax[0].fault.last_tick == ax[1].fault.last_tick);
@@ -3529,7 +3536,7 @@ static void t_group_paths(void)
     PulDir* a = &ax[0];
     for (uint8_t i = 0; i < 2; i++)
         assert(PulDir_setDefaults(&ax[i], 4000.0f, 40000.0f, 40000.0f, 0.0f));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     PulDir* m[2] = { &ax[0], &ax[1] };
     assert(PulDirGroup_init(&grp, m, 2));
 
@@ -3537,7 +3544,7 @@ static void t_group_paths(void)
     float tg[2] = { -500.0f, 0.0f };
     assert(PulDirGroup_moveTo(&grp, tg));
     PulDirGroup_stop(&grp);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(!PulDirGroup_isMoving(&grp) && a->mode == PULDIR_MODE_IDLE && !PulDir_isMoving(a));
     assert(edges[0] == 0u && dirw[0] == 0u && st(0).count == 0);
 
@@ -3602,7 +3609,7 @@ static void t_group_paths(void)
     assert(!PulDir_setJerk(a, 1.0f) && a->refusal == PULDIR_R_TAPS);
     const float floor_j = a->refused_value;
     assert(PulDir_setJerk(a, floor_j));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     c[0] = st(0).count;
     tg[0] = (float)(c[0] + 9);
     tg[1] = (float)st(1).count;
@@ -3652,14 +3659,14 @@ static void home_plan(bool after)
         seen_count[nseen] = st(0).count;
         nseen++;
     }
-    if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT && fabsf(a->vel_out) > fabsf(v_towards))
-        v_towards = a->vel_out;
+    if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT && fabsf(a->velocity) > fabsf(v_towards))
+        v_towards = a->velocity;
     if (h == PULDIR_HOME_MOVE_TOWARDS_LIMIT)
         set_towards = a->settings.speed;
     if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT)
         set_away = a->settings.speed;
-    if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && fabsf(a->vel_out) > fabsf(v_away))
-        v_away = a->vel_out;
+    if (h == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && fabsf(a->velocity) > fabsf(v_away))
+        v_away = a->velocity;
     if (h == PULDIR_HOME_ADJUST_POSITION) {
         const int64_t i = st(0).inc;
         adj_inc = (i < 0 ? -i : i) > adj_inc ? (i < 0 ? -i : i) : adj_inc;
@@ -3706,7 +3713,7 @@ static void t_homing(void)
     assert(PulDir_setDefaults(a, 4000.0f, 40000.0f, 40000.0f, 0.0f));
     assert(PulDir_setDefaults(&ax[1], 4000.0f, 40000.0f, 40000.0f, 0.0f));
     assert(PulDir_setSpeed(a, 1000.0f));      /* below the homing speed: homing runs at its own */
-    fake_run(N);                              /* the settings applied: no request pending */
+    fake_run(TICKS_PER_PLAN);                              /* the settings applied: no request pending */
 
     /* setHoming refuses bad input and changes nothing; homeStart needs it */
     const float cap = (float)(TICK_HZ / 2u);
@@ -3765,9 +3772,9 @@ static void t_homing(void)
     for (int k = 0; k < 7; k++)
         assert(seen[k] == order[k]);
     const uint32_t D = PULDIR_HOMING_DELAY_MS * MS;
-    assert(seen_tick[2] - seen_tick[1] >= D && seen_tick[2] - seen_tick[1] <= D + N);
-    assert(seen_tick[4] - seen_tick[3] >= D && seen_tick[4] - seen_tick[3] <= D + N);
-    assert(seen_tick[6] - seen_tick[5] >= D && seen_tick[6] - seen_tick[5] <= D + N);
+    assert(seen_tick[2] - seen_tick[1] >= D && seen_tick[2] - seen_tick[1] <= D + TICKS_PER_PLAN);
+    assert(seen_tick[4] - seen_tick[3] >= D && seen_tick[4] - seen_tick[3] <= D + TICKS_PER_PLAN);
+    assert(seen_tick[6] - seen_tick[5] >= D && seen_tick[6] - seen_tick[5] <= D + TICKS_PER_PLAN);
     assert(v_towards == -2000.0f && v_away == 400.0f);          /* home speed, then 0.2x of it back */
     assert(set_towards == 2000.0f && set_away == 400.0f);       /* applied as the speed setting */
     assert(seen_count[1] <= -1000 && seen_count[2] >= -1000 - 10);   /* stopped within an interval */
@@ -3809,7 +3816,7 @@ static void t_homing(void)
         assert(PulDir_homeState(a) == PULDIR_HOME_IDLE && !PulDir_isHomed(a));
         if (k < 2) {
             assert(a->mode == PULDIR_MODE_IDLE && PulDir_target(a) == (float)ch);
-            fake_run(3u * N);
+            fake_run(3u * TICKS_PER_PLAN);
             assert(edges[0] == e0 && st(0).count == ch && !PulDir_isMoving(a));
         } else {                              /* stop: ramped, at the axis's decel */
             assert(a->mode == PULDIR_MODE_STOPPING);
@@ -3832,10 +3839,10 @@ static void t_homing(void)
     uint32_t tf = PulDir_ticks();
     e0 = edges[0];
     int32_t ch = st(0).count;
-    assert(tf - t0 >= 300u * MS && tf - t0 <= 300u * MS + 2u * N);
+    assert(tf - t0 >= 300u * MS && tf - t0 <= 300u * MS + 2u * TICKS_PER_PLAN);
     assert(PulDir_homeState(a) == PULDIR_HOME_ERROR && !PulDir_isHomed(a) && a->mode == PULDIR_MODE_IDLE);
     assert(PulDir_target(a) == (float)ch && PulDir_velocity(a) == 0.0f);
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(edges[0] == e0 && st(0).count == ch && !PulDir_isMoving(a));
     PulDir_loop(a);
     assert(nlines == 1 && strcmp(lines[0], "[a0] homing failed in MOVE_TOWARDS_LIMIT") == 0);
@@ -3851,8 +3858,8 @@ static void t_homing(void)
     ch = st(0).count;
     assert(nseen == 4 && seen[2] == PULDIR_HOME_MOVE_AWAY_FROM_LIMIT && seen[3] == PULDIR_HOME_ERROR);
     tf = PulDir_ticks();
-    assert(tf - seen_tick[2] >= 400u * MS && tf - seen_tick[2] <= 400u * MS + N);
-    fake_run(3u * N);
+    assert(tf - seen_tick[2] >= 400u * MS && tf - seen_tick[2] <= 400u * MS + TICKS_PER_PLAN);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(edges[0] == e0 && st(0).count == ch && !PulDir_isMoving(a) && !PulDir_isHomed(a));
     PulDir_loop(a);
     assert(nlines == 1 && strcmp(lines[0], "[a0] homing failed in MOVE_AWAY_FROM_LIMIT") == 0);
@@ -3879,7 +3886,7 @@ static void t_homing(void)
         fake_run(1);
     assert(PulDir_homeState(a) == PULDIR_HOME_ERROR && a->mode == PULDIR_MODE_IDLE && !PulDir_isHomed(a));
     e0 = edges[0];
-    fake_run(3u * N);
+    fake_run(3u * TICKS_PER_PLAN);
     assert(edges[0] == e0 && !PulDir_isMoving(a));
     PulDir_loop(a);
     assert(nlines == 2 && strcmp(lines[0], "[a0] fault latched, count 2") == 0);
@@ -3901,7 +3908,7 @@ static void t_homing(void)
     const float jerk_def = a->defaults.jerk;
     a->defaults.jerk = 1.0f;
     home_run(a, st(0).count - 500, 6000u);
-    assert(PulDir_isHomed(a) && a->settings.speed == 400.0f && a->settings.jerk == 0.0f && a->prof.settings.jerk == 0.0f);
+    assert(PulDir_isHomed(a) && a->settings.speed == 400.0f && a->settings.jerk == 0.0f && a->profile.settings.jerk == 0.0f);
     assert(seen_count[5] - seen_count[4] == 50);
     a->defaults.jerk = jerk_def;
 
@@ -3924,11 +3931,11 @@ static void t_homing(void)
     assert(PulDir_isHomed(a));                /* a refused homeStart leaves the datum alone */
 }
 
-/* The settings as the getters read them and, at conv 1, as the generator holds them. */
+/* The settings as the getters read them and, at 1 pulse per unit, as the generator holds them. */
 static void settings_are(const PulDir* a, MotionSettings s, bool generator)
 {
     assert(same_settings(a->settings, s));
-    assert(!generator || same_settings(a->prof.settings, s));
+    assert(!generator || same_settings(a->profile.settings, s));
 }
 
 /* Runs until the axis has left HOMING. */
@@ -3959,7 +3966,7 @@ static void t_homing_settings(void)
     assert(PulDir_setSpeed(a, mine.speed) && PulDir_setAcceleration(a, mine.accel));
     assert(PulDir_setDeceleration(a, mine.decel) && PulDir_setJerk(a, mine.jerk));
     assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 300u));
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     settings_are(a, mine, true);
 
     /* refused while homing, settings and defaults unchanged */
@@ -3980,7 +3987,7 @@ static void t_homing_settings(void)
     assert(!PulDir_restoreDefaults(a) && a->refusal == PULDIR_R_MODE);
     a->refusal = PULDIR_R_NONE;
     assert(!PulDir_setDefaults(a, 1.0f, 1.0f, 1.0f, 0.0f) && a->refusal == PULDIR_R_MODE);
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     settings_are(a, run, true);
     assert(same_settings(a->defaults, dflt));
 
@@ -3999,7 +4006,7 @@ static void t_homing_settings(void)
             PulDir_stop(a);
         settings_are(a, mine, false);
         run_until_idle(a, TICK_HZ);
-        fake_run(N);
+        fake_run(TICKS_PER_PLAN);
         settings_are(a, mine, true);
         assert(PulDir_homeState(a) == PULDIR_HOME_IDLE && a->mode == PULDIR_MODE_IDLE);
     }
@@ -4007,16 +4014,16 @@ static void t_homing_settings(void)
     /* a stop in the adjust, which runs on the defaults' one-tap window: the
      * generator cannot widen it in flight, so it takes them once at rest */
     home_begin(a, st(0).count - 300);
-    for (uint32_t t = 0; !(a->home.state == PULDIR_HOME_ADJUST_POSITION && fabsf(a->vel_out) > 500.0f); t++) {
+    for (uint32_t t = 0; !(a->home.state == PULDIR_HOME_ADJUST_POSITION && fabsf(a->velocity) > 500.0f); t++) {
         assert(t < 3000u * MS);
         fake_run(1);
     }
     PulDir_stop(a);
     settings_are(a, mine, false);
-    fake_run(N);
-    assert(a->prof.settings.jerk == 0.0f && a->prof.settings.speed == dflt.speed);
+    fake_run(TICKS_PER_PLAN);
+    assert(a->profile.settings.jerk == 0.0f && a->profile.settings.speed == dflt.speed);
     run_until_idle(a, TICK_HZ);
-    fake_run(N);
+    fake_run(TICKS_PER_PLAN);
     settings_are(a, mine, true);
 
     /* a phase timeout and a fault latch end the run from the plan tick */
@@ -4076,7 +4083,7 @@ static void t_rollover(void)
     uint32_t t_to = 0, t_fail = 0, t_low = 0, t_latch = 0;
     for (uint32_t k = 0; k < 200u * MS; k++) {
         const uint32_t since = PulDir_ticks() - WRAP_START;
-        if (since < wrap - 400u && since % N == 7u) {
+        if (since < wrap - 400u && since % TICKS_PER_PLAN == 7u) {
             PulDir_stream(&ax[0], 0.0f, 0.0f);
             t_sp = PulDir_ticks();
         }
@@ -4109,12 +4116,14 @@ static void t_rollover(void)
         assert(starts[k] >= WRAP_START);
     for (int k = 0; k < 4; k++)
         assert(ends[k] != 0u && ends[k] < 0x80000000u);
-    assert(t_to - t_sp >= PULDIR_STREAM_TIMEOUT_MS * MS && t_to - t_sp <= PULDIR_STREAM_TIMEOUT_MS * MS + N);
+    assert(t_to - t_sp >= PULDIR_STREAM_TIMEOUT_MS * MS
+           && t_to - t_sp <= PULDIR_STREAM_TIMEOUT_MS * MS + TICKS_PER_PLAN);
     assert(PulDir_streamTimedOut(&ax[0]));
-    assert(t_fail - t_home >= 30u * MS && t_fail - t_home <= 30u * MS + 2u * N);
+    assert(t_fail - t_home >= 30u * MS && t_fail - t_home <= 30u * MS + 2u * TICKS_PER_PLAN);
     assert(ax[1].home.state == PULDIR_HOME_ERROR);
-    assert(t_low - t_clr >= PULDIR_FAULT_CLEAR_MS * MS && t_low - t_clr <= PULDIR_FAULT_CLEAR_MS * MS + N);
-    assert(t_latch - t_on >= PULDIR_FAULT_DEBOUNCE_MS * MS && t_latch - t_on <= PULDIR_FAULT_DEBOUNCE_MS * MS + N);
+    assert(t_low - t_clr >= PULDIR_FAULT_CLEAR_MS * MS && t_low - t_clr <= PULDIR_FAULT_CLEAR_MS * MS + TICKS_PER_PLAN);
+    assert(t_latch - t_on >= PULDIR_FAULT_DEBOUNCE_MS * MS
+           && t_latch - t_on <= PULDIR_FAULT_DEBOUNCE_MS * MS + TICKS_PER_PLAN);
     assert(first_rise[4] < 0x80000000u && first_rise[4] - t_ena >= 5u * MS);
     assert(st(4).count == 100);
     printf("  rollover: stream timeout %.2f ms, homing timeout %.2f ms, clear pulse %.2f ms, "
@@ -4182,7 +4191,7 @@ static void t_console(void)
     run_until_idle(a, TICK_HZ);
     assert(PulDir_position(a) == 3.0f);
     PulDir_console(a, 'J', "40");
-    fake_run(50u * N);
+    fake_run(50u * TICKS_PER_PLAN);
     assert(PulDir_isMoving(a) && PulDir_velocity(a) > 0.0f);
     PulDir_console(a, 'k', "");
     run_until_idle(a, TICK_HZ);
@@ -4198,21 +4207,21 @@ static void t_console(void)
 
     /* K halts, then releases the drive */
     PulDir_console(a, 'J', "40");
-    fake_run(50u * N);
+    fake_run(50u * TICKS_PER_PLAN);
     PulDir_console(a, 'K', "");
     assert(a->mode == PULDIR_MODE_IDLE && !a->enable.enabled);
-    fake_run(4u * N);
+    fake_run(4u * TICKS_PER_PLAN);
     run_until_idle(a, TICK_HZ);
     assert(!PulDir_isMoving(a) && PulDir_velocity(a) == 0.0f);
 
     /* K without an enable pin still halts, says so, and leaves no refusal */
     PulDir_console(b, 'J', "40");
-    fake_run(50u * N);
+    fake_run(50u * TICKS_PER_PLAN);
     nlines = 0;
     PulDir_console(b, 'K', "");
     assert(b->mode == PULDIR_MODE_IDLE);
     assert(nlines == 1 && strstr(lines[0], "halted") && strstr(lines[0], "no enable pin"));
-    fake_run(4u * N);
+    fake_run(4u * TICKS_PER_PLAN);
     PulDir_loop(b);
     assert(nlines == 1);
 
@@ -4293,7 +4302,8 @@ static void t_timing(void)
     assert(!fake_attach(1u, 1000u) && !fake_attach(20u, 20000u));   /* the second keeps its 20 us */
     assert(puldir_timing.pulse_us == 20u && puldir_timing.plan_us == 0u && !puldir_timing.set);
 
-    static const uint32_t bad[3][2] = { { 30u, 1000u }, { 500u, 500u }, { 2u, 10000u } };   /* N 33.3, 1, 5000 */
+    /* 33.3, 1 and 5000 ticks per plan */
+    static const uint32_t bad[3][2] = { { 30u, 1000u }, { 500u, 500u }, { 2u, 10000u } };
     PulDir a;
     for (int k = 0; k < 3; k++) {
         assert(fake_attach(bad[k][0], bad[k][1]));
@@ -4305,9 +4315,9 @@ static void t_timing(void)
     assert(!PulDir_init(&a, NULL, 1.0f) && !PulDir_init(&a, "sixteen chars ok", 1.0f));
     assert(nlines == 2 && strcmp(lines[1], "[?] init refused: name NULL or longer than 15 characters") == 0);
 
-    assert(fake_attach(2u, 8192u));           /* N = 4096, the most */
+    assert(fake_attach(2u, 8192u));           /* 4096 ticks per plan, the most */
     nlines = 0;
-    assert(PulDir_init(&a, "t", 1.0f) && puldir_timing.set && N == 4096u && TICK_HZ == 500000u);
+    assert(PulDir_init(&a, "t", 1.0f) && puldir_timing.set && TICKS_PER_PLAN == 4096u && TICK_HZ == 500000u);
     assert(nlines == 1 && strstr(lines[0], "(pulse 2 us, plan 8192 us)"));
     assert(!fake_attach(20u, 1000u) && !puldir_timing_pulse(4u) && !puldir_timing_plan(4096u));
     assert(puldir_timing.pulse_us == 2u && puldir_timing.plan_us == 8192u);
@@ -4354,9 +4364,9 @@ static void t_init_log(void)
     assert(fabsf(top - cap) <= 5.0e-5f + 1.0e-6f * cap && fabsf(res - 1.0f / 280.0f) <= 5.0e-5f);
     assert(pu == pulse_us && pl == plan_us);
     assert(!PulDir_setSpeed(&a, cap) && PulDir_setSpeed(&a, nextafterf(cap, 0.0f)));   /* "max" is just under */
-    assert(PulDir_init(&a, "tilt", 280.0f) && a.conv == 280.0f);
+    assert(PulDir_init(&a, "tilt", 280.0f) && a.pulses_per_unit == 280.0f);
     assert(PulDir_speed(&a) == 200.0f / 280.0f && a.defaults.accel == 200.0f / 280.0f && a.settings.jerk == 0.0f);
-    assert(a.prof.settings.speed == 200.0f && a.prof.settings.accel == 200.0f && a.prof.dt == DT);
+    assert(a.profile.settings.speed == 200.0f && a.profile.settings.accel == 200.0f && a.profile.dt == DT);
 
     PulDir_attachLogger(NULL);                /* no logger: no line, init still works */
     nlines = 0;

@@ -2,8 +2,8 @@
  * Float lives here; the pulse tick sees only the published integers. */
 #include "puldir_internal.h"
 
-#define M   (PULDIR_N * PULDIR_N)               /* D6 margin, in 2^-32 pulse */
-#define SAT ((int64_t)1 << 56)                  /* 2^24 pulses (D2) */
+#define M   (PULDIR_TICKS_PER_PLAN * PULDIR_TICKS_PER_PLAN)   /* D6 margin N^2, in 2^-32 pulse */
+#define SAT ((int64_t)1 << 56)                                /* 2^24 pulses (D2) */
 
 int64_t puldir_to_fix(float pulses) { return (int64_t)(pulses * PULDIR_FIX); }
 
@@ -24,12 +24,12 @@ static int32_t sat(int64_t q)
     return q > PULDIR_INC_MAX ? PULDIR_INC_MAX : q < -PULDIR_INC_MAX ? -PULDIR_INC_MAX : (int32_t)q;
 }
 
-int32_t puldir_div_trunc(int64_t d) { return sat(d / PULDIR_N); }
+int32_t puldir_div_trunc(int64_t d) { return sat(d / PULDIR_TICKS_PER_PLAN); }
 
 static int32_t div_away(int64_t d)
 {
-    int64_t q = d / PULDIR_N;
-    if (q * PULDIR_N != d)
+    int64_t q = d / PULDIR_TICKS_PER_PLAN;
+    if (q * PULDIR_TICKS_PER_PLAN != d)
         q += d > 0 ? 1 : -1;
     return sat(q);
 }
@@ -84,8 +84,8 @@ bool puldir_steer(PulDir* a, PulDirInc* out, int64_t T, int64_t end, int64_t pb,
  * new goal (E17), and a stream's idle generator stays put. */
 void puldir_halt_generator(PulDir* a, int64_t pb)
 {
-    MotionProfile_halt(&a->prof);
-    (void)MotionProfile_setPosition(&a->prof, puldir_to_pulses(pb));
+    MotionProfile_halt(&a->profile);
+    (void)MotionProfile_setPosition(&a->profile, puldir_to_pulses(pb));
     a->arrived = false;
     a->settle = 0;
     puldir_stream_halt(a);
@@ -96,7 +96,7 @@ void puldir_halt_generator(PulDir* a, int64_t pb)
 bool puldir_run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32_t live,
                           bool pul_high)
 {
-    MotionProfile* p = &a->prof;
+    MotionProfile* p = &a->profile;
     MotionProfile_advance(p);
     const int64_t end = puldir_to_fix(p->pos);
     if (!a->arrived) {
@@ -108,7 +108,7 @@ bool puldir_run_generator(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, 
             a->target = base + (uint64_t)end;
     }
     const int64_t T = (int64_t)(a->target - base);
-    a->vel_out = p->vel;
+    a->velocity = p->vel;
 
     const bool settled = puldir_steer(a, out, T, end, pb, p->landed && end == T,
                                       !p->endless && !p->stopping);
@@ -132,7 +132,7 @@ static void run_profile(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, in
 /* Settings in user units to the generator, and to the axis's own only if it takes them. */
 void puldir_take_settings(PulDir* a, MotionSettings s)
 {
-    if (MotionProfile_setSettings(&a->prof, puldir_in_pulses(a, s)))
+    if (MotionProfile_setSettings(&a->profile, puldir_in_pulses(a, s)))
         a->settings = s;
 }
 
@@ -148,7 +148,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     /* 2. Shift the generator onto the new origin. A profile heading for a target
      * takes the axis's target relative to it. */
     const float trel = puldir_to_pulses((int64_t)(a->target - base));
-    MotionProfile_rebase(&a->prof, (float)shift, trel);
+    MotionProfile_rebase(&a->profile, (float)shift, trel);
 
     /* 3. Requests, read after service: a latch's halt this tick is applied now (E17). Halt first, so
      * commands start where the pulses stopped; a stream begin before the settings, so they reach an
@@ -162,23 +162,23 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
     if (req & REQ_SETTINGS) {
         /* apply_settings checked them as the generator does. A homing stop's restore
          * can meet a window frozen in flight: it waits for the generator to rest. */
-        if (!MotionProfile_setSettings(&a->prof, puldir_in_pulses(a, a->settings)))
+        if (!MotionProfile_setSettings(&a->profile, puldir_in_pulses(a, a->settings)))
             a->req |= REQ_SETTINGS;
     }
     if (req & REQ_SETPOS)                       /* the datum is count, which is the origin */
-        (void)MotionProfile_setPosition(&a->prof, 0.0f);
+        (void)MotionProfile_setPosition(&a->profile, 0.0f);
     /* streamEnd (its defaults applied just above) or stop left STREAM; so does the timeout. */
     puldir_stream_check(a, pb, now);
     if (req & (REQ_TARGET | REQ_ENDLESS)) {
         if (req & REQ_TARGET)
-            (void)MotionProfile_setTarget(&a->prof, trel);
+            (void)MotionProfile_setTarget(&a->profile, trel);
         else
-            (void)MotionProfile_setEndless(&a->prof, a->req_speed);
+            (void)MotionProfile_setEndless(&a->profile, a->req_speed);
         a->arrived = false;                     /* so must every request that sets a new course */
         a->settle = 0;
     }
     if (req & REQ_STOP)
-        MotionProfile_stop(&a->prof);
+        MotionProfile_stop(&a->profile);
     if ((req & REQ_HOME) && a->mode == PULDIR_MODE_HOMING)
         puldir_home_begin(a, now);              /* homeStart: toward the switch */
 
@@ -186,7 +186,7 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
      * waits. The homing phase clock starts when the hold ends. */
     if (puldir_enable_delaying(a) && a->mode != PULDIR_MODE_IDLE) {
         puldir_set_inc(a, out, 0);
-        a->vel_out = 0.0f;
+        a->velocity = 0.0f;
         puldir_home_hold(a, now);
         return;
     }
@@ -204,13 +204,13 @@ static void run_axis(PulDir* a, PulDirInc* out, uint64_t Pb, int32_t count, int3
         break;
     case PULDIR_MODE_IDLE:
         puldir_set_inc(a, out, 0);
-        a->vel_out = 0.0f;
+        a->velocity = 0.0f;
         if (a->moving && !pul_high && live == 0)    /* after a halt: the last pulse is lowered */
             a->moving = false;
         break;
     default:
         puldir_set_inc(a, out, 0);
-        a->vel_out = 0.0f;
+        a->velocity = 0.0f;
         break;
     }
 }
@@ -228,14 +228,14 @@ static void service(PulDir* a, bool flt, uint32_t t_pin, uint32_t now, uint32_t 
 
     /* Latch: halt, and leave the enable pin alone (D12). */
     puldir_home_fault(a);
-    puldir_enable_hold(a);
+    puldir_enable_set_fault_hold(a);
     PulDirGroup* g = a->group;
     port_lock();
     if (a->mode == PULDIR_MODE_GROUP && g != NULL) {
         puldir_group_halt(g, out);
         g->faulted = true;
         for (uint8_t i = 0; i < g->count; i++) {
-            puldir_enable_hold(g->axes[i]);
+            puldir_enable_set_fault_hold(g->axes[i]);
             puldir_pulse_read(g->axes[i]->slot, ahead, &snap[g->axes[i]->slot]);
         }
     } else {
@@ -261,8 +261,8 @@ void puldir_plan_tick(void)
     PulDirSnap snap[PULDIR_MAX_AXES];
     port_lock();                                /* one consistent instant for every axis */
     /* Ticks the live increments still run before the next latch. At a boundary
-     * (left == N) the set published below latches on the very next tick, so none. */
-    const uint32_t ahead = puldir_left() % (uint32_t)PULDIR_N;
+     * (left == ticks_per_plan) the set published below latches on the very next tick, so none. */
+    const uint32_t ahead = puldir_left() % (uint32_t)PULDIR_TICKS_PER_PLAN;
     const uint32_t now = PulDir_ticks();        /* the tick count the positions were read at */
     for (uint8_t i = 0; i < n; i++)
         puldir_pulse_read(i, ahead, &snap[i]);  /* D5 prediction */

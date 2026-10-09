@@ -39,7 +39,7 @@ void puldir_enable_wake(PulDir* a)
 {
     PulDirEnable* e = &a->enable;
     e->release_due = false;
-    e->held = false;
+    e->fault_hold = false;
     e->off_due = false;
     if (e->attached && !e->enabled) {
         port_pin_write(e->pin, !e->inverted);
@@ -104,7 +104,7 @@ void puldir_enable_release(PulDir* a, bool was_moving, uint32_t now)
     }
     if (!e->release_due)
         return;
-    if (a->moving || a->mode != PULDIR_MODE_IDLE || e->held) {
+    if (a->moving || a->mode != PULDIR_MODE_IDLE || e->fault_hold) {
         e->release_due = false;
     } else if (now - e->idle_at >= e->release_ticks) {
         port_pin_write(e->pin, e->inverted);
@@ -119,7 +119,7 @@ bool puldir_enable_delaying(const PulDir* a)
     return a->enable.wait;
 }
 
-void puldir_enable_hold(PulDir* a)
+void puldir_enable_set_fault_hold(PulDir* a)
 {
-    a->enable.held = true;
+    a->enable.fault_hold = true;
 }

@@ -30,9 +30,10 @@ typedef struct {
     MotionSettings settings;
     /* private */
     float    p_t, p_c, v_t;               /* the trapezoid's own position, its Kahan compensation, velocity */
-    float    speed;                       /* endless speed, signed */
+    float    endless_speed;               /* the jog speed, signed */
     float    taps[MOTION_PROFILE_MAX_TAPS];   /* the trapezoid's velocities; zeros once it has landed */
-    uint16_t n, head;                     /* window length; next slot to overwrite */
+    uint16_t window;                      /* the filter's length, n in the comments; frozen in flight */
+    uint16_t head;                        /* next slot to overwrite */
     uint16_t drain;                       /* calls since landing, up to n + 1 */
     uint16_t run;                         /* the newest taps sharing a sign, zeros included, at most n */
     int8_t   run_sign;                    /* that sign; 0 while the run holds only zeros */

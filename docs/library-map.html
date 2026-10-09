@@ -462,7 +462,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <p class="prose">A position changes representation five times on its way to the pin. Each step exists to keep precision or speed where it is needed.</p>
     <div class="units">
       <div><h3>user units</h3><div class="ty">float · your degrees, mm</div><p><code>PulDir_moveTo(&amp;ax, 10.0f)</code>. Speed, accel, decel and jerk are set in the same units and kept in <code>settings</code>.</p><div class="where"><span class="chip main">main</span></div></div>
-      <div><h3>whole pulses</h3><div class="ty">roundf(x × conv)</div><p>Targets are whole pulses (D4), in [-2<sup>31</sup>, 2<sup>31</sup>), so a move ends exactly on an integer count.</p><div class="where"><span class="chip main">main</span></div></div>
+      <div><h3>whole pulses</h3><div class="ty">roundf(x × pulses_per_unit)</div><p>Targets are whole pulses (D4), in [-2<sup>31</sup>, 2<sup>31</sup>), so a move ends exactly on an integer count.</p><div class="where"><span class="chip main">main</span></div></div>
       <div><h3>32.32 target</h3><div class="ty">uint64 · 2<sup>-32</sup> pulse</div><p><code>PulDir.target</code>. Unsigned, so wrap is defined.</p><div class="where"><span class="chip main">main</span> <span class="chip plan">plan</span></div></div>
       <div><h3>profile pulses</h3><div class="ty">float · relative to origin</div><p>The generator works near zero: re-based on the emitted count every plan tick (D2), so float32 keeps its precision. Saturated to ±2<sup>24</sup>.</p><div class="where"><span class="chip plan">plan</span></div></div>
       <div><h3>increment</h3><div class="ty">int32 · 2<sup>-32</sup> pulse per tick</div><p><code>inc = Δ / N</code>, at most <code>PULDIR_INC_MAX</code>, just under half a pulse per tick: the 25,000 pulses/s ceiling at 50 kHz.</p><div class="where"><span class="chip plan">plan</span> <span class="chip pulse">pulse</span></div></div>
@@ -515,7 +515,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <h3><span class="n">4</span>Structs and enums</h3>
     <div class="structs">
       <div class="st big">
-        <h4>MotionProfile <small>motion_profile.h · one per axis (<code>PulDir.prof</code>), one per group (<code>PulDirGroup.s</code>), any bare use</small></h4>
+        <h4>MotionProfile <small>motion_profile.h · one per axis (<code>PulDir.profile</code>), one per group (<code>PulDirGroup.s</code>), any bare use</small></h4>
         <p>One running motion: where it is, how fast, where it is heading, and a ring of recent trapezoid velocities that smooths the jerk. About 1 KB at 256 taps.</p>
         <div class="rw"><span class="chip plan">plan tick writes</span>an axis's profile while the ticks run · <span class="chip main">main writes</span>it only at <code>PulDir_init</code>, and reads it under the lock for <code>checkSettings</code> · a group's <code>s</code>: main while inactive, plan tick while active</div>
         <div class="cols">
@@ -525,14 +525,14 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
               <tr><td>dt</td><td>float</td><td>seconds per advance, fixed at init</td></tr>
               <tr><td>settings</td><td>MotionSettings</td><td>the settings in force</td></tr>
               <tr><td>pos</td><td>float</td><td>filtered position: <code>p_t</code> minus the ring's lag (E5)</td></tr>
-              <tr><td>vel</td><td>float</td><td>filtered velocity: ring sum over <code>n</code>; exactly 0.0f when done</td></tr>
+              <tr><td>vel</td><td>float</td><td>filtered velocity: ring sum over <code>window</code>; exactly 0.0f when done</td></tr>
               <tr><td>acc</td><td>float</td><td>change of <code>vel</code> over the last call, over <code>dt</code></td></tr>
             </tbody></table></div>
             <h5>goal and state</h5>
             <div class="tw"><table><thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead><tbody>
               <tr><td>target</td><td>float</td><td>where the trapezoid is heading</td></tr>
               <tr><td>endless</td><td>bool</td><td>run at <code>speed</code>, no target</td></tr>
-              <tr><td>speed</td><td>float</td><td>the endless speed, signed</td></tr>
+              <tr><td>endless_speed</td><td>float</td><td>the jog speed, signed</td></tr>
               <tr><td>stopping</td><td>bool</td><td>stop as soon as the ramps allow</td></tr>
               <tr><td>landed</td><td>bool</td><td>the trapezoid is at rest; the ring may still drain</td></tr>
               <tr><td>done</td><td>bool</td><td>at target with <code>vel == 0.0f</code>, ring drained</td></tr>
@@ -548,7 +548,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
             <h5>jerk filter ring</h5>
             <div class="tw"><table><thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead><tbody>
               <tr><td>taps</td><td>float[MAX_TAPS]</td><td>the trapezoid's velocities; zeros once landed</td></tr>
-              <tr><td>n</td><td>uint16_t</td><td>window length, frozen while in flight</td></tr>
+              <tr><td>window</td><td>uint16_t</td><td>the filter length, n in formulas; frozen while in flight</td></tr>
               <tr><td>head</td><td>uint16_t</td><td>next slot to overwrite</td></tr>
               <tr><td>drain</td><td>uint16_t</td><td>calls since landing, up to n + 1 (E4)</td></tr>
               <tr><td>run, run_sign</td><td>uint16_t, int8_t</td><td>newest taps sharing a sign, and that sign (E30)</td></tr>
@@ -566,7 +566,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <div class="st">
         <h4>MotionSettings <small>motion_profile.h</small></h4>
         <p>The four numbers a profile runs on, in the caller's units. An axis keeps two in user units, <code>settings</code> and <code>defaults</code>, and homing a third, <code>saved</code>.</p>
-        <div class="rw">built in pulses by <code>puldir_in_pulses</code> (<code>settings × conv</code>) for the <span class="chip plan">plan tick</span> and for <span class="chip main">main</span> in <code>apply_settings</code>, and by group set-up from the smallest member's</div>
+        <div class="rw">built in pulses by <code>puldir_in_pulses</code> (<code>settings × pulses_per_unit</code>) for the <span class="chip plan">plan tick</span> and for <span class="chip main">main</span> in <code>apply_settings</code>, and by group set-up from the smallest member's</div>
         <table><thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead><tbody>
           <tr><td>speed</td><td>float</td><td>the cruise speed a move uses, &gt; 0; a short move never reaches it</td></tr>
           <tr><td>accel</td><td>float</td><td>the ramp up a move uses, &gt; 0</td></tr>
@@ -616,7 +616,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <thead><tr><th>Function</th><th>What it does</th></tr></thead>
       <tbody>
         <tr><td class="nm">acc_span</td><td><code>2·max(accel, decel)</code>, the span a reversal puts one window apart (E31).</td></tr>
-        <tr><td class="nm">window</td><td>Filter length for a set of settings; 1 without jerk, 0 if it does not fit.</td></tr>
+        <tr><td class="nm">window_for</td><td>Filter length for a set of settings; 1 without jerk, 0 if it does not fit.</td></tr>
         <tr><td class="nm">settings_valid</td><td>Finite, ramps &gt; 0, jerk ≥ 0.</td></tr>
         <tr><td class="nm">clear_ring, acc_history</td><td>Zero the ring and history; the largest acceleration the ring may hold.</td></tr>
         <tr><td class="nm">trapezoid</td><td>One step: the landing test (D13), the discrete ceiling, <code>toward</code>, Kahan-add the position.</td></tr>
@@ -639,7 +639,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <ol class="steps">
       <li><div><b>Done? Return.</b> A finished profile does nothing until it gets a new goal.</div><div class="fn">p-&gt;done</div></li>
       <li><div><b>Age the history.</b> When <code>hist_left</code> reaches 0 the ring has turned over and the replaced settings are forgotten (E32).</div><div class="fn">hist_left, hist_acc</div></li>
-      <li><div><b>Step the trapezoid.</b> Landed: velocity 0. Else land if the rest fits in one step within the step rule (D13), keeping the landing step in <code>v_t</code> for one call (E16). Else aim at the ceiling: 0 when stopping, <code>min(|speed|, settings.speed)</code> when endless, <code>sqrt(dd² + 2·decel·|rem|) − dd</code> toward a target.</div><div class="fn">trapezoid · toward · kahan_add</div></li>
+      <li><div><b>Step the trapezoid.</b> Landed: velocity 0. Else land if the rest fits in one step within the step rule (D13), keeping the landing step in <code>v_t</code> for one call (E16). Else aim at the ceiling: 0 when stopping, <code>min(|endless_speed|, settings.speed)</code> when endless, <code>sqrt(dd² + 2·decel·|rem|) − dd</code> toward a target.</div><div class="fn">trapezoid · toward · kahan_add</div></li>
       <li><div><b>Push the velocity into the ring.</b> Compensated sums; recompute on wrap; track the one-signed run.</div><div class="fn">push · recompute</div></li>
       <li><div><b>Drain after landing.</b> Zeros enter the ring. Once every tap is zero the sums are set exactly to zero; a one-signed ring's lag may only shrink (E30).</div><div class="fn">drain, run</div></li>
       <li><div><b>Output.</b> <code>vel = sum / n</code>, <code>pos = p_t − lag</code>, <code>acc = Δvel / dt</code>.</div><div class="fn">lag</div></li>
@@ -690,7 +690,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <thead><tr><th>Name</th><th>Default</th><th>Unit</th><th>Where</th><th>What it controls</th><th>What goes wrong if set wrong</th></tr></thead>
       <tbody>
         <tr><td class="nm">PULDIR_MAX_AXES</td><td>8u</td><td>axes</td><td>puldir.h, <code>#ifndef</code></td><td>Size of the axis table, the pulse tick's per-slot state and both increment sets; also the most members a group may have.</td><td>Too small: <code>PulDir_register</code> refuses (R_FULL). Larger costs RAM, and the pulse tick loops only over registered axes.</td></tr>
-        <tr><td class="nm">pulses_per_unit</td><td>none</td><td>pulses per user unit</td><td><code>PulDir_init</code> argument, stored in <code>conv</code></td><td>Every distance, speed and setting after init is in user units through it. Fixed for the axis's life.</td><td>Wrong value: every move is scaled. Not finite or ≤ 0: init refuses.</td></tr>
+        <tr><td class="nm">pulses_per_unit</td><td>none</td><td>pulses per user unit</td><td><code>PulDir_init</code> argument, stored in <code>pulses_per_unit</code></td><td>Every distance, speed and setting after init is in user units through it. Fixed for the axis's life.</td><td>Wrong value: every move is scaled. Not finite or ≤ 0: init refuses.</td></tr>
         <tr><td class="nm">name</td><td>none</td><td>≤ 15 chars</td><td><code>PulDir_init</code> argument</td><td>The <code>[name]</code> prefix of every log line.</td><td>NULL or 16+ characters: init refuses.</td></tr>
         <tr><td class="nm">starting settings</td><td>200, 200, 200, 0</td><td>pulses/s, /s², /s², /s³</td><td>fixed in <code>PulDir_init</code></td><td><code>defaults</code> and <code>settings</code> until <code>setDefaults</code>: 200 pulses/s and 200 pulses/s², no jerk limit, under the rate cap at any timing.</td><td>Not settable; replace them with <code>setDefaults</code>.</td></tr>
         <tr><td class="nm">defaults</td><td>the starting settings</td><td>user units</td><td><code>PulDir_setDefaults</code></td><td>Speed, accel, decel, jerk kept in <code>defaults</code>; <code>restoreDefaults</code>, <code>streamEnd</code> and the homing adjust phase return to them.</td><td>Speed at or above the rate cap: R_RATE. Jerk too low for 256 taps: R_TAPS (the log prints the floor). In flight, a jerk window change: R_WINDOW.</td></tr>
@@ -715,7 +715,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
               <tr><td>pul, dir</td><td>puldir_pin_t</td><td>pulse and direction pins</td></tr>
               <tr><td>pul_active_low, dir_inverted</td><td>bool</td><td>polarities</td></tr>
               <tr><td>has_pins</td><td>bool</td><td>attachPins ran; register needs it</td></tr>
-              <tr><td>conv</td><td>float</td><td>pulses per user unit, &gt; 0</td></tr>
+              <tr><td>pulses_per_unit</td><td>float</td><td><tr><td>pulses_per_unit</td><td>float</td><td>pulses per user unit, &gt; 0</td></tr>gt; 0, fixed at init</td></tr>
               <tr><td>defaults</td><td>MotionSettings</td><td>default speed, accel, decel, jerk, user units</td></tr>
               <tr><td>settings</td><td>MotionSettings</td><td>the ones in force, user units</td></tr>
               <tr><td>log_on</td><td>bool</td><td>this axis logs (setLogging)</td></tr>
@@ -738,11 +738,11 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
             <h5>plan tick state</h5>
             <div class="tw"><table><thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead><tbody>
               <tr><td>mode</td><td>volatile PulDirMode</td><td>who steers; main sets it on accept, the plan tick returns it to IDLE</td></tr>
-              <tr><td>prof</td><td>MotionProfile</td><td>the generator, in pulses relative to <code>origin</code></td></tr>
+              <tr><td>profile</td><td>MotionProfile</td><td>the generator, in pulses relative to <code>origin</code></td></tr>
               <tr><td>target</td><td>uint64_t</td><td>absolute target, 32.32 pulses</td></tr>
               <tr><td>origin</td><td>int32_t</td><td>the count the profile is re-based on (D2)</td></tr>
               <tr><td>moving</td><td>volatile bool</td><td>isMoving; set by main, cleared by the plan tick (D19)</td></tr>
-              <tr><td>vel_out</td><td>volatile float</td><td>commanded velocity, pulses/s; exactly 0.0f when stopped</td></tr>
+              <tr><td>velocity</td><td>volatile float</td><td>commanded velocity, pulses/s; exactly 0.0f when stopped</td></tr>
               <tr><td>settle</td><td>uint8_t</td><td>plan runs left before IDLE (D19)</td></tr>
               <tr><td>dir_out</td><td>int8_t</td><td>the last published direction, +1 or -1</td></tr>
               <tr><td>arrived</td><td>bool</td><td>the final interval is published; settling (E13)</td></tr>
@@ -846,8 +846,8 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="sig">void PulDir_stop(PulDir*)</td><td>REQ_STOP, mode STOPPING: ramps from the motion as commanded. In HOMING it ends the run unhomed and restores the saved settings.</td><td class="ref">MODE on a group member</td><td>main only</td></tr>
         <tr><td class="sig">void PulDir_halt(PulDir*)</td><td>Immediate (D17): no rising edge after this tick, target where the pulses stopped, IDLE. A member halts its whole group; a homing run ends.</td><td class="dim">none</td><td>main only</td></tr>
         <tr class="grp"><td colspan="4">State</td></tr>
-        <tr><td class="sig">float PulDir_position(PulDir*)</td><td>The emitted count over <code>conv</code> (D18): what the drive has been told. Unregistered: the datum.</td><td class="dim">none</td><td>main only</td></tr>
-        <tr><td class="sig">float PulDir_velocity(PulDir*)</td><td><code>vel_out / conv</code>.</td><td class="dim">none</td><td>main only</td></tr>
+        <tr><td class="sig">float PulDir_position(PulDir*)</td><td>The emitted count over <code>pulses_per_unit</code> (D18): what the drive has been told. Unregistered: the datum.</td><td class="dim">none</td><td>main only</td></tr>
+        <tr><td class="sig">float PulDir_velocity(PulDir*)</td><td><code>velocity / pulses_per_unit</code>.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">float PulDir_target(PulDir*)</td><td>The 32.32 target in user units.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">bool PulDir_setPosition(PulDir*, float)</td><td>Sets the datum (D18): count, position and edge together under the lock, REQ_SETPOS, the axis no longer homed.</td><td class="ref">ARG, NOT_IDLE</td><td>main only</td></tr>
         <tr><td class="sig">bool PulDir_isMoving(PulDir*)</td><td>Reads <code>moving</code>; clears two plan runs after the final interval, pin low (D19).</td><td class="dim">none</td><td>main only</td></tr>
@@ -862,12 +862,12 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <div class="tablewrap narrow"><table>
       <thead><tr><th>Function</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td class="nm">puldir_rate_cap(conv)</td><td><code>(tick_hz / 2) / conv</code>: speeds at or above it are refused. 25,000 pulses/s at a 20 µs pulse.</td></tr>
+        <tr><td class="nm">puldir_rate_cap(pulses_per_unit)</td><td><code>(tick_hz / 2) / pulses_per_unit</code>: speeds at or above it are refused. 25,000 pulses/s at a 20 µs pulse.</td></tr>
         <tr><td class="nm">init_refused</td><td>Logs <code>[name] init refused: why</code> at once; no axis holds an event yet.</td></tr>
-        <tr><td class="nm">puldir_in_pulses</td><td>Settings in user units times <code>conv</code>: what the generator takes. Used by main, the plan tick and group set-up.</td></tr>
+        <tr><td class="nm">puldir_in_pulses</td><td>Settings in user units times <code>pulses_per_unit</code>: what the generator takes. Used by main, the plan tick and group set-up.</td></tr>
         <tr><td class="nm">settings_busy</td><td>True in GROUP and HOMING: the path profile or the run owns the settings.</td></tr>
         <tr><td class="nm">apply_settings</td><td>Under the lock: <code>MotionProfile_checkSettings</code> on the live profile (about 100 cycles, E32), the rate cap, the mode; stores and sets REQ_SETTINGS.</td></tr>
-        <tr><td class="nm">set_one</td><td>Copies <code>settings</code> and the mode at one instant, changes one field (by its offset), calls <code>apply_settings</code>.</td></tr>
+        <tr><td class="nm">current_settings</td><td>For each one-setting setter: copies <code>settings</code> and the mode at one instant, refusing in GROUP and HOMING; the setter changes its field and calls <code>apply_settings</code>.</td></tr>
         <tr><td class="nm">puldir_motion_check</td><td>Under the lock: UNREGISTERED, then FAULT, then MODE for STREAM, GROUP, HOMING (D17).</td></tr>
         <tr><td class="nm">take_target</td><td>Under the lock: the check, then target, REQ_TARGET, PROFILE, moving, wake.</td></tr>
         <tr><td class="nm">puldir_halt_locked</td><td>Under the lock, from main or the plan tick: <code>puldir_kill</code>, target = count, saved settings back if homing, REQ_HALT, IDLE (E28).</td></tr>
@@ -891,7 +891,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
   <div class="sec">
     <h3><span class="n">8</span>Flow: moveTo and halt</h3>
     <ol class="steps main">
-      <li><div><b>Round.</b> <code>x = roundf(position × conv)</code>; outside [-2<sup>31</sup>, 2<sup>31</sup>) or NaN is R_ARG.</div><div class="fn">PulDir_moveTo</div></li>
+      <li><div><b>Round.</b> <code>x = roundf(position × pulses_per_unit)</code>; outside [-2<sup>31</sup>, 2<sup>31</sup>) or NaN is R_ARG.</div><div class="fn">PulDir_moveTo</div></li>
       <li><div><b>Check and store, under one lock.</b> Unregistered, fault latch, mode. Then <code>target = x &lt;&lt; 32</code>, REQ_TARGET replacing any pending motion request, mode PROFILE, <code>moving = true</code>, and the drive wakes.</div><div class="fn"><span class="lock">port_lock</span> · take_target · puldir_motion_check · puldir_enable_wake · <span class="lock">port_unlock</span></div></li>
       <li><div><b>Return.</b> True, or the refusal is stored for <code>PulDir_loop</code> and the call returns false. Nothing waits for motion.</div><div class="fn">puldir_refuse</div></li>
       <li><div><b>A halt instead.</b> Under the lock: a group member halts its group; otherwise the live and published increment go to zero, the target becomes the count, REQ_HALT, IDLE, and a homing run is cancelled. <code>isMoving</code> clears once the pin is low.</div><div class="fn"><span class="lock">port_lock</span> · puldir_group_halt or puldir_halt_locked · puldir_kill · puldir_home_cancel · <span class="lock">port_unlock</span></div></li>
@@ -917,7 +917,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <li><a href="#generator">Generator</a> <span>advance, rebase, halt, setPosition, setSettings, setTarget, setEndless, stop</span></li>
         <li><a href="#pulse">Pulse tick</a> <span>puldir_left, puldir_pulse_read, puldir_shadow, puldir_publish, PulDir_ticks</span></li>
         <li><a href="#axis">Axis API</a> <span>puldir_halt_locked, puldir_in_pulses</span></li>
-        <li><a href="#enable">Enable</a> <span>puldir_enable_service, _release, _delaying, _hold</span></li>
+        <li><a href="#enable">Enable</a> <span>puldir_enable_service, _release, _delaying, _set_fault_hold</span></li>
         <li><a href="#fault">Fault</a> <span>puldir_fault_sample, puldir_fault_service</span></li>
         <li><a href="#homing">Homing</a> <span>puldir_home_fault, _begin, _hold, _run</span></li>
         <li><a href="#stream">Stream</a> <span>puldir_stream_begin, _check, _run, _halt</span></li>
@@ -957,7 +957,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <table><thead><tr><th>name</th><th>value</th><th>meaning</th></tr></thead><tbody>
           <tr><td>PULDIR_ONE</td><td>(uint64_t)1 &lt;&lt; 32</td><td>one pulse in 32.32</td></tr>
           <tr><td>PULDIR_FIX</td><td>4294967296.0f</td><td>the same, as a float scale</td></tr>
-          <tr><td>PULDIR_N</td><td>(int64_t)timing.n</td><td>pulse ticks per plan interval</td></tr>
+          <tr><td>PULDIR_TICKS_PER_PLAN</td><td>(int64_t)timing.ticks_per_plan</td><td>pulse ticks per plan interval</td></tr>
         </tbody></table>
       </div>
     </div>
@@ -1105,7 +1105,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <table><thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead><tbody>
           <tr><td>pulse_us, plan_us</td><td>uint32_t</td><td>0 until the port hands them over</td></tr>
           <tr><td>tick_hz</td><td>uint32_t</td><td>1e6 / pulse_us</td></tr>
-          <tr><td>n</td><td>uint32_t</td><td>pulse ticks per plan interval, plan_us / pulse_us</td></tr>
+          <tr><td>ticks_per_plan</td><td>uint32_t</td><td>pulse ticks per plan interval, plan_us / pulse_us (N)</td></tr>
           <tr><td>dt</td><td>float</td><td>the plan interval in s: every profile's dt</td></tr>
           <tr><td>set</td><td>bool</td><td>the pair passed PulDir_init's check</td></tr>
           <tr><td>started</td><td>bool</td><td>PulDir_start has run</td></tr>
@@ -1239,7 +1239,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
           <tr><td>wait</td><td>bool</td><td>inside the enable delay: hold the motion</td></tr>
           <tr><td>release_due</td><td>bool</td><td>auto-release armed: the axis went IDLE at idle_at</td></tr>
           <tr><td>idle_at</td><td>uint32_t</td><td>tick the axis went IDLE</td></tr>
-          <tr><td>held</td><td>bool</td><td>a fault latch halted it: no release until a command (D12)</td></tr>
+          <tr><td>fault_hold</td><td>bool</td><td>a fault latch halted it: no release until a command (D12)</td></tr>
           <tr><td>off_due</td><td>bool</td><td>enable(false) with the pulse pin high: the plan tick lowers the pin after it</td></tr>
           <tr><td>enable_ticks, release_ticks</td><td>uint32_t</td><td>setDelays' delays, in pulse ticks</td></tr>
           <tr><td>auto_release</td><td>bool</td><td>setAutoRelease</td></tr>
@@ -1266,11 +1266,11 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <div class="tablewrap narrow"><table>
       <thead><tr><th>Function</th><th>Context</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td class="nm">puldir_enable_wake</td><td>main, under the lock</td><td>Cancels release, hold and deferred disable; enables a disabled drive and arms <code>wait</code>.</td></tr>
+        <tr><td class="nm">puldir_enable_wake</td><td>main, under the lock</td><td>Cancels release, the fault hold and deferred disable; enables a disabled drive and arms <code>wait</code>.</td></tr>
         <tr><td class="nm">puldir_enable_service</td><td>plan tick</td><td>Ends <code>wait</code> after the enable delay; lowers the pin for a deferred disable once the pulse pin is low.</td></tr>
-        <tr><td class="nm">puldir_enable_release</td><td>plan tick</td><td>Arms release when a moving axis goes IDLE; releases after the delay; cancels on motion or a hold.</td></tr>
+        <tr><td class="nm">puldir_enable_release</td><td>plan tick</td><td>Arms release when a moving axis goes IDLE; releases after the delay; cancels on motion or a fault hold.</td></tr>
         <tr><td class="nm">puldir_enable_delaying</td><td>plan tick</td><td>The enable delay still holds the axis.</td></tr>
-        <tr><td class="nm">puldir_enable_hold</td><td>plan tick</td><td>A fault latch halted the axis: no release until its next accepted command.</td></tr>
+        <tr><td class="nm">puldir_enable_set_fault_hold</td><td>plan tick</td><td>A fault latch halted the axis: no release until its next accepted command.</td></tr>
       </tbody>
     </table></div>
   </div>
@@ -1543,7 +1543,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <li><div><span class="tag plan">plan</span><b>Begin.</b> The speed setting becomes the homing speed; the generator jogs toward the switch. The clock waits out any enable delay.</div><div class="fn">puldir_home_begin · home_jog · puldir_home_hold</div></li>
       <li><div><span class="tag plan">plan</span><b>Toward the switch.</b> The byte reads 1: the generator stops dead on last interval's aim; DELAY1. Timeout first: fail.</div><div class="fn">MotionProfile_halt · home_fail</div></li>
       <li><div><span class="tag plan">plan</span><b>Back off.</b> After the delay, jog away at 0.2× until the byte reads 0; DELAY2. Timeout: fail.</div><div class="fn">home_jog(away)</div></li>
-      <li><div><span class="tag plan">plan</span><b>Adjust.</b> After the delay, the default settings and a target <code>count + round(adjust × conv)</code>; it ends through the usual arrival (E13, D19); DELAY3. Timeout: fail.</div><div class="fn">puldir_take_settings · setTarget · puldir_run_generator</div></li>
+      <li><div><span class="tag plan">plan</span><b>Adjust.</b> After the delay, the default settings and a target <code>count + round(adjust × pulses_per_unit)</code>; it ends through the usual arrival (E13, D19); DELAY3. Timeout: fail.</div><div class="fn">puldir_take_settings · setTarget · puldir_run_generator</div></li>
       <li><div><span class="tag plan">plan</span><b>Datum.</b> After the delay, with the pin low and no live increment: count to <code>zero</code>, homed, IDLE, <code>EV_HOMED</code>. The defaults stay as the settings.</div><div class="fn">home_datum · puldir_set_datum</div></li>
       <li><div><span class="tag plan">plan</span><b>Fail.</b> ERROR, halt, the saved settings back on this tick, <code>EV_HOME_FAILED</code>.</div><div class="fn">home_fail · puldir_halt_locked</div></li>
     </ol>
@@ -1662,7 +1662,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <ol class="steps">
       <li><div><b>Error at the boundary.</b> With a setpoint: <code>err = (sp_pos − count) + sp_vel × age − frac(Pb)</code>, age from the setpoint's tick to the boundary, clamped at zero. Each term is exact or small.</div><div class="fn">sp_pos · sp_vel · sp_tick · t_b</div></li>
       <li><div><b>Command.</b> <code>v_cmd = sp_vel + err × 1000 / catchup_ms</code>; without a setpoint yet, the velocity streamBegin took.</div><div class="fn">v_cmd</div></li>
-      <li><div><b>Cap.</b> <code>|v_cmd| ≤ settings.speed × conv</code>: the speed setting, below the tick ceiling.</div><div class="fn">settings.speed</div></li>
+      <li><div><b>Cap.</b> <code>|v_cmd| ≤ settings.speed × pulses_per_unit</code>: the speed setting, below the tick ceiling.</div><div class="fn">settings.speed</div></li>
       <li><div><b>Increment.</b> <code>inc = trunc(v_cmd × dt in 32.32 / N)</code>; the target becomes the aim, as for a jog; the idle generator sits on the pulse position.</div><div class="fn">puldir_div_trunc · puldir_set_inc · MotionProfile_setPosition</div></li>
       <li><div><b>Exit.</b> streamEnd, stop or the timeout puts the mode in STOPPING; the next check seeds the generator at <code>v_cmd</code> and stops it.</div><div class="fn">puldir_stream_check · leave_stream · MotionProfile_seed</div></li>
     </ol>
@@ -1777,7 +1777,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <tbody>
         <tr><td class="nm">listed</td><td>main</td><td>The group is already in the table.</td></tr>
         <tr><td class="nm">member_refusal</td><td>main</td><td>FAULT, BUSY (in a group move), NOT_IDLE.</td></tr>
-        <tr><td class="nm">path_settings</td><td>main</td><td>Each member's <code>settings × conv / |delta|</code>, smallest wins; members without travel or jerk do not constrain.</td></tr>
+        <tr><td class="nm">path_settings</td><td>main</td><td>Each member's <code>settings × pulses_per_unit / |delta|</code>, smallest wins; members without travel or jerk do not constrain.</td></tr>
         <tr><td class="nm">puldir_group_halt(g, shadow)</td><td>main or plan, under the lock</td><td>Kills every member's increment (and the shadow entry from the plan tick), target = count, REQ_HALT, IDLE; inactive.</td></tr>
         <tr><td class="nm">puldir_group_tick</td><td>plan tick</td><td>Runs every group, before the axes.</td></tr>
         <tr><td class="nm">run_group</td><td>plan tick</td><td>One interval: stop request, start wait, advance s, steer each member, finish.</td></tr>
@@ -2133,7 +2133,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <text class="seq-note" x="482" y="268">every plan tick until the move ends</text>
         <g class="seq-msg">
           <path class="edge" d="M80 92 H236" marker-end="url(#ah2)"/><circle cx="96" cy="80" r="9"/><text class="num" x="96" y="84" text-anchor="middle">1</text><text x="112" y="84">PulDir_moveTo(10.0)</text>
-          <text class="seq-note" x="252" y="122">2 · roundf(10 × conv) → whole pulses (D4)</text>
+          <text class="seq-note" x="252" y="122">2 · roundf(10 × pulses_per_unit) → whole pulses (D4)</text>
           <text class="seq-note" x="252" y="140">puldir_motion_check: unregistered, fault, mode</text>
           <path class="edge dash main" d="M240 172 H396" marker-end="url(#ah2)"/><circle cx="256" cy="160" r="9"/><text class="num" x="256" y="164" text-anchor="middle">3</text><text x="272" y="164">take_target · lock</text>
           <text class="seq-note" x="412" y="168">target, REQ_TARGET, mode PROFILE,</text>
@@ -2230,7 +2230,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <dt class="g">Ticks and timing</dt><dd class="g" hidden></dd>
     <dt>pulse tick</dt><dd>The highest-priority timer interrupt, once every <code>pulse_us</code>, in <code>puldir_pulse.c</code>. It latches increments and writes the PUL and DIR pins; integer maths only.</dd>
     <dt>plan tick</dt><dd>The second timer interrupt, once every <code>plan_us</code>, in <code>puldir_plan.c</code>. It turns requests into increments; all float maths runs here.</dd>
-    <dt>N</dt><dd>Pulse ticks per plan interval, <code>plan_us / pulse_us</code>, 2 to 4096; 50 at the README timing. <code>puldir_timing.n</code>, or <code>PULDIR_N</code> in the 32.32 maths. <span class="ref">E27</span></dd>
+    <dt>N</dt><dd>Pulse ticks per plan interval, <code>plan_us / pulse_us</code>, 2 to 4096; 50 at the README timing. <code>puldir_timing.ticks_per_plan</code>, or <code>PULDIR_TICKS_PER_PLAN</code> in the 32.32 maths. <span class="ref">E27</span></dd>
     <dt>interval</dt><dd>The N pulse ticks between two boundaries. One published increment set runs for one interval. <span class="ref">D5</span></dd>
     <dt>boundary</dt><dd>The tick where <code>left == N</code>: a pending set latches there, so every interval is exactly N ticks. <span class="ref">D5, E9, E11</span></dd>
 
@@ -2244,7 +2244,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <dt>increment (inc)</dt><dd>How far an axis advances per pulse tick, an <code>int32_t</code> in units of 2<sup>-32</sup> pulse. At most <code>PULDIR_INC_MAX</code>, just under half a pulse per tick.</dd>
     <dt>2<sup>-32</sup> pulse</dt><dd>The unit of the fractional part: <code>PULDIR_ONE</code> (2<sup>32</sup>) of them make one pulse.</dd>
     <dt>32.32 position</dt><dd>A 64-bit fixed-point position, 32 bits of whole pulses and 32 of fraction. Targets and the pulse tick's position use it; unsigned, so wrap is defined. <span class="ref">E9</span></dd>
-    <dt>whole-pulse target</dt><dd><code>moveTo</code>, <code>moveBy</code> and group moves round targets with <code>roundf(x × conv)</code>, so a move ends exactly on an integer count and group members can end on one tick. Stops, jogs and streams are not rounded. <span class="ref">D4</span></dd>
+    <dt>whole-pulse target</dt><dd><code>moveTo</code>, <code>moveBy</code> and group moves round targets with <code>roundf(x × pulses_per_unit)</code>, so a move ends exactly on an integer count and group members can end on one tick. Stops, jogs and streams are not rounded. <span class="ref">D4</span></dd>
     <dt>re-base</dt><dd>Each plan tick shifts the generator's origin to the whole pulses emitted, by the same integer for <code>pos</code> and <code>p_t</code>, so its floats stay small. It shifts, never re-syncs, so the lag carries into the next interval. <span class="ref">D1, D2</span></dd>
     <dt>snapshot</dt><dd>Every axis's pulse state (<code>PulDirSnap</code>) read under one lock at the start of a plan tick, so all axes and groups plan from the same instant. <span class="ref">D5</span></dd>
     <dt>Pb</dt><dd>The snapshot's position predicted at the next boundary, <code>P + inc × ahead</code> with <code>ahead = left % N</code>: where the pulses will be when the new set takes over. <span class="ref">D5, E11</span></dd>
@@ -2275,14 +2275,14 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <dt>event</dt><dd>A <code>PULDIR_EV_</code> bit in <code>PulDir.events</code>, set by the plan tick or a refusal, taken and logged by <code>PulDir_loop</code>.</dd>
 
     <dt class="g">Settings</dt><dd class="g" hidden></dd>
-    <dt>rate cap</dt><dd><code>(tick_hz / 2) / conv</code>: speeds at or above it are refused. 25,000 pulses/s at a 20 µs pulse. <span class="ref">D7</span></dd>
+    <dt>rate cap</dt><dd><code>(tick_hz / 2) / pulses_per_unit</code>: speeds at or above it are refused. 25,000 pulses/s at a 20 µs pulse. <span class="ref">D7</span></dd>
     <dt>catch-up time</dt><dd>How fast a stream closes its error: <code>v = sp_vel + err × 1000 / catchup_ms</code>. Default 50 ms; at least five plan intervals. <span class="ref">D11, E18</span></dd>
     <dt>stream timeout</dt><dd><code>PULDIR_STREAM_TIMEOUT_MS</code> (100 ms) without a setpoint: the axis leaves STREAM and stops at its decel.</dd>
     <dt>debounce</dt><dd>The alarm input must read active for <code>PULDIR_FAULT_DEBOUNCE_MS</code> (2 ms) of plan-tick samples before the latch closes.</dd>
     <dt>clear pulse</dt><dd>The <code>PULDIR_FAULT_CLEAR_MS</code> (10 ms) pulse <code>PulDir_clearFault</code> sends; the latch then lifts on the first inactive sample. <span class="ref">E22</span></dd>
     <dt>enable delay</dt><dd><code>enable_ms</code> from <code>setDelays</code>: after a drive is enabled, its axis publishes zero this long. <span class="ref">E20</span></dd>
     <dt>release delay</dt><dd><code>release_ms</code>: with auto-release on, how long an axis stays IDLE before its enable pin is lowered.</dd>
-    <dt>held</dt><dd><code>PulDirEnable.held</code>: a fault latch halted the axis, so auto-release skips it until its next accepted command. The drive stays enabled. <span class="ref">D12, E22</span></dd>
+    <dt>fault hold</dt><dd><code>PulDirEnable.fault_hold</code>: a fault latch halted the axis, so auto-release skips it until its next accepted command. The drive stays enabled. <span class="ref">D12, E22</span></dd>
 
     <dt class="g">Groups</dt><dd class="g" hidden></dd>
     <dt>path profile s</dt><dd>A group's own <code>MotionProfile</code>, from 0 to 1. Member i aims at <code>start + delta × s</code>, so every member arrives on the same interval. Its settings are the members' own over their travels, the smallest winning. <span class="ref">E19, E21</span></dd>
@@ -2290,7 +2290,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 </section>
 
 
-<footer>Built from the code on branch implement-puldir as of execution record E36. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E36 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
+<footer>Built from the code on branch implement-puldir as of execution record E37. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E37 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
 </div>
 
 <script>

@@ -42,7 +42,8 @@ static void set_period(TIM_HandleTypeDef* htim, uint32_t counts)
 }
 
 /* Both first updates come one count after start, the pulse timer's first: each plan tick (N pulse
- * periods) then follows a latch tick (1, N+1, ...) by the start skew, under one pulse period. */
+ * periods, N = ticks_per_plan) then follows a latch tick (1, N+1, ...) by the start skew, under one
+ * pulse period. */
 void port_start(void (*pulse)(bool), void (*plan)(void))
 {
     if (pulse_tim == NULL || plan_tim == NULL)

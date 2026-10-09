@@ -30,7 +30,7 @@ static void check_step(const MotionProfile* p, float vel0, float acc0)
     const float ulp = fmaxf(fabsf(p->vel), fabsf(vel0)) * FLT_EPSILON;
     /* Through the filter, vel = sum/n adds the sum's rounding (an ulp of n*v, over n)
      * and the division's to both vel and vel0: about three ulps in all. */
-    const float vel_ulps = p->n > 1 ? 3.0f : 1.0f;
+    const float vel_ulps = p->window > 1 ? 3.0f : 1.0f;
     if (!g_speed_relaxed)
         assert(fabsf(p->vel) <= S.speed * (1.0f + tol));
     assert(fabsf(dv) <= bound * p->dt * (1.0f + tol) + 1e-6f + vel_ulps * ulp);
@@ -59,9 +59,9 @@ static bool profiles_equal(const MotionProfile* a, const MotionProfile* b)
     return a->dt == b->dt && a->pos == b->pos && a->vel == b->vel && a->acc == b->acc
         && a->target == b->target && a->endless == b->endless && a->stopping == b->stopping
         && a->landed == b->landed && a->done == b->done && settings_equal(a->settings, b->settings)
-        && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->speed == b->speed
+        && a->p_t == b->p_t && a->p_c == b->p_c && a->v_t == b->v_t && a->endless_speed == b->endless_speed
         && memcmp(a->taps, b->taps, sizeof a->taps) == 0
-        && a->n == b->n && a->head == b->head && a->drain == b->drain && a->sum == b->sum
+        && a->window == b->window && a->head == b->head && a->drain == b->drain && a->sum == b->sum
         && a->sum_c == b->sum_c && a->wsum == b->wsum && a->wsum_c == b->wsum_c
         && a->run == b->run && a->run_sign == b->run_sign
         && a->hist_acc == b->hist_acc && a->hist_left == b->hist_left;
@@ -76,7 +76,7 @@ static void test_setup(void)
     assert(p.pos == 3.0f && p.target == 3.0f);
     assert(p.vel == 0.0f && p.acc == 0.0f);
     assert(p.settings.speed == 1.0f && p.settings.accel == 1.0f && p.settings.decel == 1.0f && p.settings.jerk == 0.0f);
-    assert(p.n == 1);
+    assert(p.window == 1);
 
     /* init refuses and leaves the profile alone */
     {
@@ -107,11 +107,11 @@ static void test_setup(void)
     {
         const MotionSettings trap = { 15, 30, 30, 0 }, jerk = { 15, 30, 30, 300 }, soft = { 15, 30, 30, 1 };
         assert(MotionProfile_setSettings(&p, trap));
-        assert(settings_equal(p.settings, trap) && p.n == 1);
+        assert(settings_equal(p.settings, trap) && p.window == 1);
         assert(MotionProfile_setSettings(&p, jerk));
-        assert(settings_equal(p.settings, jerk) && p.n == 200);     /* ceil(60 / 0.3) */
+        assert(settings_equal(p.settings, jerk) && p.window == 200);     /* ceil(60 / 0.3) */
         assert(!MotionProfile_setSettings(&p, soft));          /* 60,000 taps */
-        assert(settings_equal(p.settings, jerk) && p.n == 200);
+        assert(settings_equal(p.settings, jerk) && p.window == 200);
         /* 60 / (256 * 0.001f) in float is one ulp under 234.375 */
         assert(fabsf(MotionProfile_minJerk(30, 30, 0.001f) - 234.375f) <= 234.375f * 1e-6f);
     }
@@ -473,7 +473,7 @@ static void test_lowered_accel(float jerk)
         g_accel_carried = 30.0f;
         int calls = 0;     /* the checker's acc rounding: two velocity ulps over dt */
         for (; p.acc > 10.0f * (1.0f + 1e-4f) + 2.0f * 15.0f * FLT_EPSILON / p.dt; calls++) {
-            assert(calls <= p.n);
+            assert(calls <= p.window);
             step(&p);
         }
         assert(calls > 0);                   /* it was outside the new bound */
@@ -497,7 +497,7 @@ static void test_scurve(void)
 {
     const MotionSettings S = { 15, 30, 30, 300 };
     MotionProfile p = fresh(0.0f, 0.001f, S);
-    assert(p.n == 200);
+    assert(p.window == 200);
     assert(MotionProfile_setTarget(&p, 9.0f));
     int calls = 0, landed_call = -1;
     float peak = 0.0f;
@@ -556,7 +556,7 @@ static void test_dt_independence(float jerk)
     const MotionSettings S = { 15, 30, 30, jerk };
     MotionProfile fine = fresh(0.0f, 0.001f, S), coarse = fresh(0.0f, 0.005f, S);
     /* The window adds n - 1 calls of motion: the done call is in extra_calls. */
-    const float windows = fabsf((float)(fine.n - 1) * 0.001f - (float)(coarse.n - 1) * 0.005f);
+    const float windows = fabsf((float)(fine.window - 1) * 0.001f - (float)(coarse.window - 1) * 0.005f);
     assert(MotionProfile_setTarget(&fine, 9.0f));
     assert(MotionProfile_setTarget(&coarse, 9.0f));
     const Run f = run_to_done(&fine, 10000), c = run_to_done(&coarse, 10000);
@@ -575,7 +575,7 @@ static void test_frozen_window(void)
 {
     const float dt = 0.001f;
     MotionProfile p = fresh(0.0f, dt, (MotionSettings){ 15, 30, 30, 290 });
-    assert(p.n == 207);                       /* ceil(60 / 0.29) */
+    assert(p.window == 207);                       /* ceil(60 / 0.29) */
     assert(MotionProfile_setTarget(&p, 100.0f));
     for (int i = 0; i < 800; i++)             /* to cruise: 500 calls of ramp, 207 of window */
         step(&p);
@@ -593,12 +593,12 @@ static void test_frozen_window(void)
         const MotionProfile before = p;
         assert(MotionProfile_setSettings(&p, calls[i].S) == calls[i].ok);
         if (calls[i].ok)
-            assert(settings_equal(p.settings, calls[i].S) && p.n == 207);
+            assert(settings_equal(p.settings, calls[i].S) && p.window == 207);
         else
             assert(profiles_equal(&before, &p));
         for (int k = 0; k < 50; k++) {
             step(&p);
-            assert(p.n == 207);
+            assert(p.window == 207);
         }
     }
 
@@ -609,20 +609,20 @@ static void test_frozen_window(void)
         const float a0 = p.acc;
         step(&p);
         if (!p.done) {
-            assert(p.n == 207);
+            assert(p.window == 207);
             assert(fabsf(p.acc - a0) <= jerk * dt * (1.0f + 1e-4f) + 4.0f * 15.0f * FLT_EPSILON / dt);
         }
     }
-    assert(p.pos == 100.0f && p.n == 1);
+    assert(p.pos == 100.0f && p.window == 1);
 
     /* Done: the refused calls are accepted and n is recomputed. */
-    assert(MotionProfile_setSettings(&p, (MotionSettings){ 15, 30.1f, 30, 290 }) && p.n == 208);
-    assert(MotionProfile_setSettings(&p, (MotionSettings){ 15, 30, 30, 250 }) && p.n == 240);
+    assert(MotionProfile_setSettings(&p, (MotionSettings){ 15, 30.1f, 30, 290 }) && p.window == 208);
+    assert(MotionProfile_setSettings(&p, (MotionSettings){ 15, 30, 30, 250 }) && p.window == 240);
     assert(MotionProfile_setTarget(&p, 60.0f));      /* a move on the new window */
     for (int calls_ = 0; !p.done; calls_++) {
         assert(calls_ < 10000);
         step(&p);
-        assert(p.n == 240 || p.done);
+        assert(p.window == 240 || p.done);
     }
     assert(p.pos == 60.0f);
     {
@@ -642,7 +642,7 @@ static void test_frozen_window(void)
         assert(profiles_equal(&before, &q));
     }
     run_to_done(&q, 10000);
-    assert(MotionProfile_setSettings(&q, (MotionSettings){ 15, 30, 30, 300 }) && q.n == 200);
+    assert(MotionProfile_setSettings(&q, (MotionSettings){ 15, 30, 30, 300 }) && q.window == 200);
     printf("ok frozen_window\n");
 }
 
@@ -682,7 +682,7 @@ static void test_rebase(void)
     const float pos0 = e.pos, target0 = e.target;
     MotionProfile_rebase(&e, 1.0f, 999.0f);
     assert(fabsf(e.pos - (pos0 - 1.0f)) <= 1e-6f && e.target == target0 - 1.0f);
-    assert(e.endless && e.speed == 5.0f);
+    assert(e.endless && e.endless_speed == 5.0f);
 
     /* In flight, the caller's target is taken, not target - shift. */
     MotionProfile c = fresh(0.0f, 0.001f, S);
@@ -748,7 +748,7 @@ static void test_course_after_landing(float jerk)
         assert(MotionProfile_setTarget(&p, to));
         while (!p.landed)
             step(&p);
-        const float u = p.taps[(p.head + p.n - 1u) % p.n];   /* the landing step */
+        const float u = p.taps[(p.head + p.window - 1u) % p.window];   /* the landing step */
         if (u > 0.5f * S.decel * p.dt)
             sizable++;
         /* landed: nothing left to stop but the ring's lag, though v_t still holds u */
@@ -800,15 +800,15 @@ static void test_drain_mixed(void)
         furthest = fmaxf(furthest, p.pos - p.target);
         if (p.landed && !was_landed) {        /* the ring as it lands: the taps are velocities */
             was_landed = true;
-            for (uint16_t k = 0; k < p.n; k++)
+            for (uint16_t k = 0; k < p.window; k++)
                 positive += p.taps[k] > 0.0f;
         }
     }
-    assert(positive >= 100 && positive < p.n);   /* both signs, mostly the jog's */
+    assert(positive >= 100 && positive < p.window);   /* both signs, mostly the jog's */
     assert(furthest > 0.005f);                /* it went on past the target before returning */
     assert(p.pos == p.target && p.vel == 0.0f);
     printf("ok drain_mixed (%d of %u taps positive at landing, worst |dpos - vel dt| %.2e)\n",
-           positive, (unsigned)p.n, (double)worst);
+           positive, (unsigned)p.window, (double)worst);
 }
 
 /* A reversal with accel well above decel (review, E31): the first ramp's +accel taps are still in
@@ -825,11 +825,11 @@ static void test_reversal_asymmetric(void)
         up++;
     }
     const int down = (int)ceilf(1.0f / (S.decel * p.dt));   /* 50 calls back to rest */
-    for (int i = 0; i < (int)p.n - up - down; i++)
+    for (int i = 0; i < (int)p.window - up - down; i++)
         step(&p);
     assert(MotionProfile_setEndless(&p, -1.0f));
     float peak = 0.0f;
-    for (int i = 0; i < 2 * (int)p.n; i++) {
+    for (int i = 0; i < 2 * (int)p.window; i++) {
         const float a0 = p.acc;
         step(&p);
         peak = fmaxf(peak, fabsf(p.acc - a0) / p.dt);
@@ -837,7 +837,7 @@ static void test_reversal_asymmetric(void)
     assert(peak >= 0.9f * S.jerk);            /* the ramps did meet: the bound was exercised */
     assert(p.vel == -1.0f);
     printf("ok reversal_asymmetric (peak jerk %.1f of %.0f, n %u)\n", (double)peak, (double)S.jerk,
-           (unsigned)p.n);
+           (unsigned)p.window);
 }
 
 /* A live settings change meets a ring still holding motion under the old settings (review, E32): the
@@ -865,7 +865,7 @@ static void test_live_settings_history(void)
     assert(p.hist_acc == 30.0f && p.hist_left == 200);
     g_accel_carried = 30.0f;
     float peak = 0.0f;
-    for (int i = 0; i < 2 * (int)p.n; i++) {
+    for (int i = 0; i < 2 * (int)p.window; i++) {
         const float a0 = p.acc;
         step(&p);
         peak = fmaxf(peak, fabsf(p.acc - a0) / p.dt);

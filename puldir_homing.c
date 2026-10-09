@@ -8,7 +8,7 @@
  * below the tick ceiling, the adjust and the datum whole pulses inside int32. */
 static PulDirRefusal home_values(const PulDir* a, float speed, float adjust, float zero, float* cap)
 {
-    const float c = a->conv;
+    const float c = a->pulses_per_unit;
     const float z = roundf(zero * c), d = roundf(adjust * c);
     *cap = puldir_rate_cap(c);
     if (!(speed < *cap))
@@ -162,7 +162,7 @@ static void home_jog(PulDir* a, bool away)
     s.speed = speed;
     puldir_take_settings(a, s);
     const float dir = away ? -(float)h->dir : (float)h->dir;
-    (void)MotionProfile_setEndless(&a->prof, dir * speed * a->conv);   /* finite: homeStart checked it */
+    (void)MotionProfile_setEndless(&a->profile, dir * speed * a->pulses_per_unit);   /* finite: homeStart checked it */
     home_course(a);
 }
 
@@ -182,7 +182,7 @@ void puldir_home_begin(PulDir* a, uint32_t now)
  * no increment and the pin low, read again under the lock (puldir_set_datum). */
 static bool home_datum(PulDir* a, PulDirInc* out)
 {
-    const int32_t c = (int32_t)roundf(a->home.zero * a->conv);   /* checked by homeStart */
+    const int32_t c = (int32_t)roundf(a->home.zero * a->pulses_per_unit);   /* checked by homeStart */
     PulDirSnap s;
     port_lock();
     puldir_pulse_read(a->slot, 0u, &s);
@@ -194,12 +194,12 @@ static bool home_datum(PulDir* a, PulDirInc* out)
         return false;
     a->origin = c;
     a->target = (uint64_t)(uint32_t)c << 32;
-    (void)MotionProfile_setPosition(&a->prof, 0.0f);   /* done: ADJUST ended at rest */
+    (void)MotionProfile_setPosition(&a->profile, 0.0f);   /* done: ADJUST ended at rest */
     a->home.homed = true;
     a->home.state = PULDIR_HOME_IDLE;
     a->mode = PULDIR_MODE_IDLE;
     a->moving = false;
-    a->vel_out = 0.0f;
+    a->velocity = 0.0f;
     a->events |= PULDIR_EV_HOMED;
     puldir_set_inc(a, out, 0);
     return true;
@@ -211,7 +211,7 @@ void puldir_home_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
                      int32_t live, bool pul_high, uint32_t now)
 {
     PulDirHoming* h = &a->home;
-    MotionProfile* p = &a->prof;
+    MotionProfile* p = &a->profile;
     const uint8_t sw = *(const volatile uint8_t*)h->switch_ptr;
     const uint32_t in_phase = now - h->t0;
     const bool late = in_phase >= h->timeout_ticks;
@@ -238,7 +238,7 @@ void puldir_home_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int32
         break;
     case PULDIR_HOME_DELAY2:
         if (in_phase >= DELAY_TICKS) {
-            const int64_t t = (int64_t)count + (int64_t)roundf(h->adjust * a->conv);
+            const int64_t t = (int64_t)count + (int64_t)roundf(h->adjust * a->pulses_per_unit);
             if (t < INT32_MIN || t > INT32_MAX) {
                 home_fail(a, out, pb);
                 return;

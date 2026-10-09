@@ -132,7 +132,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
     }
     for (uint8_t i = 0; i < n && why == PULDIR_R_NONE; i++) {
         const PulDir* a = g->axes[i];
-        const float x = roundf(targets[i] * a->conv);
+        const float x = roundf(targets[i] * a->pulses_per_unit);
         const bool fits = x >= -PULDIR_PULSES_MAX && x < PULDIR_PULSES_MAX;      /* false for NaN */
         const int64_t d = fits ? (int64_t)x - count[i] : 0;
         if (!fits || d > TRAVEL_MAX || d < -TRAVEL_MAX) {
@@ -196,7 +196,7 @@ bool PulDirGroup_moveTo(PulDirGroup* g, const float* targets)
             a->group = g;
             a->arrived = false;                 /* a new course (E17) */
             a->settle = 0;
-            a->vel_out = 0.0f;
+            a->velocity = 0.0f;
             puldir_enable_wake(a);              /* 5.8: s waits for every member's enable delay */
         }
         g->faulted = false;
@@ -243,7 +243,7 @@ void puldir_group_halt(PulDirGroup* g, PulDirInc* shadow)
          * it where the pulses stopped. Motion is already over without it. */
         a->req |= REQ_HALT;
         a->mode = PULDIR_MODE_IDLE;
-        a->vel_out = 0.0f;
+        a->velocity = 0.0f;
         a->arrived = false;                     /* E17 */
         a->settle = 0;
         a->group = NULL;
@@ -279,10 +279,10 @@ static void finish(PulDirGroup* g, const PulDirSnap* sn)
         const PulDirSnap* q = &sn[a->slot];
         const uint64_t base = (uint64_t)(uint32_t)q->count << 32;
         const int64_t T = (int64_t)(a->target - base);
-        (void)MotionProfile_setPosition(&a->prof, (float)T * (1.0f / PULDIR_FIX));
+        (void)MotionProfile_setPosition(&a->profile, (float)T * (1.0f / PULDIR_FIX));
         a->origin = q->count;
         a->target = base;                       /* the target, or the last integer a stop reached */
-        a->vel_out = 0.0f;
+        a->velocity = 0.0f;
         a->mode = PULDIR_MODE_IDLE;
         a->moving = false;
         a->group = NULL;
@@ -361,7 +361,7 @@ static void run_group(PulDirGroup* g, const PulDirSnap* sn, PulDirInc* out)
                 a->target = base + (uint64_t)end;
         }
         const int64_t T = (int64_t)(a->target - base);
-        a->vel_out = s->vel == 0.0f ? 0.0f : (float)d * s->vel;
+        a->velocity = s->vel == 0.0f ? 0.0f : (float)d * s->vel;
         const bool done = puldir_steer(a, &out[a->slot], T, end, pb, arrival, !s->stopping);
         settled = settled && done;
         rest = rest && !q->high && q->inc == 0;

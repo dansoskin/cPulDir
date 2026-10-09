@@ -14,7 +14,7 @@ typedef struct {
     bool     wait;                       /* the enable delay has not yet passed since enabled_at: hold */
     bool     release_due;                /* auto-release: the axis went IDLE at idle_at */
     uint32_t idle_at;
-    bool     held;                       /* halted by a fault latch: no auto-release until a command (D12) */
+    bool     fault_hold;                 /* halted by a fault latch: no auto-release until a command (D12) */
     bool     off_due;                    /* enable(false) with the pulse pin high: the plan tick lowers
                                             the enable pin once the pulse pin is low */
     uint32_t enable_ticks, release_ticks; /* setDelays' delays, in pulse ticks */
@@ -34,7 +34,7 @@ void puldir_enable_service(PulDir*, bool pul_high, uint32_t now);
 void puldir_enable_release(PulDir*, bool was_moving, uint32_t now);
 /* Plan tick: the enable delay still holds the axis's motion. */
 bool puldir_enable_delaying(const PulDir*);
-/* Plan tick: a fault latch halted the axis, so no auto-release until its next
+/* Plan tick: a fault latch halted the axis, so set its fault hold: no auto-release until its next
  * accepted command (D12). */
-void puldir_enable_hold(PulDir*);
+void puldir_enable_set_fault_hold(PulDir*);
 #endif

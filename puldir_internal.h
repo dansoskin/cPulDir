@@ -37,13 +37,15 @@ enum {
 typedef struct {
     uint32_t pulse_us, plan_us;               /* 0 until the port hands them over */
     uint32_t tick_hz;                         /* 1e6 / pulse_us */
-    uint32_t n;                               /* pulse ticks per plan interval, plan_us / pulse_us */
+    uint32_t ticks_per_plan;                  /* pulse ticks per plan interval, plan_us / pulse_us: the
+                                                 guidelines' N */
     float    dt;                              /* the plan interval in s: every profile's dt */
     bool     set;                             /* the pair passed PulDir_init's check */
     bool     started;                         /* PulDir_start has run */
 } PulDirTiming;
 extern PulDirTiming puldir_timing;
-#define PULDIR_N ((int64_t)puldir_timing.n)   /* pulse ticks per plan interval, as the 32.32 maths wants it */
+/* Pulse ticks per plan interval, as the 32.32 maths wants it. */
+#define PULDIR_TICKS_PER_PLAN ((int64_t)puldir_timing.ticks_per_plan)
 bool puldir_timing_take(void);                /* PulDir_init: checks the pair and fixes it; true once set */
 
 /* A duration in pulse ticks; every time is compared by unsigned subtraction (5.9). */
@@ -73,8 +75,8 @@ PulDirInc* puldir_shadow(void);               /* the unpublished set; the plan t
  * passed. Every entry with a non-zero inc must have dir equal to its sign: the plan tick guarantees it. */
 void       puldir_publish(uint32_t due_tick);
 void       puldir_kill(uint8_t slot);         /* under the lock: zero live and published inc */
-/* Under the lock: ticks left in this interval, N when the next tick is the
- * boundary that latches. The live inc runs left % N more ticks. */
+/* Under the lock: ticks left in this interval, ticks_per_plan when the next tick is the
+ * boundary that latches. The live inc runs left % ticks_per_plan more ticks. */
 uint32_t   puldir_left(void);
 /* Under the lock: the slot's state, its position predicted ahead ticks on (0: the position itself). */
 void       puldir_pulse_read(uint8_t slot, uint32_t ahead, PulDirSnap* out);
@@ -104,7 +106,7 @@ bool puldir_run_generator(PulDir*, PulDirInc* out, uint64_t base, int64_t pb, in
                           bool pul_high);
 
 /* main context (puldir.c) */
-float puldir_rate_cap(float conv);            /* in user units: speeds at or above it are refused */
+float puldir_rate_cap(float pulses_per_unit); /* in user units: speeds at or above it are refused */
 MotionSettings puldir_in_pulses(const PulDir*, MotionSettings);   /* user units times the conversion */
 /* Under the lock, for every motion command: the fault latch and the mode at one instant (D17). */
 PulDirRefusal puldir_motion_check(const PulDir*);

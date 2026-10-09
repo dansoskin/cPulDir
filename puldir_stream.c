@@ -32,7 +32,7 @@ bool PulDir_streamBegin(PulDir* a)
  * 2^24 pulses from the datum the float setpoint is quantised before the library sees it. */
 void PulDir_stream(PulDir* a, float position, float velocity)
 {
-    const float p = position * a->conv, v = velocity * a->conv;
+    const float p = position * a->pulses_per_unit, v = velocity * a->pulses_per_unit;
     bool ok = isfinite(v) && p >= -PULDIR_PULSES_MAX && p < PULDIR_PULSES_MAX;   /* false for NaN */
     if (ok) {
         port_lock();
@@ -64,7 +64,7 @@ void PulDir_streamEnd(PulDir* a)
 
 bool  PulDir_inStream(PulDir* a)       { return a->mode == PULDIR_MODE_STREAM; }
 bool  PulDir_streamTimedOut(PulDir* a) { return a->stream.timed_out; }
-float PulDir_streamError(PulDir* a)    { return a->stream.err / a->conv; }
+float PulDir_streamError(PulDir* a)    { return a->stream.err / a->pulses_per_unit; }
 
 /* D11: at least five plan intervals (5.6), and not while streaming. */
 bool PulDir_setStreamCatchup(PulDir* a, uint32_t ms)
@@ -104,9 +104,9 @@ void puldir_stream_begin(PulDir* a, int64_t pb)
     /* The stream starts at the velocity the running set was aimed with; a stream ended and
      * begun within one interval keeps its own. */
     if (!a->stream.live)
-        a->stream.v_cmd = a->prof.vel;
-    MotionProfile_halt(&a->prof);
-    (void)MotionProfile_setPosition(&a->prof, puldir_to_pulses(pb));
+        a->stream.v_cmd = a->profile.vel;
+    MotionProfile_halt(&a->profile);
+    (void)MotionProfile_setPosition(&a->profile, puldir_to_pulses(pb));
     a->stream.live = true;
     a->arrived = false;                         /* the generator's goal is gone (E17) */
     a->settle = 0;
@@ -117,8 +117,8 @@ void puldir_stream_begin(PulDir* a, int64_t pb)
 static void leave_stream(PulDir* a, int64_t pb)
 {
     /* The generator was halted by streamBegin and stays done: seed accepts. */
-    (void)MotionProfile_seed(&a->prof, puldir_to_pulses(pb), a->stream.v_cmd);
-    MotionProfile_stop(&a->prof);
+    (void)MotionProfile_seed(&a->profile, puldir_to_pulses(pb), a->stream.v_cmd);
+    MotionProfile_stop(&a->profile);
     a->stream.live = false;
     a->arrived = false;                         /* a new course (E17) */
     a->settle = 0;
@@ -159,7 +159,7 @@ void puldir_stream_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
     }
     /* Specified behaviour (5.6), not input clamping: in STREAM the speed setting
      * bounds v_cmd, and it lies below the tick ceiling. */
-    const float top = a->settings.speed * a->conv;
+    const float top = a->settings.speed * a->pulses_per_unit;
     if (s->v_cmd > top)
         s->v_cmd = top;
     else if (s->v_cmd < -top)
@@ -167,7 +167,7 @@ void puldir_stream_run(PulDir* a, PulDirInc* out, uint64_t base, int64_t pb, int
 
     const int32_t inc = puldir_div_trunc(puldir_to_fix(s->v_cmd * puldir_timing.dt));
     puldir_set_inc(a, out, inc);
-    a->vel_out = s->v_cmd;
-    a->target = base + (uint64_t)(pb + (int64_t)inc * PULDIR_N);   /* the aim, as a jog reads it */
-    (void)MotionProfile_setPosition(&a->prof, frac);        /* the idle generator follows the pulses */
+    a->velocity = s->v_cmd;
+    a->target = base + (uint64_t)(pb + (int64_t)inc * PULDIR_TICKS_PER_PLAN);   /* the aim, as a jog reads it */
+    (void)MotionProfile_setPosition(&a->profile, frac);        /* the idle generator follows the pulses */
 }
