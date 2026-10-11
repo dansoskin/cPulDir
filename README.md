@@ -437,3 +437,9 @@ done
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
 - `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E37) at the end say where the library differs from the guidelines. Where they differ, the execution record wins.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.
+
+## GUI
+
+`gui/` holds a PyQt5 front end for the console: a reusable axis panel
+(`gui/puldir_view`) that any app can embed, and a demo app with a terminal. See
+[gui/README.md](gui/README.md).
