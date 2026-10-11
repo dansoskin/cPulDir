@@ -2075,7 +2075,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="sig">void port_unlock(void)</td><td>Unmasks them; a tick that came due fires now. STM32: restore PRIMASK.</td><td class="dim">none</td><td>main, plan tick</td></tr>
         <tr class="grp"><td colspan="4">STM32, puldir_port_stm32.h</td></tr>
         <tr><td class="sig">bool PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef*, IRQn_Type, uint32_t pulse_us)</td><td>Keeps the timer only if the library accepts its period. The application sets its prescaler for 1 MHz and enables its update interrupt.</td><td class="ref">false, as puldir_timing_pulse</td><td>main, first</td></tr>
-        <tr><td class="sig">bool PulDir_stm32_attachPlanIrq(IRQn_Type, uint32_t plan_us)</td><td>Keeps the plan IRQ only if the library accepts the plan period. Any vector the application does not otherwise use, at a priority below the pulse timer's; no timer (E38).</td><td class="ref">false, as puldir_timing_plan</td><td>main, first</td></tr>
+        <tr><td class="sig">bool PulDir_stm32_attachPlanIrq(IRQn_Type, uint32_t plan_us)</td><td>Keeps the plan IRQ only if the library accepts the plan period. Any NVIC peripheral vector (IRQn >= 0) the application does not otherwise use, at a priority below the pulse timer's; no timer (E38).</td><td class="ref">false, as puldir_timing_plan, or a system vector (IRQn &lt; 0, E41)</td><td>main, first</td></tr>
         <tr><td class="sig">void PulDir_stm32_pulseIrq(void)</td><td>Raw IRQ entry: returns at once with the update flag clear (shared vectors are safe), clears it, runs the pulse tick with the overrun flag.</td><td class="dim">none</td><td>pulse IRQ</td></tr>
         <tr><td class="sig">void PulDir_stm32_planIrq(void)</td><td>Raw IRQ entry: returns at once unless <code>plan_due</code> is set (shared vectors are safe), clears it, runs the plan tick.</td><td class="dim">none</td><td>plan IRQ</td></tr>
         <tr class="grp"><td colspan="4">Host fake, test/fake_port.h</td></tr>
@@ -2112,7 +2112,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <li><div><b>port_start.</b> Pulse timer and plan IRQ attached, the plan IRQ below the pulse IRQ in preemption, or Error_Handler; store the callbacks; set the pulse period with the counter one count before its update; clear and enable the plan IRQ; start the pulse timer.</div><div class="fn">NVIC_ClearPendingIRQ · NVIC_EnableIRQ · HAL_TIM_Base_Start_IT</div></li>
       <li><div><b>Pulse IRQ entry.</b> Return if UIF is clear (the vector's other source); clear UIF; call the tick with <code>late</code>; set <code>late</code> if UIF came back during the tick.</div><div class="fn">PulDir_stm32_pulseIrq</div></li>
       <li><div><b>Pend.</b> The boundary tick sets <code>plan_due</code> and pends the plan IRQ; it runs when the pulse tick returns, so each plan tick starts just after the latch it serves, whatever ticks were lost (E38).</div><div class="fn">port_plan_pend · NVIC_SetPendingIRQ</div></li>
-      <li><div><b>Plan IRQ entry.</b> Return unless <code>plan_due</code> (the vector's other source); clear it, then run the plan tick, so a pend during the run runs it again.</div><div class="fn">PulDir_stm32_planIrq</div></li>
+      <li><div><b>Plan IRQ entry.</b> Return unless <code>plan_due</code> (the vector's other source); clear it, then run the plan tick, so a pend after the clear runs it again; one between the check and the clear merges with this run, as NVIC pends do (E41).</div><div class="fn">PulDir_stm32_planIrq</div></li>
       <li><div><b>Lock.</b> Save PRIMASK, disable every interrupt; unlock restores PRIMASK. A tick due inside fires on unlock, late by the lock's length, which no other interrupt can stretch (E39).</div><div class="fn">port_lock · port_unlock · __disable_irq · __set_PRIMASK</div></li>
     </ol>
   </div>
@@ -2299,7 +2299,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 </section>
 
 
-<footer>Built from the code on branch implement-puldir as of execution record E40. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E40 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
+<footer>Built from the code on branch implement-puldir as of execution record E41. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E41 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
 </div>
 
 <script>

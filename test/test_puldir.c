@@ -1299,8 +1299,10 @@ static void lose_at(uint32_t offset, uint32_t n)
 {
     if (offset == 1u) {
         lose_in_plan = n;
-        while (lose_in_plan != 0u)
+        for (uint32_t t = 0; lose_in_plan != 0u; t++) {
+            assert(t < 2u * TICKS_PER_PLAN);        /* a missing pend fails here, not hangs */
             fake_run_pended(1);
+        }
     } else {
         while (left() != TICKS_PER_PLAN - offset)
             fake_run_pended(1);
@@ -1337,6 +1339,56 @@ static void t_plan_pend_lost(void)
         assert(net[0] == to && net[1] == -to / 2);       /* no stray edge on the way */
     }
     assert(PulDir_lateSets() == 0u);
+}
+
+/* A plan tick longer than a whole interval, under the pends (E41): N + 1 pulse ticks run between its
+ * snapshot and its publish, so the next boundary tick runs inside it and pends it again, and it runs
+ * once more as soon as it returns, back to back for as long as the fault lasts. Each publishes one
+ * set past its boundary (its N + 1 ticks outnumber its ahead), and the next run's first tick latches
+ * it late, except the last: the run its own boundary pended replaces it, at once and on time, before
+ * any tick. So the late sets are the overlong plan ticks less one. Exact landing is lost: the phase
+ * slips a tick per run, sets latch up to about N ticks late and each run's prediction misses the N + 1
+ * ticks it spends, so the axes settle tens of pulses off the target (700 ended at 631 to 723 and
+ * -400 at -299 to -380 across the run.sh timings). What holds: both stop, no stray edge, the pins low, and each axis's target is
+ * where it stopped, so position and target agree with the pulses sent. */
+static uint32_t overlong;                     /* plan ticks run under the fault */
+static void overlong_plan(bool after)
+{
+    count_plans(after);
+    if (!after && fake_preempt_unlock != 0u) {
+        overlong++;
+        assert(overlong < 20u * PLAN_HZ);
+    }
+    if (after && !PulDir_isMoving(&ax[0]) && !PulDir_isMoving(&ax[1]))
+        fake_preempt_unlock = 0u;             /* both landed: the fault ends with the next run */
+}
+
+static void t_plan_overlong(void)
+{
+    setup(2);
+    fake_on_write(count_write);
+    const float v = 9.0f * (float)PLAN_HZ;
+    assert(PulDir_setDefaults(&ax[0], v, 50.0f * v, 50.0f * v, 0.0f));
+    assert(PulDir_setDefaults(&ax[1], v, 50.0f * v, 50.0f * v, 5.0f * v / DT));   /* a 20-tap window */
+    fake_run_pended(3u * TICKS_PER_PLAN);
+    assert(PulDir_lateSets() == 0u);
+    assert(PulDir_moveTo(&ax[0], 700.0f) && PulDir_moveTo(&ax[1], -400.0f));
+    fake_on_plan(overlong_plan);
+    fake_preempt_unlock = TICKS_PER_PLAN + 1u;
+    while (left() != TICKS_PER_PLAN)
+        fake_pulse(false);
+    fake_run_pended(1);                       /* the boundary: the plan ticks run back to back from here */
+    assert(fake_preempt_unlock == 0u);
+    fake_run_pended(2u * TICKS_PER_PLAN);
+    assert(PulDir_lateSets() == overlong - 1u && overlong > 50u);
+    const int32_t c0 = st(0).count, c1 = st(1).count;
+    assert(!PulDir_isMoving(&ax[0]) && !PulDir_isMoving(&ax[1]) && !high(0) && !high(1));
+    assert(net[0] == c0 && net[1] == c1 && c0 > 0 && c1 < 0);
+    assert(PulDir_target(&ax[0]) == (float)c0 && PulDir_target(&ax[1]) == (float)c1);
+    fake_run_pended(10u * TICKS_PER_PLAN);
+    assert(st(0).count == c0 && st(1).count == c1 && PulDir_lateSets() == overlong - 1u);
+    printf("  plan_overlong: %u overlong plan ticks, %u late sets, ended at %d and %d for 700 and -400 (%u ticks per plan)\n",
+           (unsigned)overlong, (unsigned)PulDir_lateSets(), (int)c0, (int)c1, (unsigned)TICKS_PER_PLAN);
 }
 
 /* The failure E38 removes: the plan tick on a free-running schedule, just after the boundary as
@@ -4587,6 +4639,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "plan_pend", t_plan_pend },
     { "plan_pend_lost", t_plan_pend_lost },
     { "free_running_lost", t_free_running_lost },
+    { "plan_overlong", t_plan_overlong },
     { "jog_settling", t_jog_settling },
     { "halt_any_tick", t_halt_any_tick },
     { "stream_sine", t_stream_sine },

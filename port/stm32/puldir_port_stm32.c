@@ -23,10 +23,12 @@ bool PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn, uint
     return true;
 }
 
-/* The plan period goes to the library only: the pulse tick pends this IRQ every plan_us (E38). */
+/* The plan period goes to the library only: the pulse tick pends this IRQ every plan_us (E38).
+ * A system vector (IRQn < 0) is refused: CMSIS pends and enables only NVIC peripheral vectors, so
+ * the plan tick would never run (E41). */
 bool PulDir_stm32_attachPlanIrq(IRQn_Type irqn, uint32_t plan_us)
 {
-    if (!puldir_timing_plan(plan_us))
+    if ((int32_t)irqn < 0 || !puldir_timing_plan(plan_us))
         return false;
     plan_irq = irqn;
     plan_attached = true;
@@ -81,7 +83,9 @@ void PulDir_stm32_planIrq(void)
 {
     if (!plan_due)
         return;                                     /* the vector's other source */
-    plan_due = false;                               /* first: a pend during the run runs it again */
+    /* Cleared before the run: a pend after this store runs the plan tick again once this run returns;
+     * one between the load above and this store merges with this run, as two pends do in the NVIC. */
+    plan_due = false;
     plan_fn();
 }
 

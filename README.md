@@ -8,7 +8,7 @@ Add `motion_profile.c`, `puldir.c`, `puldir_pulse.c`, `puldir_plan.c`, `puldir_l
 
 ## STM32 timer setup
 
-puldir needs one timer and one interrupt vector: a pulse timer that writes the pins, and a plan IRQ that runs the profiles. The pulse tick pends the plan IRQ once every plan period, at the end of the tick that latches a new set, so the plan tick always starts just after the boundary it serves, even if a pulse tick was lost (E38 in the plan). Any timer with an update interrupt will do for the pulse timer. The plan IRQ is any vector the application does not otherwise use. The port works on any family, because it includes `main.h` and names no timer.
+puldir needs one timer and one interrupt vector: a pulse timer that writes the pins, and a plan IRQ that runs the profiles. The pulse tick pends the plan IRQ once every plan period, at the end of the tick that latches a new set, so the plan tick always starts just after the boundary it serves, even if a pulse tick was lost (E38 in the plan). Any timer with an update interrupt will do for the pulse timer. The plan IRQ is any NVIC peripheral vector (IRQn >= 0) the application does not otherwise use; the attach call refuses a system vector such as PendSV, which CMSIS cannot pend or enable. The port works on any family, because it includes `main.h` and names no timer.
 
 In this README, `htim_pulse` stands for your pulse timer's handle, `PULSE_TIM_IRQn` and `PULSE_TIM_IRQHandler` for its interrupt names, and `PLAN_IRQn` and `PLAN_IRQHandler` for the plan vector's.
 
@@ -18,7 +18,7 @@ In this README, `htim_pulse` stands for your pulse timer's handle, `PULSE_TIM_IR
 - Leave the period alone. The library writes it in `PulDir_start`.
 - Enable the update interrupt and give it the highest priority in the application (0).
 
-For the plan IRQ, pick a vector nothing else uses. A timer's vector is a good choice; the timer itself is never started, so it raises nothing. On a G4, TIM7's `TIM7_DAC_IRQn` serves if the DAC2 and DAC4 interrupts are unused. Give it the next priority (1), below the pulse timer: either activate that timer in CubeMX, enable its interrupt and set the priority there, or skip CubeMX and call `HAL_NVIC_SetPriority(PLAN_IRQn, 1, 0)` before `PulDir_start`. `PulDir_start` clears and enables it, and calls `Error_Handler()` if its preemption priority is not below the pulse timer's: a vector left at its reset priority, 0, would hold the pulse ticks off for the whole plan tick. Put everything else (UART, DMA, USB, CAN, SysTick) at 2 or lower urgency. Anything left at 0 adds its run time to the pulse jitter.
+For the plan IRQ, pick an NVIC peripheral vector (IRQn >= 0) nothing else uses. A timer's vector is a good choice; the timer itself is never started, so it raises nothing. On a G4, TIM7's `TIM7_DAC_IRQn` serves if the DAC2 and DAC4 interrupts are unused. Give it the next priority (1), below the pulse timer: either activate that timer in CubeMX, enable its interrupt and set the priority there, or skip CubeMX and call `HAL_NVIC_SetPriority(PLAN_IRQn, 1, 0)` before `PulDir_start`. `PulDir_start` clears and enables it, and calls `Error_Handler()` if its preemption priority is not below the pulse timer's: a vector left at its reset priority, 0, would hold the pulse ticks off for the whole plan tick. Put everything else (UART, DMA, USB, CAN, SysTick) at 2 or lower urgency. Anything left at 0 adds its run time to the pulse jitter.
 
 **The IRQ handlers.** Call the raw entries `PulDir_stm32_pulseIrq()` and `PulDir_stm32_planIrq()`, not `HAL_TIM_IRQHandler`, whose flag checks cost more than the whole tick at a 5 µs pulse. Put the call in the generated handler's first USER CODE section and return before the HAL call. Regeneration keeps the user sections.
 
@@ -408,6 +408,7 @@ Each attach call checks its own range. `PulDir_init` checks the ratio, refuses w
 - Stream tracking at the default 50 ms catch-up lags by a few pulses on sharp accelerations (example 5).
 - Position is a float in user units, so it is exact only to about seven digits (2^24 units). The axis keeps the count in whole pulses and re-bases the profile, so the count itself does not drift.
 - A single move longer than 2^31 pulses wraps.
+- A plan tick that runs longer than a whole interval makes every set late and loses exact landing: the axes stop tens of pulses off the target and report where they stopped (E41). `plan tick late` in the log is the alarm.
 - Build the library at -O2, even in a firmware built at -O0 (per-file options). At -O0 the longest locked sections take several µs: the plan tick's snapshot about 1.3 µs per axis, a group halt about 2.3 µs per member, the plan tick's fault halt of a group about 4 µs per member, a settings change about 5 µs, at 144 MHz. With four axes or members some of them pass a 10 µs pulse period, and a pulse tick held past its next update is lost (E39).
 
 ## Tests and target compile
@@ -436,7 +437,7 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E40) at the end say where the library differs from the guidelines. Where they differ, the execution record wins. E38 starts the plan tick from the pulse tick instead of a timer of its own, E39 makes the STM32 lock mask every interrupt, and E40 logs the overrun and late-set totals at most once a second each.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E41) at the end say where the library differs from the guidelines. Where they differ, the execution record wins. E38 starts the plan tick from the pulse tick instead of a timer of its own, E39 makes the STM32 lock mask every interrupt, and E40 logs the overrun and late-set totals at most once a second each; E41 is the review that followed.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.
 
 ## GUI

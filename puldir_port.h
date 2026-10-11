@@ -25,10 +25,10 @@ void port_pin_write(puldir_pin_t, bool level);   /* from the pulse tick: one reg
 bool port_pin_read (puldir_pin_t);               /* from the plan tick */
 /* Starts the pulse tick every pulse_us, the period the port handed over, in 1 us counts. */
 void port_start(void (*pulse_tick)(bool overrun), void (*plan_tick)(void));
-/* From the pulse tick, at the end of each boundary tick (the one that latches, every ticks_per_plan
- * ticks from the first): makes plan_tick run once the pulse tick returns, at a lower priority than
- * it. The plan tick then always starts just after the latch it serves, whatever ticks were lost
- * (E38). */
+/* From the pulse tick, at the end of each boundary tick (left == ticks_per_plan on entry, every
+ * ticks_per_plan ticks from the first): runs plan_tick once more after the pulse tick returns, at a
+ * lower priority than it, and again after the current run if one is in progress. The plan tick
+ * then always starts just after the boundary it serves, whatever ticks were lost (E38). */
 void port_plan_pend(void);
 /* Masks at least the library's two interrupts, and no other interrupt may run inside it: the pulse
  * tick then waits at most the longest locked section, a few stores (E39). Never nested by the core.
