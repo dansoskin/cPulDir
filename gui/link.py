@@ -76,7 +76,14 @@ class DeviceLink(QObject):
         return bool(ser is not None and getattr(ser, "is_open", False))
 
     def send(self, line: str) -> None:
-        self._worker.sendData(line)
+        # The worker checks the port and then writes to it, while its own thread
+        # can drop the port in between; an exception here would escape a Qt slot
+        # and abort the whole application, for a line the link could not carry
+        # anyway.
+        try:
+            self._worker.sendData(line)
+        except Exception as error:  # noqa: BLE001
+            print(f"send failed: {error}")
 
     def _drain(self) -> None:
         for _ in range(_RX_MAX_LINES_PER_POLL):

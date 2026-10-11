@@ -110,3 +110,13 @@ def test_poll_replies_are_position_velocity_and_status_only():
 
 def test_refused_names_its_call():
     assert Refused("setAcceleration refused: busy").call == "setAcceleration"
+
+
+@pytest.mark.parametrize(
+    "name, routable",
+    [("motor1", True), ("tilt_2", True), ("my axis", False), ("a]b", False), ("", False)],
+)
+def test_routable_name(name, routable):
+    from puldir_view.protocol import routable_name
+
+    assert routable_name(name) is routable

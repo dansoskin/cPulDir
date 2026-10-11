@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import QFrame, QScrollArea, QSizePolicy, QTabWidget, QVBoxL
 
 from . import style
 from .axis_view import AxisView
-from .protocol import AxisConfig, Formatter, at_formatter, parse_line
+from .protocol import AxisConfig, Formatter, at_formatter, parse_line, routable_name
 
 #: Wide enough for every row of an axis, narrow enough to leave the host its
 #: window. test_panel checks the content still fits, with the widest header.
@@ -52,7 +52,7 @@ class PulDirPanel(QWidget):
         if not self._axes:
             raise ValueError("a panel needs at least one axis")
         for axis in self._axes:
-            if not axis.name or any(c.isspace() or c == "]" for c in axis.name):
+            if not routable_name(axis.name):
                 raise ValueError(f"axis name {axis.name!r} cannot be matched in a reply: no spaces or ']'")
             if axis.name in self._views:
                 raise ValueError(f"two axes are named {axis.name!r}; replies could not tell them apart")

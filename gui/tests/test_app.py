@@ -39,6 +39,8 @@ def test_load_axes_skips_malformed_and_duplicate_entries():
             {"name": "nameless"},
             {"address": 3},
             {"name": "bad", "address": "x"},
+            {"name": "my axis", "address": 6},
+            {"name": "a]b", "address": 7},
             7,
         ]
     )
@@ -87,3 +89,52 @@ def test_changes_are_saved_with_the_axes(window):
     saved = json.loads(app_settings.PATH.read_text(encoding="utf-8"))
     assert saved["panel"]["axes"]["motor2"]["settings"]["A"] == 123.0
     assert saved["axes"][0]["name"] == "motor1"
+
+
+def test_the_window_starts_when_every_saved_axis_name_is_unroutable(qapp, tmp_path, monkeypatch):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"axes": [{"name": "my axis", "address": 1}]}), encoding="utf-8")
+    monkeypatch.setattr(app_settings, "PATH", path)
+    import app
+
+    w = app.MainWindow()
+    try:
+        assert [axis.name for axis in w.panel.axes] == ["motor1", "motor2"]
+    finally:
+        w.link.close()
+
+
+def test_saving_keeps_axis_entries_the_load_skipped(qapp, tmp_path, monkeypatch):
+    path = tmp_path / "settings.json"
+    axes = [{"name": "motor1", "address": 1}, {"name": "bad", "address": "x"}]
+    path.write_text(json.dumps({"axes": axes}), encoding="utf-8")
+    monkeypatch.setattr(app_settings, "PATH", path)
+    import app
+
+    w = app.MainWindow()
+    try:
+        w.panel.view("motor1").findChild(QDoubleSpinBox, "value_A").setValue(77.0)
+    finally:
+        w.link.close()
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert {"name": "bad", "address": "x"} in saved["axes"]
+
+
+def test_connecting_with_no_port_says_so(window, monkeypatch):
+    monkeypatch.setattr(window.terminal, "get_port", lambda: "")
+    window._connect_pressed()
+    assert window.statusBar().currentMessage() == "No port selected"
+    assert not window.link.is_running()
+
+
+def test_restoring_writes_nothing(window):
+    assert not app_settings.PATH.exists()
+
+
+def test_the_status_names_the_port_that_was_opened(window, monkeypatch):
+    monkeypatch.setattr(window.terminal, "get_port", lambda: "COM7")
+    monkeypatch.setattr(window.link, "open", lambda port, baud: None)
+    window._connect_pressed()
+    monkeypatch.setattr(window.terminal, "get_port", lambda: "COM9")
+    window._connection_changed(True)
+    assert window.statusBar().currentMessage() == "Connected to COM7"

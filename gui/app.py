@@ -19,7 +19,7 @@ from terminal_widget.terminal_widget import TerminalWidget
 
 import settings
 from link import DeviceLink
-from puldir_view import AxisConfig, PulDirPanel
+from puldir_view import AxisConfig, PulDirPanel, routable_name
 
 #: Used when settings.json names no usable axis. Saved back on the first change,
 #: so the file shows the shape to edit.
@@ -41,7 +41,7 @@ def load_axes(entries) -> list:
                 )
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
-            if axis.name and axis.name not in names:
+            if routable_name(axis.name) and axis.name not in names:
                 names.add(axis.name)
                 axes.append(axis)
     return axes or load_axes(list(DEFAULT_AXES))
@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("puldir")
 
         self._settings = settings.load()
+        self._port = ""
 
         self.link = DeviceLink(self)
         self.panel = PulDirPanel(load_axes(self._settings.get("axes")))
@@ -91,7 +92,9 @@ class MainWindow(QMainWindow):
         self.panel.settings_changed.connect(self._save_settings)
 
     def _save_settings(self) -> None:
-        self._settings["axes"] = [asdict(axis) for axis in self.panel.axes]
+        # The axis list is the user's to edit; it is written only to seed the
+        # defaults, so an entry this run had to skip is not lost on save.
+        self._settings.setdefault("axes", [asdict(axis) for axis in self.panel.axes])
         self._settings["panel"] = self.panel.to_dict()
         settings.save(self._settings)
 
@@ -126,12 +129,13 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("No port selected")
             return
 
+        self._port = port
         self.link.open(port, self.terminal.get_baudrate())
         self.statusBar().showMessage(f"Opening {port}...")
 
     def _connection_changed(self, is_open: bool) -> None:
         if is_open:
-            self.statusBar().showMessage(f"Connected to {self.terminal.get_port()}")
+            self.statusBar().showMessage(f"Connected to {self._port}")
         else:
             self.statusBar().showMessage("Link down — retrying")
         self.panel.set_connected(is_open)

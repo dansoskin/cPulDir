@@ -18,6 +18,13 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Tuple, Union
 
 
+def routable_name(name: str) -> bool:
+    """Whether a reply could carry this name back: parse_line reads the name in
+    [..] as anything but ']' and white space, so a name with either never
+    matches and its axis would never update."""
+    return bool(name) and not any(c.isspace() or c == "]" for c in name)
+
+
 @dataclass(frozen=True)
 class AxisConfig:
     """One axis as the host firmware knows it."""

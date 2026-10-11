@@ -9,6 +9,6 @@ See panel.py for the rest, and gui/README.md for using it from another repo.
 """
 
 from .panel import PulDirPanel
-from .protocol import AxisConfig, Formatter, at_formatter
+from .protocol import AxisConfig, Formatter, at_formatter, routable_name
 
-__all__ = ["PulDirPanel", "AxisConfig", "Formatter", "at_formatter"]
+__all__ = ["PulDirPanel", "AxisConfig", "Formatter", "at_formatter", "routable_name"]
