@@ -119,11 +119,12 @@ def test_fits_a_side_panel_even_with_the_widest_header(panel):
         panel.handle_line(f"[{name}] status ENABLED, mode STOPPING, homed 1, home IDLE, faults 12, last fault tick 0")
     panel.show()
     try:
-        page = panel.tabs.currentWidget()
-        needed = page.widget().minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width()
         assert panel.maximumWidth() == MAX_WIDTH
-        assert needed <= MAX_WIDTH, needed
         assert panel.minimumSizeHint().width() <= MAX_WIDTH
+        for index in range(panel.tabs.count()):
+            page = panel.tabs.widget(index)
+            needed = page.widget().minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width()
+            assert needed <= MAX_WIDTH, (index, needed)
     finally:
         panel.hide()
 
@@ -136,3 +137,31 @@ def test_does_not_force_a_tall_host(panel):
 
 def test_the_default_formatter_is_the_at_formatter(panel):
     assert panel._formatter is at_formatter
+
+
+@pytest.mark.parametrize("name", ["tilt axis", "a]b", ""])
+def test_names_a_reply_could_not_carry_are_refused(qapp, name):
+    with pytest.raises(ValueError):
+        PulDirPanel([AxisConfig(name, 1)])
+
+
+def test_restoring_does_not_report_a_change(panel):
+    saved = panel.to_dict()
+    saved["axis"] = "motor2"
+    changes = []
+    panel.settings_changed.connect(lambda: changes.append(1))
+    panel.from_dict(saved)
+    assert panel.tabs.currentIndex() == 1
+    assert changes == []
+
+
+@pytest.mark.parametrize("data", [None, [], {"axis": "nobody", "axes": "nonsense"}, {"axis": 3}])
+def test_from_dict_ignores_what_it_cannot_use(panel, data):
+    panel.from_dict(data)
+    assert panel.tabs.currentIndex() == 0
+
+
+def test_a_tab_dot_goes_back_to_unknown_on_disconnect(panel):
+    panel.handle_line("[motor2] fault latched, count 1")
+    panel.set_connected(False)
+    assert dot(panel, 1) == style.UNKNOWN_COLOUR

@@ -49,7 +49,11 @@ class PulDirPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.tabs)
 
+        if not self._axes:
+            raise ValueError("a panel needs at least one axis")
         for axis in self._axes:
+            if not axis.name or any(c.isspace() or c == "]" for c in axis.name):
+                raise ValueError(f"axis name {axis.name!r} cannot be matched in a reply: no spaces or ']'")
             if axis.name in self._views:
                 raise ValueError(f"two axes are named {axis.name!r}; replies could not tell them apart")
             view = AxisView(axis)
@@ -64,8 +68,6 @@ class PulDirPanel(QWidget):
             # Measured once the view sits under the panel's stylesheet.
             view.ensurePolished()
             page.setMinimumWidth(view.minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width())
-        if not self._views:
-            raise ValueError("a panel needs at least one axis")
 
         self.tabs.currentChanged.connect(self._current_changed)
         self._current_changed(self.tabs.currentIndex())
