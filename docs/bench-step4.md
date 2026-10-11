@@ -14,29 +14,29 @@ Guidelines 5.3 and 5.9 estimate the pulse tick's cost and jitter. They are estim
 - CPU load = handler duration x tick rate,
 - overrun count after one minute (`PulDir_overruns()`),
 - late-set count after one minute (`PulDir_lateSets()`): sets the plan tick published after their boundary,
-- the plan tick's phase: it must run just after the pulse tick that latches a set.
+- the plan tick's phase: it runs just after the pulse tick that latches a set, by construction (the pulse tick pends it, E38); the bench confirms it.
 
 It runs at `BENCH_PULSE_US` = 20 and 5. If a pulse length is hopeless, only that argument changes; the library writes both timer periods from the attach arguments, and nothing else changes.
 
 ## 2. CubeMX (on a branch of the firmware)
 
-The library itself names no timer and no STM32 family: it takes any two timers whose counters run at 1 MHz. This bench uses TIM6 and TIM7 on the G473. The `.ioc` has neither. The timer clock is 144 MHz (`RCC.APB1TimFreq_Value=144000000`). The NVIC priority group is 4 (16 preemption levels, no sub-priority).
+The library itself names no timer and no STM32 family: it takes any timer whose counter runs at 1 MHz for the pulse tick, and any spare IRQ vector for the plan tick. This bench uses TIM6 for the pulse tick and TIM7's vector for the plan tick on the G473; TIM7 itself is never started. The `.ioc` has neither. The timer clock is 144 MHz (`RCC.APB1TimFreq_Value=144000000`). The NVIC priority group is 4 (16 preemption levels, no sub-priority).
 
 | timer | role | prescaler (PSC) | counter |
 |---|---|---|---|
 | TIM6 | pulse tick | 143 | 144e6 / 144 = 1 MHz |
-| TIM7 | plan tick | 143 | 144e6 / 144 = 1 MHz |
+| TIM7 | its vector is the plan IRQ; never started | any | not counting |
 
-Leave the period (ARR) at anything: `port_start` writes it from the attach arguments, `pulse_us` counts for the pulse timer and `plan_us` counts (1000) for the plan timer, so the plan period is exactly N pulse periods (N = 50 at 20 us, 200 at 5 us). The library latches increment sets only at interval boundaries, every N pulse ticks counted from the first one. `port_start` puts both counters one count before their first update and starts the pulse timer, then the plan timer, back to back. Each plan update then follows a latch tick by the few cycles between the two starts; the pulse tick has the higher priority and runs first, so the plan tick has the whole interval to publish.
+Leave TIM6's period (ARR) at anything: `port_start` writes `pulse_us` counts from the attach argument and puts the counter one count before its first update. The library latches increment sets only at interval boundaries, every N pulse ticks counted from the first one (N = `plan_us` / `pulse_us`: 50 at 20 us, 200 at 5 us). At the end of each boundary tick the pulse tick pends the TIM7 vector, and the plan tick runs as soon as the pulse tick returns, with the whole interval to publish. So the plan period is exactly N pulse periods by construction, and a lost pulse tick cannot shift the phase (E38; a free-running plan timer stayed a tick out of phase after one).
 
-Both: Activated, no clock-source options (basic timers), counter mode up, auto-reload preload either way, trigger output reset. In NVIC Settings enable "TIM6, DAC1 and DAC3 global interrupt" and "TIM7, DAC2 and DAC4 global interrupt" (the update interrupt).
+Both: Activated, no clock-source options (basic timers), counter mode up, auto-reload preload either way, trigger output reset. TIM7 is activated only so that CubeMX sets its vector's priority and generates its handler; nothing starts it. In NVIC Settings enable "TIM6, DAC1 and DAC3 global interrupt" and "TIM7, DAC2 and DAC4 global interrupt". The DAC2 and DAC4 interrupts must stay unused: the plan entry returns at once on them, but they would add plan-phase samples in step 6.
 
 Priorities (preemption, sub is always 0). Today USART2, DMA1 channels 1 and 2 and FDCAN1 IT0/IT1 are all at 0, the highest; USB is at 5 (`usb_handler.c`); SysTick is set to 0 in `setup()`.
 
 | interrupt | today | set to |
 |---|---|---|
 | TIM6_DAC (pulse tick) | n/a | 0 |
-| TIM7_DAC (plan tick) | n/a | 1 |
+| TIM7_DAC (plan IRQ) | n/a | 1 |
 | USART2 | 0 | 2 |
 | DMA1 channel 1 | 0 | 2 |
 | DMA1 channel 2 | 0 | 2 |
@@ -133,7 +133,6 @@ Note GPIO_OUT1, 2 and 3 (PB7, PC6, PC7) are alternate-function timer pins in the
 #include <stdlib.h>
 
 extern TIM_HandleTypeDef htim6;
-extern TIM_HandleTypeDef htim7;
 
 #define PIN(n) ((puldir_pin_t){ n##_GPIO_Port, n##_Pin })
 static PulDir bench[4];
@@ -177,9 +176,9 @@ void bench_setup(void)
     out_pin(GPIO_OUT2_GPIO_Port, GPIO_OUT2_Pin);    /* axis 4 PUL */
     out_pin(GPIO_OUT3_GPIO_Port, GPIO_OUT3_Pin);    /* axis 4 DIR */
 
-    /* The timers first, then the logger: init logs each axis's top speed. */
+    /* The pulse timer and the plan IRQ first, then the logger: init logs each axis's top speed. */
     if (!PulDir_stm32_attachPulseTimer(&htim6, TIM6_DAC_IRQn, BENCH_PULSE_US)
-        || !PulDir_stm32_attachPlanTimer(&htim7, TIM7_DAC_IRQn, BENCH_PLAN_US))
+        || !PulDir_stm32_attachPlanIrq(TIM7_DAC_IRQn, BENCH_PLAN_US))
         Error_Handler();
     PulDir_attachLogger(bench_log);
 
@@ -201,10 +200,9 @@ void bench_setup(void)
         (void)PulDir_register(&bench[i]);
     }
 
-    /* Whether HAL left the update flags set decides the plan tick's phase (step 6). */
-    log_data("UIF before start: pulse %lu plan %lu\r\n",
-             (unsigned long)((htim6.Instance->SR & TIM_SR_UIF) != 0u),
-             (unsigned long)((htim7.Instance->SR & TIM_SR_UIF) != 0u));
+    /* Whether HAL left the update flag set; port_start clears it either way (step 6). */
+    log_data("UIF before start: pulse %lu\r\n",
+             (unsigned long)((htim6.Instance->SR & TIM_SR_UIF) != 0u));
     PulDir_start();
 }
 
@@ -276,7 +274,7 @@ Do not command the old axes (`@`, `#`, `R`, `K`) during the bench: they share th
 4. **200 kHz run**: set `BENCH_PULSE_US` to 5u and rebuild. Jog all four at 99,000 pulses/s (`B1,J99000` ... `B4,J99000`), same traffic, one minute, same measurements.
 4a. **Jitter run, 200 kHz**: jog axis 1 alone at 50,000 pulses/s (a PUL period of exactly 4 ticks), same measurements.
 5. Connect one drive (axis 1). At 50 kHz the pulse is 20 us wide. Check the drive's datasheet minimum pulse width and DIR setup time, then run `B1,J2000`, `B1,k`, and confirm it turns and stops without lost or extra steps (mark the shaft, count revolutions: 2000 pulses per second for ten seconds is 20,000 pulses).
-6. **Phasing**, at both rates. After reset, record the `UIF before start` line. Then send `Bs` before and after a minute of jogging. The simple check is `late sets`, `PulDir_lateSets()`: it counts every set the plan tick published after its boundary, and it must read 0 and stay 0. A late set latches on the next tick and runs the rest of its interval, and the next plan tick corrects the shortfall, so the axes still land exactly when a set is at most two ticks late, at any speed (k ticks late at an approach increment of i pulses per tick, one extra pulse past the target appears once k × i reaches a pulse: three ticks late above a third of a pulse per tick); and a count that grows means the plan tick is running too late or too long, and `PulDir_loop` logs each new batch as `plan tick late, total N`. `plan phase a..b` says why: it is `PulDir_ticks() % N` on entry to every plan tick so far, and must read `1..1`, the plan tick running just after the pulse tick that latches a set, with the whole interval to publish. `0..0` means it runs one tick before the latch and has one tick to publish: any plan tick longer than that is a late set. The firmware's HAL sets URS around its UG, so `UIF before start: pulse 0 plan 0` is expected; `port_start` forces its own update and clears the flag either way, then puts both counters one count before their first update. If you read `0..0`, that preset is not taking effect: report it before anything is built on the port.
+6. **Phasing**, at both rates. After reset, record the `UIF before start` line. Then send `Bs` before and after a minute of jogging. The simple check is `late sets`, `PulDir_lateSets()`: it counts every set the plan tick published after its boundary, and it must read 0 and stay 0. A late set latches on the next tick and runs the rest of its interval, and the next plan tick corrects the shortfall, so the axes still land exactly when a set is at most two ticks late, at any speed (k ticks late at an approach increment of i pulses per tick, one extra pulse past the target appears once k × i reaches a pulse: three ticks late above a third of a pulse per tick); and a count that grows means the plan tick is running too late or too long, and `PulDir_loop` logs each new batch as `plan tick late, total N`. With the phase fixed by construction, a late set means the plan tick ran longer than its N - 1 ticks of slack, or was held that long after its pend. `plan phase a..b` is `PulDir_ticks() % N` on entry to every plan tick so far, and reads `1..1`: the pulse tick pends the plan tick at the end of the boundary tick, so it starts just after the latch it serves, with the whole interval to publish, even after an overrun or a lost pulse tick (E38; before it, one lost tick put a free-running plan timer at `0..0` for good, and every set latched late). A reading above 1 means the plan tick waited a pulse period or more after its pend: an interrupt at or above its priority, or a locked section, held it that long. The late-set count says whether it mattered. The firmware's HAL sets URS around its UG, so `UIF before start: pulse 0` is expected; `port_start` forces its own update and clears the flag either way, then puts the counter one count before its first update.
 
 ## 5. Results
 
@@ -292,7 +290,7 @@ CPU load = (typical handler duration, from the marker width plus about 24 cycles
 | CPU load (typical duration x rate, %) | | |
 | overruns after one minute (`Bs`) | | |
 | late sets after one minute (`Bs`, expect 0) | | |
-| UIF before start (pulse, plan) | | |
+| UIF before start (pulse) | | |
 | plan phase (`Bs`, expect 1..1) | | |
 | ticks counted after one minute (expect 3.0e6 / 12.0e6) | | |
 | result (pass / fail) | | |

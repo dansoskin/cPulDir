@@ -1188,6 +1188,121 @@ static void t_late_publish(void)
     printf("  late_publish: %u sets latched late (%u ticks per plan)\n", (unsigned)late, (unsigned)TICKS_PER_PLAN);
 }
 
+/* ---- the plan tick's phase (E38) ------------------------------------------------------------- */
+
+/* Before every plan tick run on a pend: it starts just after the boundary tick, so its prediction
+ * runs the live increments N - 1 more ticks and its set is due at the next boundary. */
+static uint32_t lose_in_plan;                 /* ticks to lose from inside the next plan tick on */
+static void after_boundary(bool after)
+{
+    count_plans(after);
+    if (!after) {
+        assert(left() == TICKS_PER_PLAN - 1u);
+        fake_lose(lose_in_plan);
+        lose_in_plan = 0u;
+    }
+}
+
+static void run_pended_until_idle(PulDir* a, uint32_t max_ticks)
+{
+    for (uint32_t t = 0; PulDir_isMoving(a); t++) {
+        assert(t < max_ticks);
+        fake_run_pended(1);
+    }
+}
+
+/* The pulse tick pends the plan tick once per interval, at the end of the boundary tick, from the
+ * first tick after start; driven by the pends, a move's sets are on time and its final edge falls
+ * on its interval's last tick (D6). */
+static void t_plan_pend(void)
+{
+    setup(1);
+    fake_on_plan(after_boundary);
+    for (uint32_t k = 0; k < 3u * TICKS_PER_PLAN + 2u; k++) {
+        const uint32_t pends = fake_pends;
+        assert((left() == TICKS_PER_PLAN) == (k % TICKS_PER_PLAN == 0u));
+        fake_pulse(false);
+        assert(fake_pends - pends == (k % TICKS_PER_PLAN == 0u ? 1u : 0u));
+    }
+    fake_on_write(count_write);
+    PulDir* a = &ax[0];
+    const float v = 9.0f * (float)PLAN_HZ;      /* about 9 pulses per interval */
+    assert(PulDir_setDefaults(a, v, 50.0f * v, 50.0f * v, 0.0f));
+    assert(PulDir_moveTo(a, 1000.0f));
+    run_pended_until_idle(a, 10u * TICK_HZ);
+    assert(st(0).count == 1000 && !high(0) && PulDir_lateSets() == 0u && plan_ticks > 100u);
+    assert((last_rise[0] - PULDIR_TICK_START) % TICKS_PER_PLAN == TICKS_PER_PLAN - 1u);
+}
+
+/* Run pended and lose n ticks from the one offset ticks past a boundary on. The tick after the
+ * boundary runs inside the plan tick, which spends it before it publishes: lost there. */
+static void lose_at(uint32_t offset, uint32_t n)
+{
+    if (offset == 1u) {
+        lose_in_plan = n;
+        while (lose_in_plan != 0u)
+            fake_run_pended(1);
+    } else {
+        while (left() != TICKS_PER_PLAN - offset)
+            fake_run_pended(1);
+        fake_lose(n);
+    }
+    fake_run_pended(n);
+}
+
+/* Pulse ticks lost while two axes move, one and several, at points across an interval, the plan
+ * tick driven by the pends and spending a pulse period before it publishes (t_free_running_lost's
+ * fault): the phase follows the ticks that ran, so no set is late and every move lands exactly. */
+static void t_plan_pend_lost(void)
+{
+    setup(2);
+    fake_on_write(count_write);
+    fake_on_plan(after_boundary);
+    fake_preempt_unlock = 1u;
+    const float v = 9.0f * (float)PLAN_HZ;
+    assert(PulDir_setDefaults(&ax[0], v, 50.0f * v, 50.0f * v, 0.0f));
+    assert(PulDir_setDefaults(&ax[1], v, 50.0f * v, 50.0f * v, 5.0f * v / DT));   /* a 20-tap window */
+    const uint32_t offset[] = { 0u, 1u, 2u, TICKS_PER_PLAN / 2u, TICKS_PER_PLAN - 1u };
+    const uint32_t lost[] = { 1u, 3u, TICKS_PER_PLAN + 1u };
+    int32_t to = 2000;
+    for (int k = 0; k < 3; k++, to = -to) {
+        assert(PulDir_moveTo(&ax[0], (float)to) && PulDir_moveTo(&ax[1], (float)(-to / 2)));
+        for (int j = 0; j < 5; j++) {
+            fake_run_pended(3u * TICKS_PER_PLAN);
+            lose_at(offset[j], lost[k]);
+            assert(PulDir_isMoving(&ax[0]) && PulDir_isMoving(&ax[1]));
+        }
+        run_pended_until_idle(&ax[0], 10u * TICK_HZ);
+        run_pended_until_idle(&ax[1], 10u * TICK_HZ);
+        assert(st(0).count == to && st(1).count == -to / 2 && !high(0) && !high(1));
+        assert(net[0] == to && net[1] == -to / 2);       /* no stray edge on the way */
+    }
+    assert(PulDir_lateSets() == 0u);
+}
+
+/* The failure E38 removes: the plan tick on a free-running schedule, just after the boundary as
+ * port_start phased the two timers, spending a pulse period before it publishes, as at -O0 on the
+ * bench. One lost pulse tick puts the interval count a tick behind the schedule for good: every
+ * plan tick then runs one tick before its boundary and every set from then on latches late. */
+static void t_free_running_lost(void)
+{
+    setup(1);
+    fake_on_plan(count_plans);
+    fake_plan_phase = 1u;
+    fake_preempt_unlock = 1u;
+    assert(PulDir_jog(&ax[0], 9.0f * (float)PLAN_HZ));
+    fake_run(10u * TICKS_PER_PLAN);
+    assert(PulDir_lateSets() == 0u);
+    fake_lose(1u);
+    fake_run(TICKS_PER_PLAN / 2u);
+    const uint32_t late0 = PulDir_lateSets(), plans0 = plan_ticks;
+    fake_run(20u * TICKS_PER_PLAN);
+    const uint32_t late = PulDir_lateSets() - late0, plans = plan_ticks - plans0;
+    assert(plans >= 20u && late == plans);       /* preempted ticks count in the schedule: 20 or 21 */
+    printf("  free_running_lost: %u of %u sets late after one lost tick (%u ticks per plan)\n",
+           (unsigned)late, (unsigned)plans, (unsigned)TICKS_PER_PLAN);
+}
+
 /* ---- jog, stop, halt, the datum and live settings ------------------------------------------- */
 
 static uint32_t plan_left(void) { return fake_plan_phase == 0u ? TICKS_PER_PLAN : TICKS_PER_PLAN - fake_plan_phase; }
@@ -4409,6 +4524,9 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "setpos_idle_only", t_setpos },
     { "settle_twice", t_settle_twice },
     { "late_publish", t_late_publish },
+    { "plan_pend", t_plan_pend },
+    { "plan_pend_lost", t_plan_pend_lost },
+    { "free_running_lost", t_free_running_lost },
     { "jog_settling", t_jog_settling },
     { "halt_any_tick", t_halt_any_tick },
     { "stream_sine", t_stream_sine },

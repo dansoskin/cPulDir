@@ -22,8 +22,15 @@ void  fake_on_plan(fake_plan_fn fn);                /* called before and after e
 /* Called on entry to every port_lock, before the mask: a tick may run there, as
  * an interrupt that came due just before main masked it. */
 void  fake_on_lock(void (*fn)(void));
-/* n pulse ticks; a plan tick runs fake_plan_phase ticks after every interval boundary */
+/* n pulse ticks; a plan tick runs fake_plan_phase ticks after every interval boundary, on a
+ * schedule of its own, as a free-running plan timer would (the port before E38) */
 void  fake_run(uint32_t ticks);
+/* n pulse ticks; a plan tick runs after each one that pended it (port_plan_pend), as the port does */
+void  fake_run_pended(uint32_t ticks);
+extern uint32_t fake_pends;                         /* port_plan_pend calls since port_start */
+/* The next n pulse ticks are lost: their time passes (fake_run's schedule counts them) but the
+ * callback never runs, as when a tick is held past the next update and one flag stands for both. */
+void  fake_lose(uint32_t ticks);
 extern uint32_t fake_plan_phase;                    /* fake_attach sets ticks_per_plan / 2 */
 extern uint32_t fake_preempt;                       /* pulse ticks run inside each port_pin_read */
 /* Pulse ticks run inside port_unlock when a tick callback unlocks: an interrupt that came due

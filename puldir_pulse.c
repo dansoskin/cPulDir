@@ -45,7 +45,7 @@ bool puldir_timing_pulse(uint32_t pulse_us)
 
 bool puldir_timing_plan(uint32_t plan_us)
 {
-    if (!timing_open() || plan_us < 250u || plan_us > 10000u)  /* the generator's dt range; a 16-bit ARR */
+    if (!timing_open() || plan_us < 250u || plan_us > 10000u)  /* the generator's dt range */
         return false;
     puldir_timing.plan_us = plan_us;
     return true;
@@ -109,9 +109,10 @@ void puldir_pulse_tick(bool overrun)
         overruns++;
     const uint32_t n = puldir_naxes;
     const uint32_t ticks_per_plan = puldir_timing.ticks_per_plan;
+    const bool boundary = left == ticks_per_plan;
     /* A boundary latches the whole set; so does any tick at or past the set's due tick, so a set
      * published late runs the rest of its interval rather than a whole one later. */
-    if (latched != seq && (left == ticks_per_plan || (int32_t)(ticks - due) >= 0)) {
+    if (latched != seq && (boundary || (int32_t)(ticks - due) >= 0)) {
         const PulDirInc* s = sets[pub];
         for (uint32_t i = 0; i < n; i++) {
             ax[i].inc = s[i].inc;
@@ -148,6 +149,9 @@ void puldir_pulse_tick(bool overrun)
     ticks++;
     if (--left == 0)
         left = ticks_per_plan;
+    /* The plan tick starts after the latch it serves, so a lost or late tick cannot move its phase (E38). */
+    if (boundary)
+        port_plan_pend();
 }
 
 /* Before PulDir_start: take the next slot at rest, inc 0, dir +1, at the datum. */

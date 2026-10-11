@@ -8,6 +8,7 @@
 uint32_t fake_plan_phase;
 uint32_t fake_preempt;
 uint32_t fake_preempt_unlock;
+uint32_t fake_pends;
 
 static uint32_t ticks_per_plan;         /* pulse ticks per plan period, as the timers would run them */
 
@@ -22,6 +23,8 @@ static uint32_t since_start;            /* pulse ticks run since port_start */
 static int tick_depth;                  /* tick callbacks in progress (a pulse tick may preempt the plan tick) */
 static int lock_depth;
 static bool in_pulse;                   /* inside the pulse tick callback */
+static bool plan_pending;               /* port_plan_pend ran since fake_run_pended last looked */
+static uint32_t lose;                   /* pulse ticks still to lose */
 
 bool fake_attach(uint32_t pulse_us, uint32_t plan_us)
 {
@@ -74,7 +77,17 @@ void port_start(void (*pulse_tick)(bool overrun), void (*plan_tick)(void))
     pulse_cb = pulse_tick;
     plan_cb = plan_tick;
     since_start = 0;
+    fake_pends = 0;
 }
+
+void port_plan_pend(void)
+{
+    assert(in_pulse);                   /* only the pulse tick pends the plan tick */
+    plan_pending = true;
+    fake_pends++;
+}
+
+void fake_lose(uint32_t ticks) { lose = ticks; }
 
 void port_lock(void)
 {
@@ -98,6 +111,11 @@ void fake_pulse(bool overrun)
     assert(pulse_cb != NULL);
     assert(lock_depth == 0);            /* the lock masks this interrupt */
     assert(!in_pulse);
+    if (lose > 0u) {
+        lose--;
+        since_start++;
+        return;
+    }
     tick_depth++;
     in_pulse = true;
     pulse_cb(overrun);
@@ -126,5 +144,17 @@ void fake_run(uint32_t ticks)
         fake_pulse(false);
         if (since_start % ticks_per_plan == fake_plan_phase)
             fake_plan();
+    }
+}
+
+void fake_run_pended(uint32_t ticks)
+{
+    for (uint32_t i = 0; i < ticks; i++) {
+        plan_pending = false;           /* a pend from a tick the test ran by hand is not this run's */
+        fake_pulse(false);
+        while (plan_pending) {          /* pulse ticks run inside a plan tick may pend it again */
+            plan_pending = false;
+            fake_plan();
+        }
     }
 }

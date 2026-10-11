@@ -508,6 +508,14 @@ for slow ticks: the plan maths for four axes takes several microseconds,
 which fits inside a 20 µs tick and overruns a 5 µs one, so the 200 kHz
 configuration needs two periodic sources.
 
+> Superseded by E38 (plan, execution record): every port now runs the plan
+> tick from the pulse tick, in an interrupt of its own. The pulse tick calls
+> `port_plan_pend()` at the end of each boundary tick, and the port runs the
+> plan tick at a lower priority once the pulse tick returns. The maths stays
+> out of the pulse tick, so this works at every rate, and the plan tick
+> always starts just after the latch it serves: a free-running plan timer
+> fell a tick out of phase for good after one lost pulse tick.
+
 ### 5.5 Modes and transitions
 
 ```
@@ -752,6 +760,15 @@ void PulDir_stm32_planIrq(void);    /* likewise */
   the old port did, and `port_pin_init_input` does nothing.
 - The port cannot check that the timers run at `PULDIR_TICK_HZ` and
   `PULDIR_PLAN_HZ`; the bench (section 9, step 4) does, with a scope.
+
+> Superseded in part by E26, E27 and E38 (plan, execution record): the
+> periods are attach arguments, and there is no plan timer. The contract adds
+> `void port_plan_pend(void)`, called by the pulse tick at the end of each
+> boundary tick, which makes the plan tick run after it at a lower priority.
+> The STM32 port attaches one timer and one spare IRQ vector,
+> `PulDir_stm32_attachPulseTimer(htim, irqn, pulse_us)` and
+> `PulDir_stm32_attachPlanIrq(irqn, plan_us)`; `port_start` starts only the
+> pulse timer and enables the plan IRQ.
 
 The Arduino port honours whatever `PULDIR_TICK_HZ` the build sets; an 8-bit
 AVR cannot do 50 kHz with four axes, 20 kHz with two is realistic there.

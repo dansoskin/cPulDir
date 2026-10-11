@@ -2,15 +2,15 @@
 #include "puldir_port_stm32.h"
 
 static TIM_HandleTypeDef* pulse_tim;
-static TIM_HandleTypeDef* plan_tim;
 static IRQn_Type pulse_irq, plan_irq;
-static uint32_t pulse_counts, plan_counts;     /* the periods, in 1 us counts */
-/* Until port_start, a shared vector seeing a stale update flag on an attached timer calls these. */
+static bool plan_attached;              /* zero is a real IRQ number */
+static uint32_t pulse_counts;           /* the pulse period, in 1 us counts */
+/* Until port_start, a shared vector seeing a stale update flag on the pulse timer calls this. */
 static void no_pulse(bool overrun) { (void)overrun; }
-static void no_plan(void) {}
 static void (*pulse_fn)(bool overrun) = no_pulse;
-static void (*plan_fn)(void) = no_plan;
+static void (*plan_fn)(void);
 static bool late;                       /* the update flag was set again before the last exit */
+static volatile bool plan_due;          /* port_plan_pend ran: the plan IRQ's own source */
 
 bool PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn, uint32_t pulse_us)
 {
@@ -22,38 +22,38 @@ bool PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn, uint
     return true;
 }
 
-bool PulDir_stm32_attachPlanTimer(TIM_HandleTypeDef* htim, IRQn_Type irqn, uint32_t plan_us)
+/* The plan period goes to the library only: the pulse tick pends this IRQ every plan_us (E38). */
+bool PulDir_stm32_attachPlanIrq(IRQn_Type irqn, uint32_t plan_us)
 {
     if (!puldir_timing_plan(plan_us))
         return false;
-    plan_tim = htim;
     plan_irq = irqn;
-    plan_counts = plan_us;
+    plan_attached = true;
     return true;
 }
 
-/* A period of `counts` 1 us counts, the counter left at its last count so the first update is one count away. */
-static void set_period(TIM_HandleTypeDef* htim, uint32_t counts)
-{
-    __HAL_TIM_SET_AUTORELOAD(htim, counts - 1u);    /* the counter runs 0..ARR: 5 counts is ARR 4 */
-    htim->Instance->EGR = TIM_EGR_UG;               /* a preloaded ARR takes effect now */
-    htim->Instance->SR = ~TIM_SR_UIF;
-    __HAL_TIM_SET_COUNTER(htim, counts - 1u);
-}
-
-/* Both first updates come one count after start, the pulse timer's first: each plan tick (N pulse
- * periods, N = ticks_per_plan) then follows a latch tick (1, N+1, ...) by the start skew, under one
- * pulse period. */
+/* The pulse period, the counter left at its last count so the first update is one count after start. */
 void port_start(void (*pulse)(bool), void (*plan)(void))
 {
-    if (pulse_tim == NULL || plan_tim == NULL)
-        Error_Handler();                        /* attach both timers before PulDir_start */
+    if (pulse_tim == NULL || !plan_attached)
+        Error_Handler();                        /* attach the pulse timer and the plan IRQ before PulDir_start */
     pulse_fn = pulse;
     plan_fn = plan;
-    set_period(pulse_tim, pulse_counts);
-    set_period(plan_tim, plan_counts);
-    HAL_TIM_Base_Start_IT(pulse_tim);
-    HAL_TIM_Base_Start_IT(plan_tim);
+    TIM_HandleTypeDef* h = pulse_tim;
+    __HAL_TIM_SET_AUTORELOAD(h, pulse_counts - 1u);  /* the counter runs 0..ARR: 5 counts is ARR 4 */
+    h->Instance->EGR = TIM_EGR_UG;                  /* a preloaded ARR takes effect now */
+    h->Instance->SR = ~TIM_SR_UIF;
+    __HAL_TIM_SET_COUNTER(h, pulse_counts - 1u);
+    NVIC_ClearPendingIRQ(plan_irq);                 /* no plan tick before the first pend */
+    NVIC_EnableIRQ(plan_irq);
+    HAL_TIM_Base_Start_IT(h);
+}
+
+/* From the pulse tick: the plan IRQ, at a lower priority, runs as soon as the pulse tick returns. */
+void port_plan_pend(void)
+{
+    plan_due = true;
+    NVIC_SetPendingIRQ(plan_irq);
 }
 
 /* Not through HAL_TIM_IRQHandler: its flag sweep costs more than the tick at a 5 us pulse. */
@@ -69,17 +69,16 @@ void PulDir_stm32_pulseIrq(void)
 
 void PulDir_stm32_planIrq(void)
 {
-    TIM_TypeDef* t = plan_tim->Instance;
-    if ((t->SR & TIM_SR_UIF) == 0u)
-        return;
-    t->SR = ~TIM_SR_UIF;
+    if (!plan_due)
+        return;                                     /* the vector's other source */
+    plan_due = false;                               /* first: a pend during the run runs it again */
     plan_fn();
 }
 
-/* Until both timers are attached the IRQ numbers are not known (zero is a real IRQ), so do nothing. */
+/* Until both are attached the IRQ numbers are not known (zero is a real IRQ), so do nothing. */
 void port_lock(void)
 {
-    if (pulse_tim == NULL || plan_tim == NULL)
+    if (pulse_tim == NULL || !plan_attached)
         return;
     NVIC_DisableIRQ(pulse_irq);
     NVIC_DisableIRQ(plan_irq);
@@ -89,7 +88,7 @@ void port_lock(void)
 
 void port_unlock(void)
 {
-    if (pulse_tim == NULL || plan_tim == NULL)
+    if (pulse_tim == NULL || !plan_attached)
         return;
     NVIC_EnableIRQ(plan_irq);
     NVIC_EnableIRQ(pulse_irq);
