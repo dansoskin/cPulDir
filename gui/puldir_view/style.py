@@ -12,14 +12,14 @@ from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
 OBJECT_NAME = "PulDirPanel"
 
 STATUS_COLOURS = {
-    "IDLE": "#8a8a8a",
+    "IDLE": "#757575",
     "ENABLED": "#2a9d55",
     "MOVING": "#1e74d0",
     "FAULT": "#d03030",
 }
 #: Before the first status reply and after the link drops. Unknown is not IDLE:
 #: a grey that means "idle" would claim something nobody has checked.
-UNKNOWN_COLOUR = "#c4c4c4"
+UNKNOWN_COLOUR = "#a6a6a6"
 HOMED_COLOUR = "#2a9d55"
 ERROR_COLOUR = "#c62828"
 #: Readable on a light background and a dark one, for captions and notes.

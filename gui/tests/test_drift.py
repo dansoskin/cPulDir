@@ -102,3 +102,13 @@ def test_status_and_mode_names_match_the_console():
 @pytest.mark.parametrize("verb", list("EPpVvAaDdZzJRTFkKsCH"))
 def test_every_verb_the_panel_sends_is_a_console_case(verb):
     assert f"case '{verb}'" in SOURCES["console"]
+
+
+@pytest.mark.parametrize(
+    "verb, field",
+    [("p", "position"), ("v", "velocity"), ("a", "acceleration"), ("d", "deceleration"), ("z", "jerk")],
+)
+def test_each_getter_replies_with_its_own_field(verb, field):
+    # The literal checks above would pass with two labels swapped between
+    # getters; this ties each verb to the field name its reply carries.
+    assert f"case '{verb}': say_num(a, \"{field} \"" in SOURCES["console"]

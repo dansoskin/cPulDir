@@ -131,3 +131,11 @@ def test_on_change_reports_start_each_leg_and_the_end(rig):
     timer.fire()
     timer.fire()
     assert changes == [0, 0, 1]
+
+
+def test_a_send_that_ends_the_cycle_leaves_no_interval_armed():
+    timer = FakeTimer()
+    cycle = ABCycle(lambda cmd, arg: cycle.abort(send_stop=False), timer)
+    cycle.start("T", "0", "100", 500, 0)
+    assert not cycle.running
+    assert timer.pending is None

@@ -73,8 +73,11 @@ class ABCycle:
         self._on_change()
 
     def _send_leg(self) -> None:
-        self._send(self._cmd, self._args[self._leg])
+        # Armed before sending, so a send that ends the cycle -- an abort from
+        # inside it -- cancels this interval instead of leaving one armed on a
+        # cycle that has stopped.
         self._timer.start(self._interval_ms, self._tick)
+        self._send(self._cmd, self._args[self._leg])
 
     def _tick(self) -> None:
         if not self.running:
