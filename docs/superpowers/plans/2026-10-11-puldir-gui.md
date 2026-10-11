@@ -2128,7 +2128,7 @@ def test_only_the_visible_axis_polls(panel):
     assert panel.polled == ["@p1", "@v1", "@s1"]
     panel.tabs.setCurrentIndex(1)
     assert panel.polled[3:] == ["@p2", "@v2", "@s2"]
-    assert not panel.view("motor1")._poll_timer.isActive()
+    assert not panel.view("motor1").polling
 
 
 def test_lines_reach_their_axis_even_when_hidden(panel):
@@ -2188,9 +2188,26 @@ def test_settings_changed_bubbles_up(panel):
     assert changes
 
 
-def test_fits_a_side_panel(panel):
-    assert panel.maximumWidth() == MAX_WIDTH
-    assert panel.minimumSizeHint().width() <= MAX_WIDTH
+def test_fits_a_side_panel_even_with_the_widest_header(panel):
+    # The header is the widest row and the only one that grows with what the
+    # board says; measure it at its widest, polished under the panel's sheet.
+    for name in ("motor1", "motor2"):
+        panel.handle_line(f"[{name}] status ENABLED, mode STOPPING, homed 1, home IDLE, faults 12, last fault tick 0")
+    panel.show()
+    try:
+        page = panel.tabs.currentWidget()
+        needed = page.widget().minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width()
+        assert panel.maximumWidth() == MAX_WIDTH
+        assert needed <= MAX_WIDTH, needed
+        assert panel.minimumSizeHint().width() <= MAX_WIDTH
+    finally:
+        panel.hide()
+
+
+def test_does_not_force_a_tall_host(panel):
+    # An axis is about 500 px tall; it scrolls rather than raise the host's
+    # minimum height.
+    assert panel.minimumSizeHint().height() < 300
 
 
 def test_the_default_formatter_is_the_at_formatter(panel):
@@ -2220,15 +2237,15 @@ Design: docs/superpowers/specs/2026-10-11-puldir-gui-design.md.
 from functools import partial
 from typing import Iterable
 
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QSizePolicy, QTabWidget, QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtWidgets import QFrame, QScrollArea, QSizePolicy, QTabWidget, QVBoxLayout, QWidget
 
 from . import style
 from .axis_view import AxisView
 from .protocol import AxisConfig, Formatter, at_formatter, parse_line
 
 #: Wide enough for every row of an axis, narrow enough to leave the host its
-#: window. test_panel checks the content still fits.
+#: window. test_panel checks the content still fits, with the widest header.
 MAX_WIDTH = 340
 
 
@@ -2247,6 +2264,7 @@ class PulDirPanel(QWidget):
         self._formatter = formatter
         self._axes = list(axes)
         self._views = {}
+        self._pages = {}  #: axis name -> the scroll area its view sits in
         self._restoring = False
 
         self.tabs = QTabWidget()
@@ -2262,15 +2280,32 @@ class PulDirPanel(QWidget):
             view = AxisView(axis)
             view.command.connect(partial(self._emit, self.command, axis))
             view.poll.connect(partial(self._emit, self.poll, axis))
-            view.status_changed.connect(partial(self._status_changed, view))
+            view.status_changed.connect(partial(self._status_changed, axis.name))
             view.settings_changed.connect(self._touched)
+            page = self._page(view)
             self._views[axis.name] = view
-            self.tabs.addTab(view, style.dot_icon(style.UNKNOWN_COLOUR), axis.title)
+            self._pages[axis.name] = page
+            self.tabs.addTab(page, style.dot_icon(style.status_colour(view.status)), axis.title)
+            # Measured once the view sits under the panel's stylesheet.
+            view.ensurePolished()
+            page.setMinimumWidth(view.minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width())
         if not self._views:
             raise ValueError("a panel needs at least one axis")
 
         self.tabs.currentChanged.connect(self._current_changed)
         self._current_changed(self.tabs.currentIndex())
+
+    @staticmethod
+    def _page(view: AxisView) -> QScrollArea:
+        """An axis scrolls vertically inside its tab. Its natural height is about
+        500 px; without this, that would become the host window's minimum height,
+        which is exactly the kind of disturbance the panel must not cause."""
+        page = QScrollArea()
+        page.setWidget(view)
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.NoFrame)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return page
 
     # -- host API -----------------------------------------------------------
 
@@ -2306,9 +2341,8 @@ class PulDirPanel(QWidget):
             view.set_connected(on)
 
     def to_dict(self) -> dict:
-        current = self.tabs.currentWidget()
         return {
-            "axis": current.axis.name if current is not None else "",
+            "axis": self._current_name(),
             "axes": {name: view.to_dict() for name, view in self._views.items()},
         }
 
@@ -2321,24 +2355,32 @@ class PulDirPanel(QWidget):
             if isinstance(axes, dict):
                 for name, view in self._views.items():
                     view.from_dict(axes.get(name))
-            view = self._views.get(data.get("axis"))
-            if view is not None:
-                self.tabs.setCurrentWidget(view)
+            name = data.get("axis")
+            if isinstance(name, str) and name in self._pages:
+                self.tabs.setCurrentWidget(self._pages[name])
         finally:
             self._restoring = False
 
     # -- internals ----------------------------------------------------------
 
+    def _current_name(self) -> str:
+        current = self.tabs.currentWidget()
+        for name, page in self._pages.items():
+            if page is current:
+                return name
+        return ""
+
     def _emit(self, signal, axis: AxisConfig, cmd: str, arg: str) -> None:
         signal.emit(self._formatter(axis, cmd, arg))
 
-    def _status_changed(self, view: AxisView, status: str) -> None:
-        self.tabs.setTabIcon(self.tabs.indexOf(view), style.dot_icon(style.status_colour(status)))
+    def _status_changed(self, name: str, status: str) -> None:
+        index = self.tabs.indexOf(self._pages[name])
+        self.tabs.setTabIcon(index, style.dot_icon(style.status_colour(status)))
 
     def _current_changed(self, index: int) -> None:
         current = self.tabs.widget(index)
-        for view in self._views.values():
-            view.set_shown(view is current)
+        for name, view in self._views.items():
+            view.set_shown(self._pages[name] is current)
         self._touched()
 
     def _touched(self) -> None:
@@ -2367,10 +2409,10 @@ __all__ = ["PulDirPanel", "AxisConfig", "Formatter", "at_formatter"]
 - [ ] **Step 4: Run and confirm they pass**
 
 Run: `gui/.venv/Scripts/python.exe -m pytest gui/tests/test_panel.py -q`
-Expected: `14 passed`.
+Expected: `15 passed`.
 
-If `test_fits_a_side_panel` fails, find the widest row. Print `view.findChild(...)` minimum size
-hints for the header, actions and settings rows, then shrink that row. Do not raise `MAX_WIDTH`.
+If `test_fits_a_side_panel_even_with_the_widest_header` fails, find the widest row. Print the
+minimum size hints of the header, actions and settings rows, then shrink that row. Do not raise `MAX_WIDTH`.
 The first things to cut:
 - `"Clr fault"` → `"Clear"`;
 - the `"every "` / `"reps "` prefixes;
@@ -2379,7 +2421,7 @@ The first things to cut:
 - [ ] **Step 5: Run the whole suite**
 
 Run: `gui/.venv/Scripts/python.exe -m pytest gui/tests -q`
-Expected: every test passes (140 tests).
+Expected: every test passes (162 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -2468,7 +2510,9 @@ def test_polls_are_echoed_only_when_asked(window):
 def test_poll_replies_are_hidden_but_still_read(window):
     from PyQt5.QtWidgets import QCheckBox
 
+    window._connection_changed(True)
     window.panel.view("motor1").findChild(QCheckBox, "auto").setChecked(True)
+    assert window.panel.view("motor1").polling
     window._line_received("[motor1] position 7.0000")
     window._line_received("[motor1] landed at 7.0000")
     text = terminal_text(window)
@@ -2809,7 +2853,7 @@ Expected: `7 passed`. The terminal widget prints `Loading UI from: ...`; that is
 - [ ] **Step 7: Run the whole suite**
 
 Run: `gui/.venv/Scripts/python.exe -m pytest gui/tests -q`
-Expected: every test passes (147 tests).
+Expected: every test passes (169 tests).
 
 - [ ] **Step 8: Commit**
 
@@ -2941,7 +2985,11 @@ panel.settings_changed.connect(lambda: save(panel.to_dict()))
   under `#PulDirPanel`), colours from the host's palette apart from the status
   accents, at most 340 px wide, no dialogs, no files.
 - **Hiding polls.** `panel.is_poll_reply(line)` is true for a position,
-  velocity or status reply while that axis's *auto* is on.
+  velocity or status reply while that axis is polling (its *auto* is on, its
+  tab is showing and the link is up).
+- **It scrolls.** Each axis sits in a vertical scroll area, so the panel never
+  raises the host window's minimum height. The mouse wheel edits a number box
+  only once it has focus, so scrolling past a target cannot change it.
 
 ## Things worth knowing
 
