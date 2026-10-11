@@ -437,7 +437,7 @@ done
 
 - `docs/puldir-guidelines.md`: the design. Section 5.3 has the pulse tick and the numbers, 5.10 the port contract.
 - `docs/superpowers/specs/2026-10-07-puldir-design.md`: the design review record.
-- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E41) at the end say where the library differs from the guidelines. Where they differ, the execution record wins. E38 starts the plan tick from the pulse tick instead of a timer of its own, E39 makes the STM32 lock mask every interrupt, and E40 logs the overrun and late-set totals at most once a second each; E41 is the review that followed.
+- `docs/superpowers/plans/2026-10-07-puldir.md`: the plan. "Plan decisions" (D1 to D20) and the "Execution record" (E1 to E42) at the end say where the library differs from the guidelines. Where they differ, the execution record wins. E38 starts the plan tick from the pulse tick instead of a timer of its own, E39 makes the STM32 lock mask every interrupt, and E40 logs the overrun and late-set totals at most once a second each; E41 is the review that followed, and E42 keeps the per-pass calls `PulDir_loop` and `PulDir_position` from taking the lock when there is nothing to take.
 - `docs/bench-step4.md`: the bench for tick rates, jitter and CPU.
 
 ## GUI

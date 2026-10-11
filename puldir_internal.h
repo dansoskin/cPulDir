@@ -80,6 +80,8 @@ void       puldir_kill(uint8_t slot);         /* under the lock: zero live and p
 uint32_t   puldir_left(void);
 /* Under the lock: the slot's state, its position predicted ahead ticks on (0: the position itself). */
 void       puldir_pulse_read(uint8_t slot, uint32_t ahead, PulDirSnap* out);
+/* Without the lock: the slot's edges emitted, one aligned 32-bit load (E42). */
+int32_t    puldir_pulse_count(uint8_t slot);
 /* Under the lock: count, P and edge to a whole pulse. The caller guarantees the
  * axis is at rest, its live inc 0 and its pulse pin low. */
 void       puldir_set_datum(uint8_t slot, int32_t count);

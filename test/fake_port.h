@@ -28,6 +28,7 @@ void  fake_run(uint32_t ticks);
 /* n pulse ticks; a plan tick runs after each one that pended it (port_plan_pend), as the port does */
 void  fake_run_pended(uint32_t ticks);
 extern uint32_t fake_pends;                         /* port_plan_pend calls since port_start */
+extern uint32_t fake_locks;                         /* port_lock calls, from any context */
 /* The next n pulse ticks are lost: their time passes (fake_run's schedule counts them) but the
  * callback never runs, as when a tick is held past the next update and one flag stands for both. */
 void  fake_lose(uint32_t ticks);

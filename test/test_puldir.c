@@ -1093,6 +1093,59 @@ static void t_log_rate(void)
     assert(nlines == 5 && strcmp(lines[4], "[a1] pulse tick overrun, total 42") == 0);
 }
 
+/* E42: the calls the firmware makes on every main-loop pass take the lock only when there is
+ * something to take. A quiet PulDir_loop takes none; one with an event takes it once, logs the line
+ * and is quiet again; a landing the plan tick raises is logged once; PulDir_position never locks and
+ * reads what the locked snapshot reads. */
+static uint32_t locks_in_loop(PulDir* a)
+{
+    const uint32_t l0 = fake_locks;
+    PulDir_loop(a);
+    return fake_locks - l0;
+}
+
+static void t_lock_free(void)
+{
+    setup(1);
+    PulDir_attachLogger(logger);
+    PulDir* a = &ax[0];
+    const float v = 9.0f * (float)PLAN_HZ;
+    assert(PulDir_setDefaults(a, v, 50.0f * v, 50.0f * v, 0.0f));
+    fake_run(3u * TICKS_PER_PLAN);
+    nlines = 0;
+    for (int k = 0; k < 1000; k++)
+        assert(locks_in_loop(a) == 0u);
+    assert(nlines == 0);
+
+    assert(!PulDir_moveTo(a, NAN));           /* an event from main */
+    assert(locks_in_loop(a) == 1u && nlines == 1 && strstr(lines[0], "moveTo refused") != NULL);
+    assert(locks_in_loop(a) == 0u && nlines == 1);
+
+    /* a move: every pass reads the position lock-free, as the snapshot gives it, and the landing the
+     * plan tick raises is taken under one lock and logged once */
+    assert(PulDir_moveTo(a, 300.0f));
+    uint32_t loop_locks = 0;
+    for (uint32_t t = 0; PulDir_isMoving(a); t++) {
+        assert(t < 10u * TICK_HZ);
+        fake_run(1);
+        const uint32_t l0 = fake_locks;
+        const float pos = PulDir_position(a);
+        assert(fake_locks == l0 && pos == (float)st(0).count);
+        loop_locks += locks_in_loop(a);
+    }
+    for (int k = 0; k < 10; k++)
+        loop_locks += locks_in_loop(a);
+    assert(loop_locks == 1u && nlines == 2 && strcmp(lines[1], "[a0] landed at 300.0000") == 0);
+    const uint32_t l0 = fake_locks;
+    assert(PulDir_position(a) == 300.0f && fake_locks == l0);
+
+    /* logging off: a set bit is still taken and cleared, and a quiet pass still takes no lock */
+    PulDir_setLogging(a, false);
+    assert(!PulDir_moveTo(a, NAN));
+    assert(locks_in_loop(a) == 1u && a->events == 0u && nlines == 2);
+    assert(locks_in_loop(a) == 0u);
+}
+
 /* A datum set before registration carries through it: registration takes the pulse state from
  * the target. Motion before registration is refused, since the ticks cannot run it. */
 static void t_setup_order(void)
@@ -4627,6 +4680,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "refusals", t_refusals },
     { "overrun_log", t_overrun_log },
     { "log_rate", t_log_rate },
+    { "lock_free", t_lock_free },
     { "jog", t_jog },
     { "stop", t_stop },
     { "stop_random", t_stop_random },

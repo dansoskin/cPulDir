@@ -206,6 +206,13 @@ void puldir_pulse_read(uint8_t slot, uint32_t ahead, PulDirSnap* out)
     out->high = a->pul_high;
 }
 
+/* The pulse tick writes the count with one store and setPosition only in IDLE under the lock, so
+ * one volatile load of the aligned word reads a whole value with no lock (E42). */
+int32_t puldir_pulse_count(uint8_t slot)
+{
+    return (int32_t)*(const volatile uint32_t*)&ax[slot].count;
+}
+
 void puldir_set_datum(uint8_t slot, int32_t count)
 {
     Axis* a = &ax[slot];

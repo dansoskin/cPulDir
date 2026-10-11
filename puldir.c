@@ -364,15 +364,12 @@ void PulDir_halt(PulDir* a)
 
 /* ---- state ----------------------------------------------------------------- */
 
+/* Lock-free: the firmware reads it on every main-loop pass (E42). */
 static int32_t emitted(const PulDir* a)
 {
     if (a->slot >= PULDIR_MAX_AXES)             /* unregistered: the datum, which registration takes over */
         return (int32_t)(uint32_t)(a->target >> 32);
-    PulDirSnap s;
-    port_lock();
-    puldir_pulse_read(a->slot, 0u, &s);
-    port_unlock();
-    return s.count;
+    return puldir_pulse_count(a->slot);
 }
 
 /* D18: the pulses the drive has been told, not the profile. */

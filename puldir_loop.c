@@ -93,15 +93,28 @@ static float floor_up(float v)
 
 void PulDir_loop(PulDir* a)
 {
-    port_lock();
-    const uint16_t ev = a->events;
-    a->events = 0;
-    const PulDirRefusal why = a->refusal;
-    const char* call = a->refused_call;
-    const float value = a->refused_value;
-    const uint32_t faults = a->fault.count;
-    const PulDirHomeState failed_in = a->home.fail;
-    port_unlock();
+    /* Called on every main-loop pass, so a quiet pass takes no lock (E42). events is an aligned
+     * 16-bit volatile, so the check is one load; only this function clears bits, under the lock; a
+     * bit set just after the check is taken on the next pass; and every bit's details are written
+     * with it, in one locked section or by the plan tick, which main cannot interrupt, so the lock
+     * taken when a bit is set copies them consistently. */
+    uint16_t ev = 0;
+    PulDirRefusal why = PULDIR_R_NONE;
+    const char* call = NULL;
+    float value = 0.0f;
+    uint32_t faults = 0;
+    PulDirHomeState failed_in = PULDIR_HOME_IDLE;
+    if (a->events != 0u) {
+        port_lock();
+        ev = a->events;
+        a->events = 0;
+        why = a->refusal;
+        call = a->refused_call;
+        value = a->refused_value;
+        faults = a->fault.count;
+        failed_in = a->home.fail;
+        port_unlock();
+    }
     if (!a->log_on || logger == NULL)
         return;
 

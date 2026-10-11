@@ -846,7 +846,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="sig">void PulDir_stop(PulDir*)</td><td>REQ_STOP, mode STOPPING: ramps from the motion as commanded. In HOMING it ends the run unhomed and restores the saved settings.</td><td class="ref">MODE on a group member</td><td>main only</td></tr>
         <tr><td class="sig">void PulDir_halt(PulDir*)</td><td>Immediate (D17): no rising edge after this tick, target where the pulses stopped, IDLE. A member halts its whole group; a homing run ends.</td><td class="dim">none</td><td>main only</td></tr>
         <tr class="grp"><td colspan="4">State</td></tr>
-        <tr><td class="sig">float PulDir_position(PulDir*)</td><td>The emitted count over <code>pulses_per_unit</code> (D18): what the drive has been told. Unregistered: the datum.</td><td class="dim">none</td><td>main only</td></tr>
+        <tr><td class="sig">float PulDir_position(PulDir*)</td><td>The emitted count over <code>pulses_per_unit</code> (D18): what the drive has been told, read without the lock (E42). Unregistered: the datum.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">float PulDir_velocity(PulDir*)</td><td><code>velocity / pulses_per_unit</code>.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">float PulDir_target(PulDir*)</td><td>The 32.32 target in user units.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">bool PulDir_setPosition(PulDir*, float)</td><td>Sets the datum (D18): count, position and edge together under the lock, REQ_SETPOS, the axis no longer homed.</td><td class="ref">ARG, NOT_IDLE</td><td>main only</td></tr>
@@ -1155,6 +1155,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="nm">puldir_left</td><td>Ticks left in this interval; N when the next tick is the boundary.</td></tr>
         <tr><td class="nm">puldir_pulse_read(slot, ahead, out)</td><td>Under the lock: the slot's state, position predicted <code>ahead</code> ticks on.</td></tr>
         <tr><td class="nm">puldir_set_datum(slot, count)</td><td>Under the lock, at rest: count, position and edge to a whole pulse.</td></tr>
+        <tr><td class="nm">puldir_pulse_count</td><td>The slot's emitted count, one volatile aligned 32-bit load with no lock: the pulse tick writes it with one store, setPosition only in IDLE under the lock (E42). PulDir_position reads it.</td></tr>
         <tr><td class="nm">puldir_timing_take</td><td>Checks <code>plan_us % pulse_us == 0</code> and N in 2 to 4096, fixes the timing; true once set.</td></tr>
         <tr><td class="nm">puldir_ms_ticks, puldir_ms_fits</td><td>Milliseconds to ticks; whether a duration is at most PULDIR_TICKS_MAX.</td></tr>
         <tr><td class="nm">timing_open, edge, pos, aim</td><td>Timing not yet fixed; the next edge (D3); the 32.32 position; re-point the edge after a direction change.</td></tr>
@@ -1819,7 +1820,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 
   <div class="sec">
     <h3><span class="n">1</span>What it does</h3>
-    <p class="prose"><code>PulDir_loop</code> takes an axis's event bits under the lock and turns them into log lines: overruns, late sets, faults, homing results, refusals, stream timeouts and landings. Calling it often or never changes no motion. <code>PulDir_console</code> is a one-letter UART console, cFlexyStepper's verbs plus jerk; it parses one number and calls the public functions, so it adds no motion logic. Every line is <code>[name] text</code>, formatted with <code>snprintf</code> in main context only (E33).</p>
+    <p class="prose"><code>PulDir_loop</code> takes an axis's event bits under the lock, locking only when a bit is set (E42), and turns them into log lines: overruns, late sets, faults, homing results, refusals, stream timeouts and landings. Calling it often or never changes no motion. <code>PulDir_console</code> is a one-letter UART console, cFlexyStepper's verbs plus jerk; it parses one number and calls the public functions, so it adds no motion logic. Every line is <code>[name] text</code>, formatted with <code>snprintf</code> in main context only (E33).</p>
     <div class="meta"><span class="lbl2">Runs in</span><span class="chip main">main</span> everything in both files</div>
     <div class="meta"><span class="lbl2">Files</span><span class="file">puldir_loop.c</span><span class="file">puldir_console.c</span></div>
   </div>
@@ -1905,7 +1906,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <tbody>
         <tr><td class="sig">void PulDir_attachLogger(void (*fn)(const char*))</td><td>Sets the one logger; before init, which logs.</td><td class="dim">none</td><td>main, first</td></tr>
         <tr><td class="sig">void PulDir_setLogging(PulDir*, bool)</td><td>Turns this axis's lines on or off.</td><td class="dim">none</td><td>main only</td></tr>
-        <tr><td class="sig">void PulDir_loop(PulDir*)</td><td>Takes the events, then logs: overrun total, late total, fault, fault cleared, homing failed, refusal, stream timeout, landed, homed.</td><td class="dim">none</td><td>main only, every pass</td></tr>
+        <tr><td class="sig">void PulDir_loop(PulDir*)</td><td>Takes the events (locking only if one is set, E42), then logs: overrun total, late total, fault, fault cleared, homing failed, refusal, stream timeout, landed, homed.</td><td class="dim">none</td><td>main only, every pass</td></tr>
         <tr><td class="sig">void PulDir_console(PulDir*, char cmd, const char* arg)</td><td>Runs one verb; replies go through the logger as <code>[name] …</code>.</td><td class="ref">ARG as <code>console</code>: a missing or bad number, or E other than 0 or 1; plus whatever the call it makes refuses</td><td>main only</td></tr>
         <tr><td class="sig">void PulDir_consoleMenu(char* buf, size_t n)</td><td>The verb list, cut short to fit <code>n</code>.</td><td class="dim">none</td><td>main only</td></tr>
       </tbody>
@@ -1961,7 +1962,8 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
   <div class="sec">
     <h3><span class="n">8</span>Flow: one PulDir_loop</h3>
     <ol class="steps main">
-      <li><div><b>Take, under the lock:</b> the event bits (then cleared), the refusal and its call and value, the fault count and the failed homing phase.</div><div class="fn"><span class="lock">port_lock</span> · events = 0 · <span class="lock">port_unlock</span></div></li>
+      <li><div><b>Check the bits</b> with one unlocked load; none set, no lock (E42): only this call clears them, a bit set after the check is taken next pass, and each bit's details are written with it.</div><div class="fn">events</div></li>
+      <li><div><b>Take, under the lock,</b> only if a bit is set: the event bits (then cleared), the refusal and its call and value, the fault count and the failed homing phase.</div><div class="fn"><span class="lock">port_lock</span> · events = 0 · <span class="lock">port_unlock</span></div></li>
       <li><div><b>Return</b> if this axis does not log or no logger is attached. The events are gone either way.</div><div class="fn">log_on · logger</div></li>
       <li><div><b>Library totals.</b> Overruns, then late sets, each only if it changed since any axis last logged it and that line is at least a second old (pulse ticks, by unsigned subtraction); a held change goes out with the total as it is then (E40).</div><div class="fn">PulDir_ticks · PulDir_overruns · PulDir_lateSets · rated_due</div></li>
       <li><div><b>The drive's state, then what it caused:</b> fault, cleared, homing failed, refused, stream timeout, landed, homed.</div><div class="fn">snprintf · logger</div></li>
@@ -2299,7 +2301,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 </section>
 
 
-<footer>Built from the code on branch implement-puldir as of execution record E41. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E41 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
+<footer>Built from the code on branch implement-puldir as of execution record E42. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E42 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
 </div>
 
 <script>
