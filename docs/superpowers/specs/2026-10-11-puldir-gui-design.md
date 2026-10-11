@@ -112,8 +112,9 @@ panel.from_dict(d: dict)         # unknown or malformed entries are ignored
 Each **Set** sends its setter and then its getter, where one exists.
 
 The number boxes are `QDoubleSpinBox` with no buttons: arrow keys and the wheel still step them,
-which keeps the panel narrow. Arguments go out formatted with `:g`, because the firmware uses
-`strtof`.
+which keeps the panel narrow. Arguments go out at four decimals with trailing zeros dropped
+(`45`, `-12.25`): the console's own precision, read by `strtof`. `:g` was rejected because it
+keeps only six significant digits.
 
 ## Replies (`protocol.py`)
 
@@ -128,7 +129,7 @@ All lines start with the axis's own `[name] `. The parser returns a typed event 
 | `[n] fault cleared` | `FaultCleared` | grey message |
 | `[n] homing failed in P` | `HomeFailed(phase)` | red message, cycle abort |
 | `[n] <call> refused: <reason>` | `Refused(text)` | red message, cycle abort |
-| `[n] stream timed out` | `Message(text)` | grey message |
+| `[n] stream timed out` | `Note(text)` | grey message |
 
 - A line for a name that no tab has is ignored.
 - A line that starts like a known shape but does not parse fully is ignored, not half-applied.
@@ -197,8 +198,8 @@ dict where it likes and saves on `settings_changed`.
 
 ## Error handling
 
-- A field that doesn't hold a valid number cannot be sent: it turns red and its button does
-  nothing.
+- Inputs are `QDoubleSpinBox` / `QSpinBox`, which only ever hold a valid number in range, so there
+  is no unsendable state to show.
 - Malformed reply lines are ignored rather than half-applied.
 - When the link drops, every cycle stops, the readbacks go back to "--", and the motion and action
   buttons are disabled. Input fields stay editable.

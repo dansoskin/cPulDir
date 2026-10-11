@@ -1,0 +1,6 @@
+[submodule "gui/pySerialWorker"]
+	path = gui/pySerialWorker
+	url = https://github.com/dansoskin/pySerialWorker
+[submodule "gui/terminal_widget"]
+	path = gui/terminal_widget
+	url = https://github.com/dansoskin/terminal_widget

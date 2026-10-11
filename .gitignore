@@ -1,2 +1,6 @@
 build/
 .superpowers/
+gui/.venv/
+__pycache__/
+.pytest_cache/
+gui/settings.json
