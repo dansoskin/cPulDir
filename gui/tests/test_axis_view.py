@@ -1,8 +1,33 @@
-import pytest
-from PyQt5.QtWidgets import QAbstractButton, QDoubleSpinBox, QSpinBox, QTabWidget, QWidget
+import time
 
-from puldir_view.axis_view import CYCLE_TEXT, STOP_CYCLE_TEXT, AxisView
-from puldir_view.protocol import AxisConfig
+import pytest
+from PyQt5.QtCore import QPoint, QPointF, Qt
+from PyQt5.QtGui import QWheelEvent
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import (
+    QAbstractButton,
+    QApplication,
+    QCheckBox,
+    QDoubleSpinBox,
+    QLabel,
+    QSpinBox,
+    QTabWidget,
+    QWidget,
+)
+
+from puldir_view.axis_view import CYCLE_TEXT, NO_GETTER, STOP_CYCLE_TEXT, AxisView
+from puldir_view.protocol import (
+    AxisConfig,
+    Fault,
+    FaultCleared,
+    HomeFailed,
+    Homed,
+    Landed,
+    Note,
+    Readback,
+    Refused,
+    Status,
+)
 
 
 @pytest.fixture
@@ -128,12 +153,6 @@ def test_interval_and_reps_reach_the_cycle(view):
     button(tab, "cycle").click()
     assert view.cycle._interval_ms == 250
     assert view.cycle._reps == 3
-from PyQt5.QtWidgets import QCheckBox, QLabel
-
-from puldir_view.axis_view import NO_GETTER
-from puldir_view.protocol import Fault, FaultCleared, HomeFailed, Homed, Landed, Note, Readback, Refused, Status
-
-
 def label(view, name):
     found = view.findChild(QLabel, name)
     assert found is not None, name
@@ -160,6 +179,8 @@ def test_status_fills_the_header_and_signals_once(view):
     assert not label(view, "homed").isHidden()
     assert label(view, "faults").text() == "flt 2"
     assert view.statuses == ["MOVING"]
+    view.handle_event(Status("MOVING", "PROFILE", True, "IDLE", "", 0))
+    assert label(view, "faults").text() == ""
 
 
 def test_landed_and_homed_move_the_position(view):
@@ -227,22 +248,23 @@ def test_polls_only_when_shown_connected_and_auto(view):
     assert view.polled == []  # not shown yet
     view.set_shown(True)
     assert view.polled == [("p", ""), ("v", ""), ("s", "")]
-    assert view._poll_timer.isActive()
+    assert view.polling
     view.set_shown(False)
-    assert not view._poll_timer.isActive()
+    assert not view.polling
     view.set_shown(True)
     view.set_connected(False)
-    assert not view._poll_timer.isActive()
+    assert not view.polling
     assert view.sent == []
 
 
 def test_refresh_polls_once(view):
     button(view, "refresh").click()
     assert view.polled == [("p", ""), ("v", ""), ("s", "")]
-    assert not view._poll_timer.isActive()
+    assert not view.polling
 
 
-def test_poll_replies_are_recognised_only_while_auto(view):
+def test_poll_replies_are_recognised_only_while_polling(view):
+    view.set_shown(True)
     assert not view.is_poll_reply(Readback("position", 1.0))
     view.findChild(QCheckBox, "auto").setChecked(True)
     assert view.is_poll_reply(Readback("position", 1.0))
@@ -271,3 +293,105 @@ def test_from_dict_skips_garbage(view):
     view.from_dict({"motion": {"T": {"a": "x", "reps": True}}, "settings": None, "motion_tab": 9})
     view.from_dict(["not", "a", "dict"])
     assert view.findChild(QTabWidget, "motion").currentIndex() == 0
+
+
+def test_estop_during_a_jog_cycle_sends_only_K(view):
+    tab = motion(view, "J")
+    view.findChild(QTabWidget, "motion").setCurrentWidget(tab)
+    tab.findChild(QDoubleSpinBox, "a").setValue(5.0)
+    button(tab, "cycle").click()
+    button(view, "estop").click()
+    assert view.sent == [("J", "5"), ("K", "")]
+
+
+@pytest.mark.parametrize("name", ["enable", "disable", "home", "clear_fault"])
+def test_other_actions_end_the_cycle(view, name):
+    button(motion(view, "T"), "cycle").click()
+    button(view, name).click()
+    assert not view.cycle.running
+
+
+def test_a_refused_setting_leaves_the_cycle_running(view):
+    button(motion(view, "T"), "cycle").click()
+    view.handle_event(Refused("setAcceleration refused: the jerk window is frozen while moving"))
+    assert view.cycle.running
+
+
+def test_reconnecting_reenables_and_resumes_polling(view):
+    view.findChild(QCheckBox, "auto").setChecked(True)
+    view.set_shown(True)
+    view.set_connected(False)
+    view.polled.clear()
+    view.set_connected(True)
+    assert button(view, "enable").isEnabled()
+    assert view.polling
+    assert view.polled == [("p", ""), ("v", ""), ("s", "")]
+
+
+def test_message_line_is_hidden_until_there_is_one_and_after_disconnect(view):
+    assert label(view, "message").isHidden()
+    view.handle_event(Note("stream timed out"))
+    assert not label(view, "message").isHidden()
+    view.set_connected(False)
+    assert label(view, "message").isHidden()
+
+
+def test_from_dict_skips_numbers_a_box_cannot_hold(view):
+    view.from_dict(
+        {
+            "motion": {"T": {"reps": float("inf"), "interval": 99999999999, "a": float("nan"), "b": 5e6}},
+            "settings": {"A": -1.0},
+            "motion_tab": True,
+        }
+    )
+    tab = motion(view, "T")
+    assert tab.findChild(QSpinBox, "reps").value() == 0
+    assert tab.findChild(QSpinBox, "interval").value() == 1000
+    assert tab.findChild(QDoubleSpinBox, "a").value() == 0.0
+    assert tab.findChild(QDoubleSpinBox, "b").value() == 10.0
+    assert view.findChild(QDoubleSpinBox, "value_A").value() == 0.0
+    assert view.findChild(QTabWidget, "motion").currentIndex() == 0
+
+
+def test_landed_updates_the_datum_column(view):
+    view.handle_event(Landed(4.0))
+    assert label(view, "device_P").text() == "4.0000"
+
+
+def test_the_wheel_leaves_an_unfocused_box_alone(view):
+    spin = motion(view, "T").findChild(QDoubleSpinBox, "b")
+    before = spin.value()
+    event = QWheelEvent(
+        QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120),
+        Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False,
+    )
+    QApplication.sendEvent(spin, event)
+    assert spin.value() == before
+
+
+def _run_until_idle(view, limit_s=3.0):
+    deadline = time.monotonic() + limit_s
+    while view.cycle.running and time.monotonic() < deadline:
+        QTest.qWait(20)
+
+
+@pytest.mark.parametrize(
+    "verb, a, b, expected",
+    [
+        ("T", 0.0, 10.0, [("T", "0"), ("T", "10")]),
+        ("J", 5.0, -5.0, [("J", "5"), ("J", "-5"), ("k", "")]),
+    ],
+)
+def test_a_cycle_runs_on_the_real_timer(view, verb, a, b, expected):
+    tab = motion(view, verb)
+    view.findChild(QTabWidget, "motion").setCurrentWidget(tab)
+    tab.findChild(QDoubleSpinBox, "a").setValue(a)
+    tab.findChild(QDoubleSpinBox, "b").setValue(b)
+    tab.findChild(QSpinBox, "interval").setValue(50)
+    tab.findChild(QSpinBox, "reps").setValue(1)
+    button(tab, "cycle").click()
+    _run_until_idle(view)
+    assert not view.cycle.running
+    assert view.sent == expected
+    assert tab.findChild(QLabel, "done").text() == "done 1"
+    assert button(tab, "cycle").text() == CYCLE_TEXT

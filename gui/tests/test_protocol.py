@@ -106,3 +106,7 @@ def test_poll_replies_are_position_velocity_and_status_only():
     assert is_poll_reply(Status("IDLE", "IDLE", False, "IDLE", "", 0))
     assert not is_poll_reply(Readback("acceleration", 1.0))
     assert not is_poll_reply(Landed(1.0))
+
+
+def test_refused_names_its_call():
+    assert Refused("setAcceleration refused: busy").call == "setAcceleration"

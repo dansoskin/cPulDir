@@ -8,6 +8,7 @@ except polls, and only while it is the visible tab, the link is up and its
 "auto" box is ticked.
 """
 
+import math
 import time
 from functools import partial
 
@@ -81,12 +82,54 @@ _DEVICE_ROW = {"acceleration": "A", "deceleration": "D", "jerk": "Z", "position"
 #: Verbs that are settings rather than motion: they leave a running cycle alone.
 _SETTINGS_VERBS = frozenset("VAaDdZzF")
 
+#: Library calls behind the settings rows: their refusals leave a cycle running,
+#: as the settings themselves do.
+_SETTINGS_CALLS = frozenset(("setSpeed", "setAcceleration", "setDeceleration", "setJerk", "restoreDefaults"))
+
 #: The speed row's device column, which nothing can fill.
 NO_GETTER = "—"
 
 
+class _DoubleSpin(QDoubleSpinBox):
+    """The wheel steps the value only once the box has focus; otherwise it goes
+    to whatever is behind -- the scroll area -- so scrolling past a target
+    cannot change it."""
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _IntSpin(QSpinBox):
+    """The wheel steps the value only once the box has focus; otherwise it goes
+    to whatever is behind -- the scroll area -- so scrolling past a target
+    cannot change it."""
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+def _restorable(value, spin) -> bool:
+    """A saved number this box can take as it is: a real, finite number in its
+    range. JSON reads 1e999 and Infinity as inf, and a hand-edited file can hold
+    anything; out of range is skipped rather than clamped, so a typo cannot turn
+    into a target at the edge of the range."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and spin.minimum() <= value <= spin.maximum()
+    )
+
+
 def _spin(low: float, high: float, value: float, name: str) -> QDoubleSpinBox:
-    spin = QDoubleSpinBox()
+    spin = _DoubleSpin()
+    spin.setFocusPolicy(Qt.StrongFocus)
     spin.setObjectName(name)
     spin.setRange(low, high)
     spin.setDecimals(4)
@@ -98,7 +141,8 @@ def _spin(low: float, high: float, value: float, name: str) -> QDoubleSpinBox:
 
 
 def _int_spin(low: int, high: int, value: int, name: str) -> QSpinBox:
-    spin = QSpinBox()
+    spin = _IntSpin()
+    spin.setFocusPolicy(Qt.StrongFocus)
     spin.setObjectName(name)
     spin.setRange(low, high)
     spin.setValue(value)
@@ -207,7 +251,7 @@ class _MotionTab(QWidget):
             return
         for key, spin in self.spins():
             value = data.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if _restorable(value, spin):
                 spin.setValue(int(value) if isinstance(spin, QSpinBox) else float(value))
 
 
@@ -223,7 +267,7 @@ class AxisView(QWidget):
         self._connected = False
         self._shown = False
         self._restoring = False
-        self._status = ""
+        self._status = None  # not "", so the first clear() styles the pill
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_MS)
@@ -233,7 +277,6 @@ class AxisView(QWidget):
         self._cycle_tab = None
 
         self._build()
-        self.clear()
         self.set_connected(False)
 
     # -- construction -------------------------------------------------------
@@ -455,36 +498,41 @@ class AxisView(QWidget):
         for query in POLL_QUERIES:
             self.poll.emit(query, "")
 
+    @property
+    def polling(self) -> bool:
+        return self._poll_timer.isActive()
+
     def is_poll_reply(self, event) -> bool:
-        return self._auto.isChecked() and protocol.is_poll_reply(event)
+        return self.polling and protocol.is_poll_reply(event)
 
     # -- receiving ----------------------------------------------------------
 
     def handle_event(self, event) -> None:
         if isinstance(event, Readback):
-            text = f"{event.value:.4f}"
             if event.field == "position":
-                self._position.setText(text)
-            elif event.field == "velocity":
-                self._velocity.setText(text)
-            row = _DEVICE_ROW.get(event.field)
-            if row:
-                self._device[row].setText(text)
+                self._show_position(event.value)
+            else:
+                text = f"{event.value:.4f}"
+                if event.field == "velocity":
+                    self._velocity.setText(text)
+                row = _DEVICE_ROW.get(event.field)
+                if row:
+                    self._device[row].setText(text)
         elif isinstance(event, Status):
             self._set_status(event.status)
             self._mode_pill.setText(event.mode)
             self._mode_pill.show()
             self._homed_pill.setVisible(event.homed)
-            self._faults.setText(f"flt {event.faults}")
+            self._faults.setText(f"flt {event.faults}" if event.faults else "")
         elif isinstance(event, Landed):
-            self._position.setText(f"{event.position:.4f}")
+            self._show_position(event.position)
         elif isinstance(event, Homed):
-            self._position.setText(f"{event.position:.4f}")
+            self._show_position(event.position)
             self._homed_pill.show()
             self._say(f"homed at {event.position:.4f}")
         elif isinstance(event, Fault):
             self._set_status("FAULT")
-            self._faults.setText(f"flt {event.count}")
+            self._faults.setText(f"flt {event.count}" if event.count else "")
             self._say(f"fault latched, count {event.count}", error=True)
             self.cycle.abort()
         elif isinstance(event, FaultCleared):
@@ -494,9 +542,16 @@ class AxisView(QWidget):
             self.cycle.abort()
         elif isinstance(event, Refused):
             self._say(event.text, error=True)
-            self.cycle.abort()
+            if event.call not in _SETTINGS_CALLS:
+                self.cycle.abort()
         elif isinstance(event, Note):
             self._say(event.text)
+
+    def _show_position(self, value: float) -> None:
+        # The datum row's device column reads the same position the readout does.
+        text = f"{value:.4f}"
+        self._position.setText(text)
+        self._device["P"].setText(text)
 
     def _say(self, text: str, error: bool = False) -> None:
         self._message.setText(f"{time.strftime('%H:%M:%S')}  {text}")
@@ -504,11 +559,12 @@ class AxisView(QWidget):
         self._message.show()
 
     def _set_status(self, status: str) -> None:
+        if status == self._status:
+            return
+        self._status = status
         self._status_pill.setText(status or "--")
         self._status_pill.setStyleSheet(style.pill_css(style.status_colour(status)))
-        if status != self._status:
-            self._status = status
-            self.status_changed.emit(status)
+        self.status_changed.emit(status)
 
     @property
     def status(self) -> str:
@@ -566,10 +622,10 @@ class AxisView(QWidget):
             if isinstance(settings, dict):
                 for setter, spin in self._setting_values.items():
                     value = settings.get(setter)
-                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if _restorable(value, spin):
                         spin.setValue(float(value))
             index = data.get("motion_tab")
-            if isinstance(index, int) and 0 <= index < self._motion.count():
+            if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < self._motion.count():
                 self._motion.setCurrentIndex(index)
         finally:
             self._restoring = False

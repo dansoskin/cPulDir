@@ -112,6 +112,11 @@ class HomeFailed:
 class Refused:
     text: str  #: "<call> refused: <reason>", as the board said it
 
+    @property
+    def call(self) -> str:
+        """The library call the board refused, e.g. 'setAcceleration'."""
+        return self.text.split(" refused:", 1)[0]
+
 
 @dataclass(frozen=True)
 class Note:
