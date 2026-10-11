@@ -120,6 +120,8 @@ class MainWindow(QMainWindow):
     def _connect_pressed(self) -> None:
         """The terminal's Connect button is a toggle from this side."""
         if self.link.is_running():
+            # Closing the link makes the panel drop its cycles without a stop.
+            self.panel.stop_cycles()
             self.link.close()
             self.statusBar().showMessage("Disconnected")
             return
@@ -142,6 +144,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_settings()
+        self.panel.stop_cycles()
         self.link.close()
         super().closeEvent(event)
 

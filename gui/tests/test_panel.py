@@ -1,5 +1,5 @@
 import pytest
-from PyQt5.QtWidgets import QAbstractButton, QCheckBox, QLabel
+from PyQt5.QtWidgets import QAbstractButton, QCheckBox, QLabel, QTabWidget, QWidget
 
 from puldir_view import AxisConfig, PulDirPanel, at_formatter
 from puldir_view import style
@@ -165,3 +165,66 @@ def test_a_tab_dot_goes_back_to_unknown_on_disconnect(panel):
     panel.handle_line("[motor2] fault latched, count 1")
     panel.set_connected(False)
     assert dot(panel, 1) == style.UNKNOWN_COLOUR
+
+
+def start_cycle(panel, name, verb):
+    view = panel.view(name)
+    tab = view.findChild(QWidget, f"motion_{verb}")
+    view.findChild(QTabWidget, "motion").setCurrentWidget(tab)
+    tab.findChild(QAbstractButton, "cycle").click()
+    return view
+
+
+def test_stop_cycles_ends_a_jog_cycle_with_its_stop(panel):
+    view = start_cycle(panel, "motor2", "J")
+    assert view.cycle.running
+    panel.stop_cycles()
+    assert panel.sent[-1] == "@k2"
+    assert not view.cycle.running
+
+
+def test_estop_on_one_axis_stops_the_cycle_on_another(panel):
+    view = start_cycle(panel, "motor2", "J")
+    panel.tabs.setCurrentIndex(0)
+    click(panel.view("motor1"), "estop")
+    assert "@K1" in panel.sent
+    assert "@k2" in panel.sent
+    assert not view.cycle.running
+
+
+def test_a_cycling_axis_shows_on_its_tab(panel):
+    view = start_cycle(panel, "motor2", "T")
+    assert panel.tabs.tabText(1) == "⇄ motor2"
+    view.cycle.abort()
+    assert panel.tabs.tabText(1) == "motor2"
+
+
+def test_polling_stops_while_the_host_hides_the_panel(qapp, panel):
+    host = QTabWidget()
+    host.addTab(panel, "motors")
+    host.addTab(QWidget(), "other")
+    host.show()
+    qapp.processEvents()
+    try:
+        panel.view("motor1").findChild(QCheckBox, "auto").setChecked(True)
+        assert panel.view("motor1").polling
+        host.setCurrentIndex(1)
+        qapp.processEvents()
+        assert not panel.view("motor1").polling
+        host.setCurrentIndex(0)
+        qapp.processEvents()
+        assert panel.view("motor1").polling
+    finally:
+        host.hide()
+
+
+def test_showing_the_panel_reports_no_settings_change(qapp, panel):
+    changed = []
+    panel.settings_changed.connect(lambda: changed.append(1))
+    panel.show()
+    qapp.processEvents()
+    panel.hide()
+    panel.show()
+    qapp.processEvents()
+    panel.hide()
+    assert changed == []

@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from PyQt5.QtWidgets import QAbstractButton, QDoubleSpinBox, QLabel
+from PyQt5.QtWidgets import QAbstractButton, QDoubleSpinBox, QLabel, QTabWidget, QWidget
 
 import settings as app_settings
 from puldir_view import AxisConfig
@@ -138,3 +138,19 @@ def test_the_status_names_the_port_that_was_opened(window, monkeypatch):
     monkeypatch.setattr(window.terminal, "get_port", lambda: "COM9")
     window._connection_changed(True)
     assert window.statusBar().currentMessage() == "Connected to COM7"
+
+
+def test_disconnecting_stops_a_running_jog_cycle_first(window, monkeypatch):
+    window._connection_changed(True)
+    view = window.panel.view("motor1")
+    tab = view.findChild(QWidget, "motion_J")
+    view.findChild(QTabWidget, "motion").setCurrentWidget(tab)
+    tab.findChild(QAbstractButton, "cycle").click()
+    assert view.cycle.running
+    sent = []
+    monkeypatch.setattr(window.link, "is_running", lambda: True)
+    monkeypatch.setattr(window.link, "close", lambda: None)
+    monkeypatch.setattr(window.link, "send", sent.append)
+    window._connect_pressed()
+    assert "@k1" in sent
+    assert not view.cycle.running

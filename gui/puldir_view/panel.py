@@ -41,6 +41,7 @@ class PulDirPanel(QWidget):
         self._views = {}
         self._pages = {}  #: axis name -> the scroll area its view sits in
         self._restoring = False
+        self._hidden = False
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("axes")
@@ -61,6 +62,8 @@ class PulDirPanel(QWidget):
             view.poll.connect(partial(self._emit, self.poll, axis))
             view.status_changed.connect(partial(self._status_changed, axis.name))
             view.settings_changed.connect(self._touched)
+            view.estop_pressed.connect(self.stop_cycles)
+            view.cycle_changed.connect(partial(self._cycle_changed, axis))
             page = self._page(view)
             self._views[axis.name] = view
             self._pages[axis.name] = page
@@ -117,6 +120,26 @@ class PulDirPanel(QWidget):
         for view in self._views.values():
             view.set_connected(on)
 
+    def stop_cycles(self) -> None:
+        """End every running A<->B cycle, a jog cycle with its stop. A host
+        calls this while the link is still up -- before closing it, and when
+        the window closes -- so no axis is left jogging with no GUI to stop it."""
+        for view in self._views.values():
+            view.cycle.abort()
+
+    def hideEvent(self, event):
+        # A host that puts the panel in its own tabs hides it with them; an
+        # axis nobody can see must not keep the link busy with polls.
+        self._hidden = True
+        for view in self._views.values():
+            view.set_shown(False)
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        self._hidden = False
+        self._update_shown()
+        super().showEvent(event)
+
     def to_dict(self) -> dict:
         return {
             "axis": self._current_name(),
@@ -154,10 +177,18 @@ class PulDirPanel(QWidget):
         index = self.tabs.indexOf(self._pages[name])
         self.tabs.setTabIcon(index, style.dot_icon(style.status_colour(status)))
 
-    def _current_changed(self, index: int) -> None:
-        current = self.tabs.widget(index)
+    def _cycle_changed(self, axis: AxisConfig, running: bool) -> None:
+        # A cycle on a tab nobody is looking at would otherwise run unseen.
+        index = self.tabs.indexOf(self._pages[axis.name])
+        self.tabs.setTabText(index, f"⇄ {axis.title}" if running else axis.title)
+
+    def _update_shown(self) -> None:
+        current = self.tabs.currentWidget()
         for name, view in self._views.items():
-            view.set_shown(self._pages[name] is current)
+            view.set_shown(not self._hidden and self._pages[name] is current)
+
+    def _current_changed(self, index: int) -> None:
+        self._update_shown()
         self._touched()
 
     def _touched(self) -> None:

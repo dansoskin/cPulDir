@@ -35,7 +35,7 @@ STYLESHEET = f"""
     font-family: {_MONO};
 }}
 #{OBJECT_NAME} QLabel[role="caption"] {{
-    color: {NEUTRAL_COLOUR}; font-size: 9px;
+    color: {NEUTRAL_COLOUR}; font-size: 10px;
 }}
 #{OBJECT_NAME} QToolButton[role="estop"] {{
     background: {ERROR_COLOUR}; color: white; font-weight: bold;

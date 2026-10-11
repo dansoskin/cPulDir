@@ -260,6 +260,8 @@ class AxisView(QWidget):
     poll = pyqtSignal(str, str)  #: (cmd, arg) from auto-refresh or ⟳
     status_changed = pyqtSignal(str)  #: a STATUSES name, or "" for unknown
     settings_changed = pyqtSignal()  #: a remembered value changed
+    estop_pressed = pyqtSignal()  #: after K went out; the panel stops the other cycles
+    cycle_changed = pyqtSignal(bool)  #: whether an A<->B cycle is running
 
     def __init__(self, axis: AxisConfig, parent=None):
         super().__init__(parent)
@@ -404,7 +406,7 @@ class AxisView(QWidget):
         self._home.clicked.connect(lambda *_: self._send("H"))
         self._clear_fault.clicked.connect(lambda *_: self._send("C"))
         self._stop.clicked.connect(lambda *_: self._send("k"))
-        self._estop.clicked.connect(lambda *_: self._send("K"))
+        self._estop.clicked.connect(self._estop_clicked)
         self._refresh.clicked.connect(self._poll_once)
         self._auto.toggled.connect(self._update_polling)
         self._defaults.clicked.connect(self._restore_defaults)
@@ -456,7 +458,12 @@ class AxisView(QWidget):
             tab.reps.value(),
         )
 
+    def _estop_clicked(self, *_) -> None:
+        self._send("K")
+        self.estop_pressed.emit()
+
     def _cycle_changed(self) -> None:
+        self.cycle_changed.emit(self.cycle.running)
         tab = self._cycle_tab
         if tab is None:
             return
