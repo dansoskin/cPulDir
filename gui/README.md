@@ -24,6 +24,7 @@ Tests run headless: `gui/.venv/Scripts/python.exe -m pytest gui/tests -q`.
 | `puldir_view/` | the reusable panel; imports neither submodule |
 | `app.py` | demo window; the only place a line leaves the GUI |
 | `link.py` | wraps `SerialWorker`, turns its polled queue into Qt signals |
+| `tests/` | headless pytest suite for the panel, the link, the settings and the demo |
 | `settings.py` | the demo's `settings.json`: the axes, and the panel's values |
 | `vendor.py` | puts the two submodules on `sys.path` |
 | `pySerialWorker/`, `terminal_widget/` | submodules |
@@ -48,8 +49,17 @@ from any tab. Top to bottom:
   back after setting except Speed: the console has no getter for the speed
   setting (`v` is the velocity now), so its column shows "—". Defaults `F`.
 
-A cycle ends on Stop, E-STOP, any other motion command for that axis, a fault,
-a refusal, a failed homing, switching its tab, or the link dropping.
+A cycle ends on Stop, E-STOP, any other command from that axis except the
+settings rows (Enable, Disable, Home, Clr fault and Datum all end it), a fault, a
+refusal of anything but a settings call, a failed homing, switching its motion
+tab, or the link dropping. Settings setters, getters and Defaults leave it
+running. E-STOP on any axis also stops every other axis's cycle (a jog cycle with
+its `k`). A running cycle shows as `⇄` on its tab, so one on a tab nobody is
+looking at is not unseen.
+
+Stop and E-STOP during a jog cycle send only the `k` or `K` you pressed, not a
+second `k`. A link drop ends a cycle *without* `k`: there is nothing to send it
+on.
 
 ## The demo's axes
 
@@ -67,8 +77,21 @@ name breaks it, so one typo does not take the whole window down.
 
 The panel never touches a port:
 
+Put `cPulDir/gui` on `sys.path` from the host's own `vendor.py`, built from that
+file's location and appended:
+
 ```python
-import sys; sys.path.insert(0, "Drivers/cPulDir/gui")   # wherever cPulDir sits
+sys.path.append(str(Path(__file__).resolve().parent.parent / "Drivers" / "cPulDir" / "gui"))
+```
+
+(Adjust the `parent` count to where `vendor.py` sits; this is for 164-race's
+`gui/vendor.py`.) Appended, not inserted at the front, because cPulDir's `gui/`
+also holds `app.py`, `link.py`, `settings.py` and `vendor.py`, and at the front of
+the path those shadow a host's modules of the same names; 164-race has all four.
+A relative path such as `"Drivers/cPulDir/gui"` only works from one working
+directory.
+
+```python
 from puldir_view import AxisConfig, PulDirPanel, at_formatter
 
 panel = PulDirPanel(
@@ -81,6 +104,9 @@ panel.poll.connect(host_send)               # auto-refresh; hide it if you like
 link.line_received.connect(panel.handle_line)
 link.connection_changed.connect(panel.set_connected)
 panel.settings_changed.connect(lambda: save(panel.to_dict()))
+
+# before the link closes, and when the window closes:
+panel.stop_cycles()
 ```
 
 - **Formatter.** puldir defines only the verb and its argument; how a line picks
@@ -92,13 +118,42 @@ panel.settings_changed.connect(lambda: save(panel.to_dict()))
   `ValueError` rather than build a tab that could never see its replies.
 - **It stays out of the way.** No app-wide style or stylesheet (its rules are
   under `#PulDirPanel`), colours from the host's palette apart from the status
-  accents, at most 340 px wide, no dialogs, no files.
+  accents, no dialogs, no files. It is capped at 340 px wide, which is a maximum
+  set on the panel and not a promise: each axis's scroll page takes its minimum
+  width from what its content needs, so with large host fonts (about 1.5×
+  measured) the content outgrows 340 px and the panel stays as wide as it needs
+  rather than clip a row or grow a horizontal bar.
+- **Stop cycles before closing.** Call `panel.stop_cycles()` while the link is
+  still up: before you close it, and when the window closes. `set_connected(False)`
+  ends a cycle too, but cannot send anything, so a jog cycle would be dropped
+  without its `k` and the axis left jogging.
+- **Starts disconnected.** Motion and action buttons are disabled, and readbacks
+  show "--", until `set_connected(True)`.
 - **Hiding polls.** `panel.is_poll_reply(line)` is true for a position,
   velocity or status reply while that axis is polling (its *auto* is on, its
-  tab is showing and the link is up).
+  tab is showing, the panel is not hidden and the link is up).
+- **Hidden panel, no polls.** The panel stops polling while its host hides it,
+  for example in a host tab that is not showing. A hidden tab inside the panel is
+  not polled either, so its dot updates only from lines that arrive.
 - **It scrolls.** Each axis sits in a vertical scroll area, so the panel never
   raises the host window's minimum height. The mouse wheel edits a number box
   only once it has focus, so scrolling past a target cannot change it.
+
+## In 164-race
+
+- Its `Drivers/cPulDir` submodule is pinned before `gui/` existed and needs a
+  bump. `git submodule update --recursive` there also fetches this repo's two GUI
+  submodules.
+- Only true PulDir axes belong in `PulDirPanel`: `motor1` and `motor2` there.
+  Axes 3 and 4 (`azimuth`, `tilt`) answer through `master_console`, whose status,
+  refusal and "no motor on this axis" lines do not use puldir's formats. For them
+  the status pill and tab dot stay "--"; refusals are not shown and do not end a
+  cycle; Enable, Disable, Home and Clr fault do nothing visible; and with auto on,
+  their status replies are not recognised as poll replies. Only their position,
+  velocity, acceleration, deceleration and jerk readbacks parse.
+- 164-race's `StepperPanel` has a telemetry-fed `set_live` / `clear_live` row and
+  a `clear_readbacks()` that `PulDirPanel` does not. The host uses
+  `set_connected(False)` instead of `clear_readbacks()`.
 
 ## Things worth knowing
 
