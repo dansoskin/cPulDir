@@ -687,6 +687,14 @@ else depends on how often `PulDir_loop` runs.
   interrupts**, never all interrupts. A locked section is a handful of
   stores: under one microsecond, and the test suite's fake port asserts
   that nothing but plain stores happens inside one.
+
+  > Superseded by E39 (plan, execution record): the lock must mask at least
+  > the two library interrupts and must not be stretchable by any other; the
+  > STM32 port masks all interrupts (PRIMASK) for the few stores of a locked
+  > section. Masked in the NVIC alone, any other interrupt that preempted a
+  > locked main section delayed the pulse tick by its whole run, and on the
+  > bench lost ticks; with PRIMASK the worst delay is the longest locked
+  > section. At -O0 the longest take several microseconds (E39 lists them).
 - Values shared between the plan tick and the pulse tick are the shadow
   increment set with its publish flag, and the 64-bit pulse positions read
   under lock. Nothing else is shared.
@@ -754,6 +762,9 @@ void PulDir_stm32_planIrq(void);    /* likewise */
 - `port_lock` disables exactly the two IRQ numbers in the NVIC, with a
   barrier; `port_unlock` re-enables them. A tick that came due inside the lock
   fires on unlock, late by the lock's duration. No PRIMASK, no BASEPRI.
+
+  > Superseded by E39: `port_lock` saves PRIMASK and disables every
+  > interrupt, `port_unlock` restores it (5.9's note says why).
 - `puldir_pin_t` is `{ GPIO_TypeDef* port; uint16_t pin; }` and
   `port_pin_write` is one write to `BSRR` or `BRR`. Pin modes are CubeMX's
   business: `port_pin_init_output` only parks the pin at its idle level, as

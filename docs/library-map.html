@@ -336,7 +336,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <g class="lbl"><rect x="814" y="466" width="70" height="17" rx="3"/><text x="849" y="478.5" text-anchor="middle">pins</text></g>
       </svg>
       </div>
-      <figcaption>Main context never touches the pulse tick except to halt: <code>puldir_halt_locked</code> calls <code>puldir_kill</code>, which zeroes the live and published increment. Requests go down under <code>port_lock</code>, which masks only the two library interrupts for a handful of stores. The plan tick reads every axis's pulse state in one locked snapshot, so all axes plan from the same instant. It hands increments to the pulse tick through a double-buffered set, which the pulse tick latches at an interval boundary (every N ticks) or, if the set is late, on the first tick past its due tick. The boundary tick then pends the plan tick, so each plan tick starts just after the latch it serves (E38). Click a box to open its tab.</figcaption>
+      <figcaption>Main context never touches the pulse tick except to halt: <code>puldir_halt_locked</code> calls <code>puldir_kill</code>, which zeroes the live and published increment. Requests go down under <code>port_lock</code>, which masks every interrupt (STM32: PRIMASK) for a handful of stores, so nothing can stretch it (E39). The plan tick reads every axis's pulse state in one locked snapshot, so all axes plan from the same instant. It hands increments to the pulse tick through a double-buffered set, which the pulse tick latches at an interval boundary (every N ticks) or, if the set is late, on the first tick past its due tick. The boundary tick then pends the plan tick, so each plan tick starts just after the latch it serves (E38). Click a box to open its tab.</figcaption>
     </figure>
 
     <div class="ctx">
@@ -1975,7 +1975,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 
   <div class="sec">
     <h3><span class="n">1</span>What it does</h3>
-    <p class="prose"><code>puldir_port.h</code> is the contract a platform implements: one-store pin writes, pin reads, starting the pulse tick, pending the plan tick from it, and a lock that masks only the library's two interrupts. The port's attach calls hand the two periods to the library through <code>puldir_timing_pulse</code> and <code>puldir_timing_plan</code>. The STM32 port runs on any application-owned timer counting at 1 MHz and any spare IRQ vector, on any family (E38); the fake port makes pins an array and lets the host tests call the ticks, asserting the concurrency rules a host can check.</p>
+    <p class="prose"><code>puldir_port.h</code> is the contract a platform implements: one-store pin writes, pin reads, starting the pulse tick, pending the plan tick from it, and a lock that masks at least the library's two interrupts and that no other interrupt can stretch (E39). The port's attach calls hand the two periods to the library through <code>puldir_timing_pulse</code> and <code>puldir_timing_plan</code>. The STM32 port runs on any application-owned timer counting at 1 MHz and any spare IRQ vector, on any family (E38); the fake port makes pins an array and lets the host tests call the ticks, asserting the concurrency rules a host can check.</p>
     <div class="meta"><span class="lbl2">Runs in</span><span class="chip pulse">pulse tick</span> pin writes of PUL and DIR · <span class="chip plan">plan tick</span> pin reads, lock · <span class="chip main">main</span> attach, start, lock, enable and clear writes</div>
     <div class="meta"><span class="lbl2">Files</span><span class="file">puldir_port.h</span><span class="file">port/stm32/puldir_pin.h</span><span class="file">port/stm32/puldir_port_stm32.h</span><span class="file">port/stm32/puldir_port_stm32.c</span><span class="file">test/puldir_pin.h</span><span class="file">test/fake_port.h</span><span class="file">test/fake_port.c</span></div>
   </div>
@@ -2007,7 +2007,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="nm">pulse_us</td><td>none (README: 20)</td><td>µs</td><td>attach argument</td><td>The pulse tick and the pulse width, 2 to 1000. Tick rate 1e6 / pulse_us; the rate cap is just under half of it.</td><td>Out of range or after the timing is fixed: the attach call returns false and keeps nothing. Too short for the drive's minimum pulse width: missed pulses.</td></tr>
         <tr><td class="nm">plan_us</td><td>none (README: 1000)</td><td>µs</td><td>attach argument</td><td>The plan period, 250 to 10000; also the fastest stream rate. N pulse periods, by construction: the pulse tick pends the plan tick every N ticks.</td><td>Not a whole 2 to 4096 pulse periods: <code>PulDir_init</code> refuses (<code>plan period not 2 to 4096 whole pulse periods</code>).</td></tr>
         <tr><td class="nm">PULDIR_TIMER_HZ</td><td>1000000u</td><td>Hz</td><td>puldir_port.h, fixed</td><td>Every port's timers count at 1 MHz, 1 µs per count.</td><td>A prescaler that does not give 1 MHz scales every time and speed; the port cannot check it, the scope can.</td></tr>
-        <tr><td class="nm">IRQ priorities</td><td>none</td><td>NVIC</td><td>your CubeMX setup</td><td>Pulse IRQ above plan IRQ, everything else below both. STM32: the plan IRQ is a spare vector the application sets with <code>HAL_NVIC_SetPriority</code>.</td><td>Another source at the pulse priority adds its run time to the pulse jitter; plan above pulse breaks the fake port's rule that the plan tick never preempts the pulse tick.</td></tr>
+        <tr><td class="nm">IRQ priorities</td><td>none</td><td>NVIC</td><td>your CubeMX setup</td><td>Pulse IRQ above plan IRQ, everything else below both. STM32: the plan IRQ is a spare vector the application sets with <code>HAL_NVIC_SetPriority</code>; <code>port_start</code> calls Error_Handler unless its preemption priority is below the pulse IRQ's.</td><td>Another source at the pulse priority adds its run time to the pulse jitter; plan above pulse breaks the fake port's rule that the plan tick never preempts the pulse tick.</td></tr>
         <tr><td class="nm">FAKE_PINS</td><td>64</td><td>pins</td><td>test/fake_port.h, fixed</td><td>Size of the fake pin array.</td><td>A pin id beyond it fails an assert.</td></tr>
         <tr><td class="nm">fake_plan_phase</td><td>N / 2</td><td>ticks</td><td>test/fake_port.h, set by fake_attach</td><td>Ticks after each boundary when <code>fake_run</code> calls the plan tick.</td><td>Tests move it to probe late and early plan ticks.</td></tr>
         <tr><td class="nm">fake_pends</td><td>0</td><td>calls</td><td>test/fake_port.h, reset by port_start</td><td><code>port_plan_pend</code> calls since start.</td><td>Read only.</td></tr>
@@ -2039,8 +2039,9 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <div class="rw"><span class="chip main">attach and port_start write</span> · <span class="chip pulse">the IRQ entries read</span></div>
         <table><thead><tr><th>name</th><th>type</th><th>meaning</th></tr></thead><tbody>
           <tr><td>pulse_tim</td><td>TIM_HandleTypeDef*</td><td>the attached pulse timer</td></tr>
-          <tr><td>pulse_irq, plan_irq</td><td>IRQn_Type</td><td>the two IRQs the lock masks</td></tr>
+          <tr><td>pulse_irq, plan_irq</td><td>IRQn_Type</td><td>the two IRQs, for the priority check and the pend</td></tr>
           <tr><td>plan_attached</td><td>bool</td><td>the plan IRQ is attached (zero is a real IRQ number)</td></tr>
+          <tr><td>saved_primask</td><td>uint32_t</td><td>PRIMASK before the lock; one value, since the core never nests the lock</td></tr>
           <tr><td>pulse_counts</td><td>uint32_t</td><td>the pulse period, in 1 µs counts</td></tr>
           <tr><td>pulse_fn, plan_fn</td><td>function pointers</td><td>set by port_start; pulse_fn a no-op until then</td></tr>
           <tr><td>plan_due</td><td>volatile bool</td><td>set by port_plan_pend, cleared by the plan IRQ entry: the plan IRQ's own source</td></tr>
@@ -2068,10 +2069,10 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="sig">bool puldir_timing_plan(uint32_t plan_us)</td><td>The library takes the plan period.</td><td class="ref">false: outside 250 to 10000, or timing fixed</td><td>main, before init</td></tr>
         <tr><td class="sig">void port_pin_write(puldir_pin_t, bool level)</td><td>One register write. STM32: one BSRR store.</td><td class="dim">none</td><td>pulse tick (PUL, DIR); main under the lock (enable, clear); attach</td></tr>
         <tr><td class="sig">bool port_pin_read(puldir_pin_t)</td><td>The input level. STM32: IDR and the mask.</td><td class="dim">none</td><td>plan tick</td></tr>
-        <tr><td class="sig">void port_start(void (*pulse_tick)(bool overrun), void (*plan_tick)(void))</td><td>Starts the pulse tick every <code>pulse_us</code>. STM32: ARR = counts − 1, counter one count before its update (E25), the plan IRQ cleared and enabled, the pulse timer started (E38).</td><td class="ref">STM32: Error_Handler if the pulse timer or the plan IRQ is missing</td><td>main, from PulDir_start</td></tr>
+        <tr><td class="sig">void port_start(void (*pulse_tick)(bool overrun), void (*plan_tick)(void))</td><td>Starts the pulse tick every <code>pulse_us</code>. STM32: ARR = counts − 1, counter one count before its update (E25), the plan IRQ cleared and enabled, the pulse timer started (E38).</td><td class="ref">STM32: Error_Handler if the pulse timer or the plan IRQ is missing, or the plan IRQ is not below the pulse IRQ</td><td>main, from PulDir_start</td></tr>
         <tr><td class="sig">void port_plan_pend(void)</td><td>Called by the pulse tick at the end of each boundary tick: the plan tick runs once the pulse tick returns, below its priority (E38). STM32: set <code>plan_due</code>, <code>NVIC_SetPendingIRQ</code>.</td><td class="dim">none</td><td>pulse tick</td></tr>
-        <tr><td class="sig">void port_lock(void)</td><td>Masks only the library's two interrupts. STM32: NVIC disable both, DSB, ISB; nothing until both are attached.</td><td class="dim">none</td><td>main, plan tick</td></tr>
-        <tr><td class="sig">void port_unlock(void)</td><td>Unmasks them; a tick that came due fires now.</td><td class="dim">none</td><td>main, plan tick</td></tr>
+        <tr><td class="sig">void port_lock(void)</td><td>Masks at least the library's two interrupts, unstretchable by any other. STM32: save PRIMASK, disable every interrupt; works before attach (E39).</td><td class="dim">none</td><td>main, plan tick</td></tr>
+        <tr><td class="sig">void port_unlock(void)</td><td>Unmasks them; a tick that came due fires now. STM32: restore PRIMASK.</td><td class="dim">none</td><td>main, plan tick</td></tr>
         <tr class="grp"><td colspan="4">STM32, puldir_port_stm32.h</td></tr>
         <tr><td class="sig">bool PulDir_stm32_attachPulseTimer(TIM_HandleTypeDef*, IRQn_Type, uint32_t pulse_us)</td><td>Keeps the timer only if the library accepts its period. The application sets its prescaler for 1 MHz and enables its update interrupt.</td><td class="ref">false, as puldir_timing_pulse</td><td>main, first</td></tr>
         <tr><td class="sig">bool PulDir_stm32_attachPlanIrq(IRQn_Type, uint32_t plan_us)</td><td>Keeps the plan IRQ only if the library accepts the plan period. Any vector the application does not otherwise use, at a priority below the pulse timer's; no timer (E38).</td><td class="ref">false, as puldir_timing_plan</td><td>main, first</td></tr>
@@ -2093,6 +2094,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <thead><tr><th>Function</th><th>What it does</th></tr></thead>
       <tbody>
         <tr><td class="nm">no_pulse (STM32)</td><td>Called by a shared vector that sees a stale update flag before port_start.</td></tr>
+        <tr><td class="nm">preemption (STM32)</td><td>An IRQ's preemption priority, decoded under the priority grouping, for port_start's check.</td></tr>
         <tr><td class="nm">fake asserts</td><td>Motion pins written only from the pulse tick once started; no tick while the lock is held; no nested lock; the plan tick never preempts the pulse tick; only the pulse tick pends the plan tick.</td></tr>
       </tbody>
     </table></div>
@@ -2107,11 +2109,11 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <h3><span class="n">8</span>Flow: STM32 start and one IRQ</h3>
     <ol class="steps main">
       <li><div><b>Attach.</b> Each attach call hands its period to the library and keeps the timer or the IRQ only if it is accepted.</div><div class="fn">PulDir_stm32_attachPulseTimer · PulDir_stm32_attachPlanIrq · puldir_timing_pulse · puldir_timing_plan</div></li>
-      <li><div><b>port_start.</b> Pulse timer and plan IRQ attached or Error_Handler; store the callbacks; set the pulse period with the counter one count before its update; clear and enable the plan IRQ; start the pulse timer.</div><div class="fn">NVIC_ClearPendingIRQ · NVIC_EnableIRQ · HAL_TIM_Base_Start_IT</div></li>
+      <li><div><b>port_start.</b> Pulse timer and plan IRQ attached, the plan IRQ below the pulse IRQ in preemption, or Error_Handler; store the callbacks; set the pulse period with the counter one count before its update; clear and enable the plan IRQ; start the pulse timer.</div><div class="fn">NVIC_ClearPendingIRQ · NVIC_EnableIRQ · HAL_TIM_Base_Start_IT</div></li>
       <li><div><b>Pulse IRQ entry.</b> Return if UIF is clear (the vector's other source); clear UIF; call the tick with <code>late</code>; set <code>late</code> if UIF came back during the tick.</div><div class="fn">PulDir_stm32_pulseIrq</div></li>
       <li><div><b>Pend.</b> The boundary tick sets <code>plan_due</code> and pends the plan IRQ; it runs when the pulse tick returns, so each plan tick starts just after the latch it serves, whatever ticks were lost (E38).</div><div class="fn">port_plan_pend · NVIC_SetPendingIRQ</div></li>
       <li><div><b>Plan IRQ entry.</b> Return unless <code>plan_due</code> (the vector's other source); clear it, then run the plan tick, so a pend during the run runs it again.</div><div class="fn">PulDir_stm32_planIrq</div></li>
-      <li><div><b>Lock.</b> NVIC disable both IRQs, DSB, ISB; unlock enables plan, then pulse. A tick due inside fires on unlock, late by the lock's length.</div><div class="fn">port_lock · port_unlock</div></li>
+      <li><div><b>Lock.</b> Save PRIMASK, disable every interrupt; unlock restores PRIMASK. A tick due inside fires on unlock, late by the lock's length, which no other interrupt can stretch (E39).</div><div class="fn">port_lock · port_unlock · __disable_irq · __set_PRIMASK</div></li>
     </ol>
   </div>
 </section>
@@ -2297,7 +2299,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 </section>
 
 
-<footer>Built from the code on branch implement-puldir as of execution record E38. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E38 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
+<footer>Built from the code on branch implement-puldir as of execution record E39. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E39 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
 </div>
 
 <script>

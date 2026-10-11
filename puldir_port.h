@@ -30,7 +30,10 @@ void port_start(void (*pulse_tick)(bool overrun), void (*plan_tick)(void));
  * it. The plan tick then always starts just after the latch it serves, whatever ticks were lost
  * (E38). */
 void port_plan_pend(void);
-void port_lock(void);                            /* mask only the library's two interrupts */
+/* Masks at least the library's two interrupts, and no other interrupt may run inside it: the pulse
+ * tick then waits at most the longest locked section, a few stores (E39). Never nested by the core.
+ * The STM32 port masks every interrupt (PRIMASK). Works before any attach. */
+void port_lock(void);
 void port_unlock(void);
 
 #ifdef __cplusplus

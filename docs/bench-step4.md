@@ -299,6 +299,8 @@ The one-drive check: drive accepted 20 us pulses (yes/no), steps lost over 20,00
 
 ## 6. If it fails
 
+If overruns appear with nothing moving or polling, check that the library is built at -O2: at -O0 its longest locked sections take several us, and every interrupt waits for them (E39).
+
 If the CPU is over budget, first try making `port_pin_write` `static inline` (defined in `port/stm32/puldir_pin.h`, so the pulse tick inlines its one store) or building with LTO (`-flto`), and measure again.
 
 If 200 kHz overruns or the CPU limit is still exceeded, record the worst handler duration, and raise `BENCH_PULSE_US` (10u is a 100 kHz tick). Nothing else changes. If 50 kHz fails, record the same numbers and stop: the design needs rethinking before anything is built on it. In either case, look first at what runs above or at the pulse tick's priority: any interrupt left at preemption 0 (including SysTick) adds its duration to the jitter.

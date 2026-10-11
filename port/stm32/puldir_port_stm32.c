@@ -4,6 +4,7 @@
 static TIM_HandleTypeDef* pulse_tim;
 static IRQn_Type pulse_irq, plan_irq;
 static bool plan_attached;              /* zero is a real IRQ number */
+static uint32_t saved_primask;          /* the core never nests the lock (the fake port asserts it) */
 static uint32_t pulse_counts;           /* the pulse period, in 1 us counts */
 /* Until port_start, a shared vector seeing a stale update flag on the pulse timer calls this. */
 static void no_pulse(bool overrun) { (void)overrun; }
@@ -32,11 +33,20 @@ bool PulDir_stm32_attachPlanIrq(IRQn_Type irqn, uint32_t plan_us)
     return true;
 }
 
-/* The pulse period, the counter left at its last count so the first update is one count after start. */
+static uint32_t preemption(IRQn_Type irqn)
+{
+    uint32_t pre, sub;
+    NVIC_DecodePriority(NVIC_GetPriority(irqn), NVIC_GetPriorityGrouping(), &pre, &sub);
+    return pre;
+}
+
+/* The pulse period, the counter left at its last count so the first update is one count after start.
+ * A plan IRQ not below the pulse IRQ (a vector left at reset priority 0) would hold pulse ticks off
+ * for the whole plan tick, so it is refused. */
 void port_start(void (*pulse)(bool), void (*plan)(void))
 {
-    if (pulse_tim == NULL || !plan_attached)
-        Error_Handler();                        /* attach the pulse timer and the plan IRQ before PulDir_start */
+    if (pulse_tim == NULL || !plan_attached || preemption(plan_irq) <= preemption(pulse_irq))
+        Error_Handler();                        /* attach both, the plan IRQ below the pulse IRQ */
     pulse_fn = pulse;
     plan_fn = plan;
     TIM_HandleTypeDef* h = pulse_tim;
@@ -75,23 +85,19 @@ void PulDir_stm32_planIrq(void)
     plan_fn();
 }
 
-/* Until both are attached the IRQ numbers are not known (zero is a real IRQ), so do nothing. */
+/* Every interrupt, for the few stores of a locked section: masked in the NVIC alone, the lock let
+ * any other interrupt that preempted main inside it hold the pulse tick off for its whole run (E39).
+ * Main and the plan tick never hold it at once, so one saved PRIMASK serves both. */
 void port_lock(void)
 {
-    if (pulse_tim == NULL || !plan_attached)
-        return;
-    NVIC_DisableIRQ(pulse_irq);
-    NVIC_DisableIRQ(plan_irq);
-    __DSB();
-    __ISB();
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    saved_primask = primask;
 }
 
 void port_unlock(void)
 {
-    if (pulse_tim == NULL || !plan_attached)
-        return;
-    NVIC_EnableIRQ(plan_irq);
-    NVIC_EnableIRQ(pulse_irq);
+    __set_PRIMASK(saved_primask);
 }
 
 /* BSRR's upper half resets: one store, and it exists on every family (F4 has no BRR). */
