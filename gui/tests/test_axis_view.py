@@ -128,3 +128,146 @@ def test_interval_and_reps_reach_the_cycle(view):
     button(tab, "cycle").click()
     assert view.cycle._interval_ms == 250
     assert view.cycle._reps == 3
+from PyQt5.QtWidgets import QCheckBox, QLabel
+
+from puldir_view.axis_view import NO_GETTER
+from puldir_view.protocol import Fault, FaultCleared, HomeFailed, Homed, Landed, Note, Readback, Refused, Status
+
+
+def label(view, name):
+    found = view.findChild(QLabel, name)
+    assert found is not None, name
+    return found
+
+
+def test_readbacks_land_in_the_readout_and_settings(view):
+    view.handle_event(Readback("position", 12.5))
+    view.handle_event(Readback("velocity", -3.0))
+    view.handle_event(Readback("acceleration", 200.0))
+    assert label(view, "position").text() == "12.5000"
+    assert label(view, "device_P").text() == "12.5000"
+    assert label(view, "velocity").text() == "-3.0000"
+    assert label(view, "device_A").text() == "200.0000"
+    assert label(view, "device_V").text() == NO_GETTER
+
+
+def test_status_fills_the_header_and_signals_once(view):
+    status = Status("MOVING", "PROFILE", True, "IDLE", "", 2)
+    view.handle_event(status)
+    view.handle_event(status)
+    assert label(view, "status").text() == "MOVING"
+    assert label(view, "mode").text() == "PROFILE"
+    assert not label(view, "homed").isHidden()
+    assert label(view, "faults").text() == "flt 2"
+    assert view.statuses == ["MOVING"]
+
+
+def test_landed_and_homed_move_the_position(view):
+    view.handle_event(Landed(10.0))
+    assert label(view, "position").text() == "10.0000"
+    view.handle_event(Homed(0.0))
+    assert label(view, "position").text() == "0.0000"
+    assert not label(view, "homed").isHidden()
+    assert label(view, "message").text().endswith("homed at 0.0000")
+
+
+@pytest.mark.parametrize(
+    "event, text",
+    [
+        (Fault(3), "fault latched, count 3"),
+        (HomeFailed("DELAY1"), "homing failed in DELAY1"),
+        (Refused("jog refused: bad argument"), "jog refused: bad argument"),
+    ],
+)
+def test_failures_show_and_end_a_jog_cycle(view, event, text):
+    tab = motion(view, "J")
+    view.findChild(QTabWidget, "motion").setCurrentWidget(tab)
+    tab.findChild(QDoubleSpinBox, "a").setValue(5.0)
+    button(tab, "cycle").click()
+    view.handle_event(event)
+    assert label(view, "message").text().endswith(text)
+    assert not view.cycle.running
+    assert view.sent == [("J", "5"), ("k", "")]
+
+
+def test_fault_marks_the_axis_faulted(view):
+    view.handle_event(Fault(1))
+    assert label(view, "status").text() == "FAULT"
+    assert view.statuses == ["FAULT"]
+
+
+@pytest.mark.parametrize("event, text", [(FaultCleared(), "fault cleared"), (Note("stream timed out"), "stream timed out")])
+def test_notes_show_without_touching_a_cycle(view, event, text):
+    button(motion(view, "T"), "cycle").click()
+    view.handle_event(event)
+    assert label(view, "message").text().endswith(text)
+    assert view.cycle.running
+
+
+def test_disconnect_greys_out_clears_and_ends_a_cycle_quietly(view):
+    view.handle_event(Readback("position", 1.0))
+    view.handle_event(Status("ENABLED", "IDLE", False, "IDLE", "", 0))
+    tab = motion(view, "J")
+    view.findChild(QTabWidget, "motion").setCurrentWidget(tab)
+    button(tab, "cycle").click()
+    view.set_connected(False)
+    assert not button(view, "enable").isEnabled()
+    assert not button(tab, "go_a").isEnabled()
+    assert view.findChild(QDoubleSpinBox, "value_A").isEnabled()
+    assert label(view, "position").text() == "--"
+    assert label(view, "status").text() == "--"
+    assert view.statuses == ["ENABLED", ""]
+    assert not view.cycle.running
+    assert ("k", "") not in view.sent
+
+
+def test_polls_only_when_shown_connected_and_auto(view):
+    auto = view.findChild(QCheckBox, "auto")
+    auto.setChecked(True)
+    assert view.polled == []  # not shown yet
+    view.set_shown(True)
+    assert view.polled == [("p", ""), ("v", ""), ("s", "")]
+    assert view._poll_timer.isActive()
+    view.set_shown(False)
+    assert not view._poll_timer.isActive()
+    view.set_shown(True)
+    view.set_connected(False)
+    assert not view._poll_timer.isActive()
+    assert view.sent == []
+
+
+def test_refresh_polls_once(view):
+    button(view, "refresh").click()
+    assert view.polled == [("p", ""), ("v", ""), ("s", "")]
+    assert not view._poll_timer.isActive()
+
+
+def test_poll_replies_are_recognised_only_while_auto(view):
+    assert not view.is_poll_reply(Readback("position", 1.0))
+    view.findChild(QCheckBox, "auto").setChecked(True)
+    assert view.is_poll_reply(Readback("position", 1.0))
+    assert not view.is_poll_reply(Readback("acceleration", 1.0))
+    assert not view.is_poll_reply(Landed(1.0))
+
+
+def test_round_trip_and_no_change_signal_while_restoring(view, qapp):
+    tab = motion(view, "R")
+    tab.findChild(QDoubleSpinBox, "a").setValue(-2.5)
+    tab.findChild(QSpinBox, "interval").setValue(750)
+    view.findChild(QDoubleSpinBox, "value_D").setValue(90.0)
+    view.findChild(QTabWidget, "motion").setCurrentIndex(2)
+    assert view.touched
+    saved = view.to_dict()
+
+    other = AxisView(AxisConfig("motor1", 1))
+    changes = []
+    other.settings_changed.connect(lambda: changes.append(1))
+    other.from_dict(saved)
+    assert other.to_dict() == saved
+    assert changes == []
+
+
+def test_from_dict_skips_garbage(view):
+    view.from_dict({"motion": {"T": {"a": "x", "reps": True}}, "settings": None, "motion_tab": 9})
+    view.from_dict(["not", "a", "dict"])
+    assert view.findChild(QTabWidget, "motion").currentIndex() == 0
