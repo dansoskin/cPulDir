@@ -5,8 +5,28 @@
 #include "puldir_internal.h"
 
 static void (*logger)(const char*);
-static uint32_t overruns_logged;        /* the overrun total last logged, by any axis */
-static uint32_t late_logged;            /* the late-set total last logged, likewise */
+
+/* A library total's line, logged by whichever axis's loop comes first, at most once a second (E40). */
+typedef struct {
+    uint32_t logged;                    /* the total last logged */
+    uint32_t at;                        /* the tick of that line */
+    bool recent;                        /* that line is under a second old */
+} PulDirRated;
+static PulDirRated overrun_line, late_line;
+
+/* The first change logs at once; one within a second of the last line waits, and the line then
+ * carries the total as it is. The age is checked on every call, by unsigned subtraction (5.9). */
+static bool rated_due(PulDirRated* r, uint32_t total, uint32_t now)
+{
+    if (r->recent && now - r->at >= puldir_ms_ticks(1000u))
+        r->recent = false;
+    if (total == r->logged || r->recent)
+        return false;
+    r->logged = total;
+    r->at = now;
+    r->recent = true;
+    return true;
+}
 
 void PulDir_attachLogger(void (*fn)(const char*))
 {
@@ -88,15 +108,14 @@ void PulDir_loop(PulDir* a)
     /* The bits keep no order: the drive's state first, then what it caused. */
     char b[PULDIR_LINE];
     const char* n = a->name;
-    const uint32_t overruns = PulDir_overruns();    /* one aligned word: no lock */
-    if (overruns != overruns_logged) {
-        overruns_logged = overruns;
+    const uint32_t now = PulDir_ticks();             /* each one aligned word: no lock */
+    const uint32_t overruns = PulDir_overruns();
+    if (rated_due(&overrun_line, overruns, now)) {
         snprintf(b, sizeof b, "[%s] pulse tick overrun, total %lu", n, (unsigned long)overruns);
         logger(b);
     }
     const uint32_t late = PulDir_lateSets();
-    if (late != late_logged) {
-        late_logged = late;
+    if (rated_due(&late_line, late, now)) {
         snprintf(b, sizeof b, "[%s] plan tick late, total %lu", n, (unsigned long)late);
         logger(b);
     }

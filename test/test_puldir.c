@@ -1009,7 +1009,7 @@ static void t_refusals(void)
 }
 
 /* 5.8, 5.9: each new batch of overruns is logged once, by the first axis loop
- * that can log it. */
+ * that can log it, a second at least after the last line (E40). */
 static void t_overrun_log(void)
 {
     setup(2);
@@ -1028,10 +1028,69 @@ static void t_overrun_log(void)
     /* an axis that does not log leaves the batch to one that does */
     PulDir_setLogging(&ax[0], false);
     fake_pulse(true);
+    pulse(TICK_HZ);
     PulDir_loop(&ax[0]);
     assert(nlines == 1);
     PulDir_loop(&ax[1]);
     assert(nlines == 2 && strcmp(lines[1], "[a1] pulse tick overrun, total 3") == 0);
+}
+
+/* One set latched a tick after its due tick. */
+static void late_set(void)
+{
+    PulDirInc* s = puldir_shadow();
+    for (uint8_t i = 0; i < puldir_naxes; i++) {
+        s[i].inc = 0;
+        s[i].dir = 1;
+    }
+    puldir_publish(PulDir_ticks() - 1u);
+    fake_pulse(false);
+}
+
+/* E40: a change of the overrun total, and of the late-set total, is logged at most once a second
+ * each, library-wide. The first change goes out at once; later ones within a second of that
+ * counter's last line wait for the first loop a second after it, which logs the total as it is
+ * then. The totals count every one. */
+static void t_log_rate(void)
+{
+    setup(2);
+    PulDir_attachLogger(logger);
+    fake_pulse(true);
+    PulDir_loop(&ax[0]);
+    assert(nlines == 1 && strcmp(lines[0], "[a0] pulse tick overrun, total 1") == 0);
+    const uint32_t t_over = PulDir_ticks();
+    late_set();
+    PulDir_loop(&ax[1]);                      /* the other counter: its first line, at once */
+    assert(nlines == 2 && strcmp(lines[1], "[a1] plan tick late, total 1") == 0);
+    const uint32_t t_late = PulDir_ticks();
+
+    for (int k = 0; k < 40; k++) {            /* a flood, from both axes' loops */
+        fake_pulse(true);
+        late_set();
+        PulDir_loop(&ax[k % 2]);
+    }
+    assert(nlines == 2 && PulDir_overruns() == 41u && PulDir_lateSets() == 41u);
+    pulse(TICK_HZ - 1u - (PulDir_ticks() - t_over));
+    PulDir_loop(&ax[1]);                      /* a tick short of a second after the overrun line */
+    assert(nlines == 2);
+    fake_pulse(false);
+    PulDir_loop(&ax[1]);
+    assert(nlines == 3 && strcmp(lines[2], "[a1] pulse tick overrun, total 41") == 0);
+    PulDir_loop(&ax[0]);
+    assert(nlines == 3);                      /* the late line's second is not up yet */
+    pulse(TICK_HZ - (PulDir_ticks() - t_late));
+    late_set();                               /* still held: it goes out with the latest total */
+    PulDir_loop(&ax[0]);
+    assert(nlines == 4 && strcmp(lines[3], "[a0] plan tick late, total 42") == 0);
+    PulDir_loop(&ax[0]);
+    PulDir_loop(&ax[1]);
+    assert(nlines == 4);
+
+    /* a lone change a second after the last line goes out at once */
+    pulse(TICK_HZ);
+    fake_pulse(true);
+    PulDir_loop(&ax[1]);
+    assert(nlines == 5 && strcmp(lines[4], "[a1] pulse tick overrun, total 42") == 0);
 }
 
 /* A datum set before registration carries through it: registration takes the pulse state from
@@ -4515,6 +4574,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "creep", t_creep },
     { "refusals", t_refusals },
     { "overrun_log", t_overrun_log },
+    { "log_rate", t_log_rate },
     { "jog", t_jog },
     { "stop", t_stop },
     { "stop_random", t_stop_random },

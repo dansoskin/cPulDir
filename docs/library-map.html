@@ -1877,8 +1877,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <div class="rw"><span class="chip main">main only</span></div>
         <table><thead><tr><th>name</th><th>type</th><th>meaning</th></tr></thead><tbody>
           <tr><td>logger</td><td>void (*)(const char*)</td><td>the attached logger</td></tr>
-          <tr><td>overruns_logged</td><td>uint32_t</td><td>overrun total last logged, by any axis</td></tr>
-          <tr><td>late_logged</td><td>uint32_t</td><td>late-set total last logged, by any axis</td></tr>
+          <tr><td>overrun_line, late_line</td><td>PulDirRated</td><td>per library total: the total last logged by any axis, the tick of that line, and whether it is under a second old (E40)</td></tr>
         </tbody></table>
       </div>
       <div class="st">
@@ -1922,6 +1921,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="nm">puldir_log(a, line)</td><td>Through the logger if the axis logs; NULL axis: always.</td></tr>
         <tr><td class="nm">reason</td><td>Refusal to text.</td></tr>
         <tr><td class="nm">puldir_phase</td><td>Homing state to text.</td></tr>
+        <tr><td class="nm">rated_due</td><td>Whether a library total's line goes out now: it changed, and its last line is a second old or there was none; then records the total and the tick (E40).</td></tr>
         <tr><td class="nm">floor_up</td><td>Rounds the jerk floor up, <code>ceilf(v·1e4·(1 + 16 FLT_EPSILON)) / 1e4</code>, so the figure typed back fits (E33).</td></tr>
         <tr><td class="nm">number, say, say_num</td><td>Console: parse the whole argument as one float; reply lines.</td></tr>
         <tr><td class="nm">mode_name, status_name, status</td><td>Console: the <code>s</code> line.</td></tr>
@@ -1936,8 +1936,8 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <thead><tr><th>Line</th><th>From</th><th>When</th></tr></thead>
       <tbody>
         <tr class="grp"><td colspan="3">PulDir_loop, in this order</td></tr>
-        <tr><td class="nm">[name] pulse tick overrun, total N</td><td>PulDir_overruns</td><td>The total changed since any axis last logged it (E24).</td></tr>
-        <tr><td class="nm">[name] plan tick late, total N</td><td>PulDir_lateSets</td><td>The total changed since any axis last logged it (E29).</td></tr>
+        <tr><td class="nm">[name] pulse tick overrun, total N</td><td>PulDir_overruns</td><td>The total changed since any axis last logged it; at most once a second, a change within the second held and logged then with the total as it is (E24, E40).</td></tr>
+        <tr><td class="nm">[name] plan tick late, total N</td><td>PulDir_lateSets</td><td>The total changed since any axis last logged it; at most once a second, likewise (E29, E40).</td></tr>
         <tr><td class="nm">[name] fault latched, count N</td><td>PULDIR_EV_FAULT</td><td>The latch closed.</td></tr>
         <tr><td class="nm">[name] fault cleared</td><td>PULDIR_EV_FAULT_CLEARED</td><td>The latch opened.</td></tr>
         <tr><td class="nm">[name] homing failed in PHASE</td><td>PULDIR_EV_HOME_FAILED</td><td>A run ended unhomed.</td></tr>
@@ -1963,7 +1963,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
     <ol class="steps main">
       <li><div><b>Take, under the lock:</b> the event bits (then cleared), the refusal and its call and value, the fault count and the failed homing phase.</div><div class="fn"><span class="lock">port_lock</span> · events = 0 · <span class="lock">port_unlock</span></div></li>
       <li><div><b>Return</b> if this axis does not log or no logger is attached. The events are gone either way.</div><div class="fn">log_on · logger</div></li>
-      <li><div><b>Library totals.</b> Overruns, then late sets, each only if it grew since any axis last logged it.</div><div class="fn">PulDir_overruns · PulDir_lateSets</div></li>
+      <li><div><b>Library totals.</b> Overruns, then late sets, each only if it changed since any axis last logged it and that line is at least a second old (pulse ticks, by unsigned subtraction); a held change goes out with the total as it is then (E40).</div><div class="fn">PulDir_ticks · PulDir_overruns · PulDir_lateSets · rated_due</div></li>
       <li><div><b>The drive's state, then what it caused:</b> fault, cleared, homing failed, refused, stream timeout, landed, homed.</div><div class="fn">snprintf · logger</div></li>
     </ol>
   </div>
@@ -2299,7 +2299,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
 </section>
 
 
-<footer>Built from the code on branch implement-puldir as of execution record E39. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E39 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
+<footer>Built from the code on branch implement-puldir as of execution record E40. The design is <code>docs/puldir-guidelines.md</code>; where the library departs from it, the plan's decisions D1 to D20 and execution record E1 to E40 in <code>docs/superpowers/plans/2026-10-07-puldir.md</code> say why. The D and E numbers on this page refer to those. <code>test/run.sh</code> fails if a public call or an <code>#ifndef</code> setting is missing from this page.</footer>
 </div>
 
 <script>
