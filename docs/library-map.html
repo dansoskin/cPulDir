@@ -667,7 +667,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <li><a href="#pulse">Pulse tick</a> <span>puldir_pulse_add, puldir_kill, puldir_pulse_read, puldir_set_datum, puldir_timing_take</span></li>
         <li><a href="#enable">Enable</a> <span>puldir_enable_wake</span></li>
         <li><a href="#fault">Fault</a> <span>puldir_fault_latched</span></li>
-        <li><a href="#homing">Homing</a> <span>puldir_home_cancel, home_restore, home_lose_datum</span></li>
+        <li><a href="#homing">Homing</a> <span>puldir_home_cancel, home_restore</span></li>
         <li><a href="#stream">Stream</a> <span>puldir_stream_defaults</span></li>
         <li><a href="#group">Groups</a> <span>puldir_group_halt</span></li>
         <li><a href="#logging">Logging</a> <span>puldir_refuse, puldir_log</span></li>
@@ -849,7 +849,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="sig">float PulDir_position(PulDir*)</td><td>The emitted count over <code>pulses_per_unit</code> (D18): what the drive has been told, read without the lock (E42). Unregistered: the datum.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">float PulDir_velocity(PulDir*)</td><td><code>velocity / pulses_per_unit</code>.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">float PulDir_target(PulDir*)</td><td>The 32.32 target in user units.</td><td class="dim">none</td><td>main only</td></tr>
-        <tr><td class="sig">bool PulDir_setPosition(PulDir*, float)</td><td>Sets the datum (D18): count, position and edge together under the lock, REQ_SETPOS, the axis no longer homed.</td><td class="ref">ARG, NOT_IDLE</td><td>main only</td></tr>
+        <tr><td class="sig">bool PulDir_setPosition(PulDir*, float)</td><td>Sets the datum (D18): count, position and edge together under the lock, REQ_SETPOS; homed is left as it was (E43).</td><td class="ref">ARG, NOT_IDLE</td><td>main only</td></tr>
         <tr><td class="sig">bool PulDir_isMoving(PulDir*)</td><td>Reads <code>moving</code>; clears two plan runs after the final interval, pin low (D19).</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">PulDirMode PulDir_mode(PulDir*)</td><td>Reads <code>mode</code>.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">PulDirStatus PulDir_status(PulDir*)</td><td>FAULT, else MOVING, else ENABLED or IDLE from the enable state.</td><td class="dim">none</td><td>main only</td></tr>
@@ -1432,7 +1432,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <li><a href="#port">Port</a> <span>port_lock</span></li>
       </ul></div>
       <div><h4>Used by</h4><ul>
-        <li><a href="#axis">Axis API</a> <span>home_cancel, home_restore (stop, halt), home_lose_datum (setPosition)</span></li>
+        <li><a href="#axis">Axis API</a> <span>home_cancel, home_restore (stop, halt)</span></li>
         <li><a href="#plan">Plan tick</a> <span>home_fault, home_begin, home_hold, home_run</span></li>
         <li><a href="#logging">Logging &amp; console</a> <span>reads state, fail; PulDir_homeStart</span></li>
       </ul></div>
@@ -1462,7 +1462,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <div class="st">
         <h4>PulDirHoming <small>puldir_homing.h · in each PulDir as <code>home</code></small></h4>
         <p>setHoming's configuration, the run's phase and clock, the settings to restore, and the result.</p>
-        <div class="rw">written only by <code>puldir_homing.c</code> · <span class="chip main">main</span> setHoming, homeStart, homeStop, cancel, lose_datum, restore · <span class="chip plan">plan tick</span> begin, run, hold, fault · PulDir_loop and the console read state and fail</div>
+        <div class="rw">written only by <code>puldir_homing.c</code> · <span class="chip main">main</span> setHoming, homeStart, homeStop, cancel, restore · <span class="chip plan">plan tick</span> begin, run, hold, fault · PulDir_loop and the console read state and fail</div>
         <table><thead><tr><th>field</th><th>type</th><th>meaning</th></tr></thead><tbody>
           <tr><td>dir</td><td>int8_t</td><td>+1, -1; 0 = not configured</td></tr>
           <tr><td>speed, adjust, zero</td><td>float</td><td>user units</td></tr>
@@ -1501,7 +1501,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="sig">bool PulDir_homeStart(PulDir*)</td><td>Clears <code>homed</code>, saves <code>settings</code>, REQ_HOME, mode HOMING, <code>moving</code>, state MOVE_TOWARDS_LIMIT, wakes the drive.</td><td class="ref">NO_HOMING, UNREGISTERED, FAULT, MODE (not IDLE), NOT_IDLE (still moving)</td><td>main only</td></tr>
         <tr><td class="sig">void PulDir_homeStop(PulDir*)</td><td>Halts a run in progress; the state goes IDLE either way, which also clears ERROR.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">PulDirHomeState PulDir_homeState(PulDir*)</td><td>Reads <code>state</code>.</td><td class="dim">none</td><td>main only</td></tr>
-        <tr><td class="sig">bool PulDir_isHomed(PulDir*)</td><td>Reads <code>homed</code>; a fault, a setPosition or a new run clears it.</td><td class="dim">none</td><td>main only</td></tr>
+        <tr><td class="sig">bool PulDir_isHomed(PulDir*)</td><td>Reads <code>homed</code>; a fault or a new run clears it (a setPosition no longer does, E43).</td><td class="dim">none</td><td>main only</td></tr>
       </tbody>
     </table></div>
     <p class="note">While a run is in HOMING the setters of speed, acceleration, deceleration and jerk, setDefaults and restoreDefaults are refused (R_MODE), and <code>PulDir_stop</code> ends the run unhomed and ramps down.</p>
@@ -1515,7 +1515,6 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
         <tr><td class="nm">home_values</td><td>main</td><td>Speed under the rate cap; adjust and zero whole pulses inside int32.</td></tr>
         <tr><td class="nm">puldir_home_restore</td><td>main or plan, under the lock</td><td><code>saved</code> back into <code>settings</code>, REQ_SETTINGS.</td></tr>
         <tr><td class="nm">puldir_home_cancel</td><td>main, under the lock</td><td>State to IDLE.</td></tr>
-        <tr><td class="nm">puldir_home_lose_datum</td><td>main, under the lock</td><td><code>homed</code> false after setPosition.</td></tr>
         <tr><td class="nm">puldir_home_hold</td><td>plan tick</td><td>Restarts the phase clock while the enable delay holds the axis.</td></tr>
         <tr><td class="nm">puldir_home_fault</td><td>plan tick</td><td>On a latch: datum lost; a run in HOMING fails with <code>EV_HOME_FAILED</code>.</td></tr>
         <tr><td class="nm">puldir_home_begin</td><td>plan tick</td><td>The first jog toward the switch; the clock starts.</td></tr>

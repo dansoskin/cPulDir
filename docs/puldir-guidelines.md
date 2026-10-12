@@ -87,7 +87,7 @@ otherwise.
 | halt vs stop | `halt` zeroes velocity this tick and discards the plan; `stop` plans a stop at decel and jerk from the current state. Both leave target = where the axis ended |
 | live retarget / override | `moveTo`, `moveBy`, `jog` and `setSpeed` always take effect on the move in progress. With jerk off, so do `setAcceleration` and `setDeceleration`, and only switching jerk on waits for idle. With jerk on, the filter window is frozen while the axis moves and a limit change is accepted only if the window still bounds the new jerk (5.2): lowering accel or decel and raising jerk are live; raising accel or decel beyond the window's slack, or lowering jerk, is refused unless the axis is idle |
 | stream loss | velocity feedforward keeps an axis moving after the stream dies, so a stream **timeout** stops the axis at decel and the caller must `streamBegin` again |
-| datum | `setPosition` is refused unless idle; it is the only way to move the datum, and it clears `isHomed` |
+| datum | `setPosition` is refused unless idle; it is the only way to move the datum. It no longer clears `isHomed` (E43) |
 | fault pin | sampled and debounced in the plan tick (2 ms), halt on latch, clear pulse 10 ms timed in the plan tick; nothing blocks |
 | logging / status | log sink as today, called only from `PulDir_loop` in the main loop; the ticks raise flags |
 | velocity readback | exactly `0.0f` when stopped |
@@ -545,10 +545,10 @@ Transition rules, which the host tests exercise case by case (test 19):
 | `PulDirGroup_moveTo` | refused if any member is not IDLE, is faulted, or is in another group's move |
 | `homeStart` | accepted only in IDLE with the drive not faulted |
 | `enable(false)` | halts first if moving, then disables |
-| `setPosition` | accepted only in IDLE; clears `isHomed` |
+| `setPosition` | accepted only in IDLE; leaves `isHomed` as it was (E43) |
 | fault latch | halts the axis; if it is a group member, halts the group and marks the group faulted; clears `isHomed` |
 | stream timeout, homing timeout | mode → STOPPING at the axis's decel; a flag records why |
-| `isHomed` | set at the end of a successful homing run; cleared by `homeStart`, a fault latch, and `setPosition` |
+| `isHomed` | set at the end of a successful homing run; cleared by `homeStart` and a fault latch (`setPosition` no longer clears it, E43) |
 
 Independent axes, several groups and streaming axes all run concurrently;
 nothing in the library serialises them.
@@ -911,7 +911,7 @@ This table is the migration plan for the firmware that uses the old library.
 | `set_homing` | `PulDir_setHoming` | gains the phase timeout |
 | `start_cFlexyStepper_homing_sm` / `stop_…` / `get_…_state` / `.homing.did_home` | `PulDir_homeStart` / `PulDir_homeStop` / `PulDir_homeState` / `PulDir_isHomed` | `cFlexyStepper_homing_sm_loop` is gone: the plan tick runs it |
 | `getCurrentPosition` / `getCurrentVelocity` | `PulDir_position` / `PulDir_velocity` | |
-| `setCurrentPosition` | `PulDir_setPosition` | IDLE only, clears `isHomed` |
+| `setCurrentPosition` | `PulDir_setPosition` | IDLE only; keeps `isHomed` (E43) |
 | `isMoving` / `motionComplete` | `PulDir_isMoving` | one predicate; `motionComplete` was its complement |
 | `getStatus` | `PulDir_status` | |
 | — | `PulDir_mode` | new |

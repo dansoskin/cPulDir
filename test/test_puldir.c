@@ -2019,7 +2019,7 @@ static void t_setpos(void)
     assert(PulDir_setPosition(a, -3.0f));
     PulDirSnap s = st(0);
     assert(s.count == -300 && s.Pb == (uint64_t)(int64_t)-300 << 32);
-    assert(PulDir_position(a) == -3.0f && PulDir_target(a) == -3.0f && !a->home.homed);
+    assert(PulDir_position(a) == -3.0f && PulDir_target(a) == -3.0f && a->home.homed);   /* homed stays (E43) */
     fake_run(TICKS_PER_PLAN);
     assert(a->origin == -300 && a->profile.pos == 0.0f && a->profile.target == 0.0f && a->profile.done);
     assert(!PulDir_isMoving(a) && a->mode == PULDIR_MODE_IDLE);
@@ -4177,10 +4177,10 @@ static void t_homing(void)
     fake_run(12u * MS);
     assert(!a->fault.latched);
 
-    /* homed clears on setPosition */
+    /* setPosition keeps homed (E43): a datum set by hand on a homed axis is the operator's call */
     home_run(a, st(0).count - 500, 6000u);
     assert(PulDir_isHomed(a));
-    assert(PulDir_setPosition(a, 3.0f) && !PulDir_isHomed(a));
+    assert(PulDir_setPosition(a, 3.0f) && PulDir_isHomed(a));
 
     /* defaults the generator refuses (a jerk past the ring, set behind the API's
      * back: the API cannot) are not copied: the adjust runs at the settings it has */

@@ -111,11 +111,6 @@ void puldir_home_cancel(PulDir* a)
     a->home.state = PULDIR_HOME_IDLE;
 }
 
-void puldir_home_lose_datum(PulDir* a)
-{
-    a->home.homed = false;
-}
-
 /* ---- the plan tick's part ----------------------------------------------------------------- */
 
 void puldir_home_fault(PulDir* a)

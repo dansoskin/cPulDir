@@ -408,8 +408,7 @@ bool PulDir_setPosition(PulDir* a, float pos)
             if (reg)
                 puldir_set_datum(a->slot, c);
             a->target = (uint64_t)(uint32_t)c << 32;
-            puldir_home_lose_datum(a);
-            a->req |= REQ_SETPOS;
+            a->req |= REQ_SETPOS;           /* homed stays: a datum set by hand is the caller's call (E43) */
         }
         port_unlock();
     }
