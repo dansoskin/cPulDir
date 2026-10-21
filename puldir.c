@@ -331,6 +331,46 @@ void PulDir_stop(PulDir* a)
         puldir_refuse(a, "stop", PULDIR_R_MODE, 0.0f);
 }
 
+static int32_t emitted(const PulDir* a);
+
+/* Rest exactly `distance` units on from the pulses emitted so far -- PulDir_position --
+ * along the motion: a target there, and the deceleration that brings the speed it has to
+ * rest there. The decel is solved against what the trapezoid itself has left, which is
+ * shorter: the planner runs ahead of the count by up to an interval, and the jerk window's
+ * lag counts toward the distance too (MotionProfile_stopDistance). Two plan intervals'
+ * travel come off as well, for the ticks that run before the new target is taken: it
+ * cruises those, then brakes and lands on the target. The decel stays set
+ * (restoreDefaults puts it back). Refused when still, when the distance is too short for
+ * all of that, and wherever moveTo is; a refused moveTo puts the old decel back. */
+bool PulDir_stopWithin(PulDir* a, float distance)
+{
+    const float d = distance * a->pulses_per_unit;
+
+    port_lock();
+    const MotionProfile* p = &a->profile;
+    const float v = p->landed ? 0.0f : p->v_t;
+    const float trapezoid = (float)a->origin + p->p_t;
+    const float here = (float)emitted(a);
+    const float dt = p->dt;
+    port_unlock();
+
+    const float dir = v > 0.0f ? 1.0f : -1.0f;
+    const float room = dir * (here + dir * d - trapezoid) - 2.0f * fabsf(v) * dt;
+    if (!isfinite(d) || !(d > 0.0f) || v == 0.0f || !(room > 0.0f)) {
+        puldir_refuse(a, "stopWithin", v == 0.0f ? PULDIR_R_MODE : PULDIR_R_ARG, 0.0f);
+        return false;
+    }
+
+    const float old = a->settings.decel;
+    if (!PulDir_setDeceleration(a, v * v / (2.0f * room) / a->pulses_per_unit))
+        return false;
+    if (!PulDir_moveTo(a, (here + dir * d) / a->pulses_per_unit)) {
+        (void)PulDir_setDeceleration(a, old);
+        return false;
+    }
+    return true;
+}
+
 void puldir_halt_locked(PulDir* a)
 {
     if (a->slot < PULDIR_MAX_AXES) {

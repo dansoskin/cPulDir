@@ -127,6 +127,7 @@ bool  PulDir_moveTo(PulDir*, float position);
 bool  PulDir_moveBy(PulDir*, float distance);
 bool  PulDir_jog(PulDir*, float speed);
 void  PulDir_stop(PulDir*);
+bool  PulDir_stopWithin(PulDir*, float distance);   /* rest exactly `distance` on; sets the decel */
 void  PulDir_halt(PulDir*);
 bool  PulDir_enable(PulDir*, bool);              /* refused without an enable pin; false halts first */
 

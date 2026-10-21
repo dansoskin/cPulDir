@@ -24,7 +24,7 @@ void PulDir_consoleMenu(char* buf, size_t n)
         "R<distance> - Move relative to current position\n"
         "T<position> - Move to absolute position\n"
         "F - Restore default speed, acceleration, deceleration and jerk\n"
-        "k - Stop at target position\n"
+        "k - Stop at the deceleration; k<distance> - stop within distance\n"
         "K - Halt now and release motor\n"
         "s - Get status, mode, homed, home state and fault count\n"
         "C - Clear fault\n"
@@ -110,7 +110,12 @@ void PulDir_console(PulDir* a, char cmd, const char* arg)
     case 'd': say_num(a, "deceleration ", PulDir_deceleration(a)); return;
     case 'z': say_num(a, "jerk ", PulDir_jerk(a)); return;
     case 'F': (void)PulDir_restoreDefaults(a); return;
-    case 'k': PulDir_stop(a); return;
+    case 'k':
+        if (arg == NULL || arg[0] == '\0') {
+            PulDir_stop(a);
+            return;
+        }
+        break;
     case 'K': halt_and_release(a); return;
     case 's': status(a); return;
     case 'C': (void)PulDir_clearFault(a); return;
@@ -139,6 +144,7 @@ void PulDir_console(PulDir* a, char cmd, const char* arg)
     case 'Z': (void)PulDir_setJerk(a, x); break;
     case 'J': (void)PulDir_jog(a, x); break;
     case 'R': (void)PulDir_moveBy(a, x); break;
+    case 'k': (void)PulDir_stopWithin(a, x); break;
     default:  (void)PulDir_moveTo(a, x); break;
     }
 }

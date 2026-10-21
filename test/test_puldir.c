@@ -1661,6 +1661,49 @@ static void t_stop(void)
     assert(a->mode == PULDIR_MODE_IDLE && a->req == 0 && !PulDir_isMoving(a));
 }
 
+/* stopWithin rests exactly that far on, from a move or a jog, either way, with and without
+ * jerk, never reversing; it refuses when still and when the distance is too short. */
+static void t_stop_within(void)
+{
+    setup(1);
+    fake_on_write(count_write);
+    PulDir* a = &ax[0];
+    for (int k = 0; k < 8; k++) {
+        assert(PulDir_setDefaults(a, 2000.0f, 20000.0f, 7000.0f, k % 2 ? 2.7e6f : 0.0f));
+        const int32_t c0 = st(0).count, dir = k % 4 < 2 ? 1 : -1;
+        if (k < 4)
+            assert(PulDir_moveTo(a, (float)(c0 + dir * 100000)));
+        else
+            assert(PulDir_jog(a, (float)dir * 2000.0f));
+        fake_run(200u * TICKS_PER_PLAN);                     /* cruising */
+        const float d = 500.0f + 250.0f * (float)k;           /* longer than a stop at decel */
+        const int32_t from = st(0).count;
+        const uint32_t d0 = dirw[0];
+        assert(PulDir_stopWithin(a, d));
+        assert(PulDir_deceleration(a) < 7000.0f);             /* a gentler stop than the default */
+        run_until_idle(a, 4u * TICK_HZ);
+        const int32_t c = st(0).count;
+        assert(a->mode == PULDIR_MODE_IDLE && PulDir_velocity(a) == 0.0f);
+        assert(c - from == dir * (int32_t)d);                 /* exactly that far on from the count */
+        assert(dirw[0] == d0);                                /* and never back */
+        assert(PulDir_restoreDefaults(a));
+    }
+
+    /* still: refused, the decel untouched */
+    const float dec = PulDir_deceleration(a);
+    assert(!PulDir_stopWithin(a, 360.0f));
+    assert(PulDir_deceleration(a) == dec && a->mode == PULDIR_MODE_IDLE);
+
+    /* moving: a distance that is not > 0, or shorter than the next intervals' travel */
+    const int32_t c0 = st(0).count;
+    assert(PulDir_moveTo(a, (float)(c0 + 100000)));
+    fake_run(200u * TICKS_PER_PLAN);
+    assert(!PulDir_stopWithin(a, 0.0f) && !PulDir_stopWithin(a, -10.0f));
+    assert(!PulDir_stopWithin(a, 1.0f));
+    assert(PulDir_deceleration(a) == dec && a->mode == PULDIR_MODE_PROFILE);
+    PulDir_halt(a);
+}
+
 /* Stops, jog stops and halts at random times and settings: every one reaches IDLE
  * with target == position and the count on the last integer reached. */
 static void t_stop_random(void)
@@ -4683,6 +4726,7 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "lock_free", t_lock_free },
     { "jog", t_jog },
     { "stop", t_stop },
+    { "stop_within", t_stop_within },
     { "stop_random", t_stop_random },
     { "halt", t_halt },
     { "rate_cap", t_rate_cap },
