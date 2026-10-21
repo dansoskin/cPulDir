@@ -4021,6 +4021,91 @@ static void home_run(PulDir* a, int32_t at, uint32_t max_ms)
     }
 }
 
+/* setHomingOffset: refused before setHoming and for a bad value; mid-run, taken by a run
+ * that has not reached its adjust, and from the next run once it has. */
+static void t_homing_offset(void)
+{
+    add_axis(0, false, false);
+    PulDir* a = &ax[0];
+    start();
+    fake_on_write(home_write);
+    fake_on_plan(home_plan);
+    assert(PulDir_setDefaults(a, 4000.0f, 40000.0f, 40000.0f, 0.0f));
+    fake_run(TICKS_PER_PLAN);
+
+    assert(!PulDir_setHomingOffset(a, 10.0f) && a->refusal == PULDIR_R_NO_HOMING);
+    assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 3000u));
+    assert(PulDir_homingOffset(a) == 50.0f);
+    assert(!PulDir_setHomingOffset(a, NAN) && a->refusal == PULDIR_R_ARG);
+    assert(!PulDir_setHomingOffset(a, 3.0e9f) && a->refusal == PULDIR_R_ARG);
+    assert(PulDir_homingOffset(a) == 50.0f);
+
+    sw_at = -1000;
+    sw_pos = 0;
+    sw = 0;
+    nseen = 0;
+    assert(PulDir_homeStart(a) && a->mode == PULDIR_MODE_HOMING);
+    assert(PulDir_setHomingOffset(a, 80.0f) && PulDir_homingOffset(a) == 80.0f);   /* mid-run */
+    bool changed_in_adjust = false;
+    for (uint32_t t = 0; a->mode == PULDIR_MODE_HOMING; t++) {
+        assert(t < 6000u * MS);
+        fake_run(1);
+        if (!changed_in_adjust && PulDir_homeState(a) == PULDIR_HOME_ADJUST_POSITION) {
+            assert(PulDir_setHomingOffset(a, 30.0f));       /* too late for this run */
+            changed_in_adjust = true;
+        }
+    }
+    assert(changed_in_adjust && nseen == 7);
+    assert(seen_count[5] - seen_count[4] == 80);          /* the offset set before the adjust */
+    assert(PulDir_isHomed(a) && PulDir_position(a) == 100.0f);
+    assert(PulDir_homingOffset(a) == 30.0f);               /* kept for the next run */
+}
+
+/* setHomeHere: refused unhomed and while moving; once homed, the spot it is called on
+ * becomes the datum now, and a fresh homing run returns to that same physical spot. */
+static void t_home_here(void)
+{
+    add_axis(0, false, false);
+    PulDir* a = &ax[0];
+    start();
+    fake_on_write(home_write);
+    fake_on_plan(home_plan);
+    assert(PulDir_setDefaults(a, 4000.0f, 40000.0f, 40000.0f, 0.0f));
+    fake_run(TICKS_PER_PLAN);
+
+    assert(!PulDir_setHomeHere(a) && a->refusal == PULDIR_R_NO_HOMING);
+    assert(PulDir_setHoming(a, -1, 2000.0f, 50.0f, &sw, 100.0f, 3000u));
+    assert(!PulDir_setHomeHere(a) && a->refusal == PULDIR_R_NOT_HOMED);
+
+    sw_at = -1000;
+    sw_pos = 0;
+    sw = 0;
+    nseen = 0;
+    assert(PulDir_homeStart(a));
+    run_until_idle(a, 6000u * MS);
+    assert(PulDir_isHomed(a) && PulDir_position(a) == 100.0f);
+
+    /* move 30 on; while moving it is refused and nothing changes */
+    assert(PulDir_moveTo(a, 130.0f));
+    fake_run(TICKS_PER_PLAN);
+    assert(!PulDir_setHomeHere(a) && a->refusal == PULDIR_R_NOT_IDLE);
+    assert(PulDir_homingOffset(a) == 50.0f);
+    run_until_idle(a, TICK_HZ);
+    const int32_t here = sw_pos;
+
+    assert(PulDir_setHomeHere(a));
+    assert(PulDir_position(a) == 100.0f && PulDir_isHomed(a));   /* the datum, now */
+    assert(PulDir_homingOffset(a) == 80.0f);                       /* 50 + (130 - 100) */
+
+    /* a fresh run comes back to the same physical spot, called zero_pos */
+    sw = 0;
+    nseen = 0;
+    assert(PulDir_homeStart(a));
+    run_until_idle(a, 6000u * MS);
+    assert(PulDir_isHomed(a) && PulDir_position(a) == 100.0f);
+    assert(sw_pos == here);
+}
+
 static void t_homing(void)
 {
     add_axis(0, false, false);
@@ -4761,6 +4846,8 @@ static const struct { const char* name; void (*fn)(void); } cases[] = {
     { "group_fault", t_group_fault },
     { "group_paths", t_group_paths },
     { "homing", t_homing },
+    { "homing_offset", t_homing_offset },
+    { "home_here", t_home_here },
     { "homing_settings", t_homing_settings },
     { "rollover", t_rollover },
     { "console", t_console },

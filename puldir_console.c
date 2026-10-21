@@ -28,7 +28,10 @@ void PulDir_consoleMenu(char* buf, size_t n)
         "K - Halt now and release motor\n"
         "s - Get status, mode, homed, home state and fault count\n"
         "C - Clear fault\n"
-        "H - Start homing state machine\n";
+        "H - Start homing state machine\n"
+        "O<offset> - Set the homing offset, the move after the switch releases\n"
+        "o - Get the homing offset\n"
+        "h - Make the current position home: the offset follows, the position becomes zero_pos\n";
     snprintf(buf, n, "%s", menu);
 }
 
@@ -120,8 +123,13 @@ void PulDir_console(PulDir* a, char cmd, const char* arg)
     case 's': status(a); return;
     case 'C': (void)PulDir_clearFault(a); return;
     case 'H': (void)PulDir_homeStart(a); return;
+    case 'o': say_num(a, "homing offset ", PulDir_homingOffset(a)); return;
+    case 'h':
+        if (PulDir_setHomeHere(a))
+            say_num(a, "homing offset ", PulDir_homingOffset(a));
+        return;
     case 'E': case 'P': case 'V': case 'A': case 'D': case 'Z':
-    case 'J': case 'R': case 'T':
+    case 'J': case 'R': case 'T': case 'O':
         break;
     default: {
         char text[] = "unknown command: ?";
@@ -145,6 +153,7 @@ void PulDir_console(PulDir* a, char cmd, const char* arg)
     case 'J': (void)PulDir_jog(a, x); break;
     case 'R': (void)PulDir_moveBy(a, x); break;
     case 'k': (void)PulDir_stopWithin(a, x); break;
+    case 'O': (void)PulDir_setHomingOffset(a, x); break;
     default:  (void)PulDir_moveTo(a, x); break;
     }
 }

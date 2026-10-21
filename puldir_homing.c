@@ -20,6 +20,66 @@ static PulDirRefusal home_values(const PulDir* a, float speed, float adjust, flo
 
 /* D16: direction +-1, a finite positive speed under the ceiling, a switch, a
  * timeout of at least one tick and at most half the counter; refused while homing. */
+/* The homing offset alone: the distance moved after the switch releases, before the
+ * datum is declared. Accepted in every mode, homing included -- a run in progress takes
+ * it when it reaches its adjust, so a change after that applies from the next run. Under
+ * the same checks as setHoming's adjust; refused before setHoming. */
+bool PulDir_setHomingOffset(PulDir* a, float adjust)
+{
+    PulDirHoming* h = &a->home;
+    PulDirRefusal why = PULDIR_R_NONE;
+    float cap = 0.0f;
+    if (h->switch_ptr == NULL)
+        why = PULDIR_R_NO_HOMING;
+    else if (!isfinite(adjust))
+        why = PULDIR_R_ARG;
+    else
+        why = home_values(a, h->speed, adjust, h->zero, &cap);
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "setHomingOffset", why, 0.0f);
+        return false;
+    }
+    port_lock();
+    h->adjust = adjust;
+    port_unlock();
+    return true;
+}
+
+float PulDir_homingOffset(PulDir* a) { return a->home.adjust; }
+
+/* Make the spot the axis stands on its home. A homing run ends its adjust at the datum,
+ * zero_pos, so a spot `here - zero` further on is that much more adjust: the offset grows
+ * by it, and the next run lands here. The position is declared zero_pos now, so the frame
+ * already agrees. Needs a homed axis -- only that relates the count to the switch -- and
+ * an idle one. Nothing changes on a refusal. */
+bool PulDir_setHomeHere(PulDir* a)
+{
+    PulDirHoming* h = &a->home;
+    PulDirRefusal why = PULDIR_R_NONE;
+    float cap = 0.0f;
+    float adjust = 0.0f;
+    if (h->switch_ptr == NULL)
+        why = PULDIR_R_NO_HOMING;
+    else if (!PulDir_isHomed(a))
+        why = PULDIR_R_NOT_HOMED;
+    else if (a->mode != PULDIR_MODE_IDLE)
+        why = PULDIR_R_NOT_IDLE;
+    else {
+        adjust = h->adjust + (PulDir_position(a) - h->zero);
+        why = home_values(a, h->speed, adjust, h->zero, &cap);
+    }
+    if (why != PULDIR_R_NONE) {
+        puldir_refuse(a, "setHomeHere", why, 0.0f);
+        return false;
+    }
+    if (!PulDir_setPosition(a, h->zero))   /* it refuses and logs if it moved meanwhile */
+        return false;
+    port_lock();
+    h->adjust = adjust;
+    port_unlock();
+    return true;
+}
+
 bool PulDir_setHoming(PulDir* a, int direction, float speed, float adjust,
                       const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms)
 {

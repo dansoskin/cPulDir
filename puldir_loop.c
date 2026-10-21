@@ -71,6 +71,7 @@ static const char* reason(PulDirRefusal why)
     case PULDIR_R_BUSY:       return "busy";
     case PULDIR_R_FULL:       return "axis table full";
     case PULDIR_R_UNREGISTERED: return "not registered";
+    case PULDIR_R_NOT_HOMED:  return "not homed";
     default:                  return "refused";
     }
 }

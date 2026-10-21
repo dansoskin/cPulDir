@@ -60,6 +60,19 @@ def test_actions_send_their_verbs(view):
     assert view.sent == [("E", "1"), ("E", "0"), ("H", ""), ("C", ""), ("k", ""), ("K", "")]
 
 
+def test_home_here_sends_h_then_reads_the_position(view):
+    button(view, "home_here").click()
+    assert view.sent == [("h", ""), ("p", "")]
+
+
+def test_home_offset_sets_and_reads_back(view):
+    view.findChild(QDoubleSpinBox, "value_O").setValue(-2.25)
+    button(view, "set_O").click()
+    assert view.sent == [("O", "-2.25"), ("o", "")]
+    view.handle_event(Readback("homing offset", -2.25))
+    assert label(view, "device_O").text() == "-2.2500"
+
+
 @pytest.mark.parametrize("verb", ["T", "R", "J"])
 def test_go_a_and_go_b_send_the_tab_verb(view, verb):
     tab = motion(view, verb)
@@ -131,6 +144,14 @@ def test_settings_and_defaults_leave_the_cycle_running(view):
     button(view, "set_A").click()
     button(view, "defaults").click()
     assert view.cycle.running
+
+
+def test_home_offset_leaves_the_cycle_running_home_here_ends_it(view):
+    button(motion(view, "T"), "cycle").click()
+    button(view, "set_O").click()
+    assert view.cycle.running
+    button(view, "home_here").click()
+    assert not view.cycle.running
 
 
 def test_datum_ends_the_cycle(view):

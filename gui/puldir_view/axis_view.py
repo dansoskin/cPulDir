@@ -73,18 +73,21 @@ SETTINGS = (
     ("Decel", "D", "d", "/s²", 0.0),
     ("Jerk", "Z", "z", "/s³", 0.0),
     ("Datum", "P", "p", "", -LIMIT),
+    ("Home offset", "O", "o", "", -LIMIT),
 )
 _GETTER = {setter: getter for _title, setter, getter, _suffix, _low in SETTINGS}
 
 #: Which settings row a getter's reply lands in.
-_DEVICE_ROW = {"acceleration": "A", "deceleration": "D", "jerk": "Z", "position": "P"}
+_DEVICE_ROW = {"acceleration": "A", "deceleration": "D", "jerk": "Z", "position": "P",
+               "homing offset": "O"}
 
 #: Verbs that are settings rather than motion: they leave a running cycle alone.
-_SETTINGS_VERBS = frozenset("VAaDdZzF")
+_SETTINGS_VERBS = frozenset("VAaDdZzFOo")
 
 #: Library calls behind the settings rows: their refusals leave a cycle running,
 #: as the settings themselves do.
-_SETTINGS_CALLS = frozenset(("setSpeed", "setAcceleration", "setDeceleration", "setJerk", "restoreDefaults"))
+_SETTINGS_CALLS = frozenset(("setSpeed", "setAcceleration", "setDeceleration", "setJerk", "restoreDefaults",
+                             "setHomingOffset"))
 
 #: The speed row's device column, which nothing can fill.
 NO_GETTER = "—"
@@ -337,14 +340,20 @@ class AxisView(QWidget):
         self._enable = _button("Enable", "enable", "Enable the drive (E1)")
         self._disable = _button("Disable", "disable", "Disable the drive (E0); halts first")
         self._home = _button("Home", "home", "Start the homing sequence (H)")
+        self._home_here = _button(
+            "Home here", "home_here",
+            "Make this spot home (h): the homing offset follows, so the next homing\n"
+            "lands here, and the position becomes the datum now. Needs a homed,\n"
+            "idle axis. Then reads the position back.")
         self._clear_fault = _button("Clr fault", "clear_fault", "Pulse the fault-clear line and drop the latch (C)")
         self._stop = _button("■ Stop", "stop", "Ramp down and stop (k)")
         self._estop = _button("E-STOP", "estop", "Halt now and release the drive (K): anything it holds will drop")
         self._estop.setProperty("role", "estop")
-        for column, widget in enumerate((self._enable, self._disable, self._home, self._clear_fault)):
+        for column, widget in enumerate((self._enable, self._disable, self._home, self._home_here,
+                                         self._clear_fault)):
             actions.addWidget(widget, 0, column)
         actions.addWidget(self._stop, 1, 0, 1, 2)
-        actions.addWidget(self._estop, 1, 2, 1, 2)
+        actions.addWidget(self._estop, 1, 2, 1, 3)
         outer.addLayout(actions)
 
         self._motion = QTabWidget()
@@ -393,7 +402,7 @@ class AxisView(QWidget):
         # Everything that needs the link, greyed out without it. Inputs are not
         # in here: typing ahead of connecting is fine.
         self._live = [
-            self._enable, self._disable, self._home, self._clear_fault,
+            self._enable, self._disable, self._home, self._home_here, self._clear_fault,
             self._stop, self._estop, self._refresh, self._defaults,
             *self._setting_buttons.values(),
         ]
@@ -404,6 +413,7 @@ class AxisView(QWidget):
         self._enable.clicked.connect(lambda *_: self._send("E", "1"))
         self._disable.clicked.connect(lambda *_: self._send("E", "0"))
         self._home.clicked.connect(lambda *_: self._send("H"))
+        self._home_here.clicked.connect(self._make_home_here)
         self._clear_fault.clicked.connect(lambda *_: self._send("C"))
         self._stop.clicked.connect(lambda *_: self._send("k"))
         self._estop.clicked.connect(self._estop_clicked)
@@ -481,6 +491,11 @@ class AxisView(QWidget):
         getter = _GETTER[setter]
         if getter:
             self._send(getter)
+
+    def _make_home_here(self, *_) -> None:
+        # h replies with the new offset; the position it declares is read back.
+        for cmd in ("h", "p"):
+            self._send(cmd)
 
     def _restore_defaults(self, *_) -> None:
         for cmd in ("F", "a", "d", "z"):

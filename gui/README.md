@@ -38,19 +38,24 @@ from any tab. Top to bottom:
   500 ms while the tab is showing (`p`, `v`, `s`).
 - **Message line** — the last event or refusal, red when something failed.
 - **Readout** — position and velocity as the board last reported them.
-- **Actions** — Enable `E1`, Disable `E0`, Home `H`, Clr fault `C`, Stop `k`,
-  E-STOP `K`. E-STOP halts *and releases the drive*.
+- **Actions** — Enable `E1`, Disable `E0`, Home `H`, Home here `h`, Clr fault
+  `C`, Stop `k`, E-STOP `K`. E-STOP halts *and releases the drive*. Home here
+  makes the spot the axis stands on its home: the homing offset grows by
+  `position - zero_pos`, so the next homing lands here, and the position becomes
+  `zero_pos` now. It needs a homed, idle axis, and reads the position back.
 - **Absolute / Relative / Jog** — A and B (positions, distances or signed
   speeds), Go A / Go B, and a timed cycle: send A, wait the interval, send B,
   wait, and again, for *reps* pairs or until stopped. A jog cycle always ends
   with `k`. The cycle does not wait for a move to land: a move still under way is
   retargeted.
-- **Settings** — Speed `V`, Accel `A`, Decel `D`, Jerk `Z`, Datum `P`, each read
-  back after setting except Speed: the console has no getter for the speed
-  setting (`v` is the velocity now), so its column shows "—". Defaults `F`.
+- **Settings** — Speed `V`, Accel `A`, Decel `D`, Jerk `Z`, Datum `P`, Home
+  offset `O`, each read back after setting except Speed: the console has no
+  getter for the speed setting (`v` is the velocity now), so its column shows
+  "—". Defaults `F`. The home offset is the move after the switch releases; it
+  is accepted mid-homing, and a run takes it when it reaches its adjust.
 
 A cycle ends on Stop, E-STOP, any other command from that axis except the
-settings rows (Enable, Disable, Home, Clr fault and Datum all end it), a fault, a
+settings rows (Enable, Disable, Home, Home here, Clr fault and Datum all end it), a fault, a
 refusal of anything but a settings call, a failed homing, switching its motion
 tab, or the link dropping. Settings setters, getters and Defaults leave it
 running. E-STOP on any axis also stops every other axis's cycle (a jog cycle with

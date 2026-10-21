@@ -63,7 +63,7 @@ def fmt_number(value: float) -> str:
 # -- incoming --------------------------------------------------------------
 
 #: What the console's getters reply with (say_num in puldir_console.c).
-READBACK_FIELDS = ("position", "velocity", "acceleration", "deceleration", "jerk")
+READBACK_FIELDS = ("position", "velocity", "acceleration", "deceleration", "jerk", "homing offset")
 
 #: PulDirStatus and PulDirMode as the console names them (status_name and
 #: mode_name in puldir_console.c). test_drift.py holds these to the C.

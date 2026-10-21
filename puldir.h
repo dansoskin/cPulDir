@@ -35,7 +35,8 @@ typedef enum {
 typedef enum {
     PULDIR_R_NONE, PULDIR_R_FAULT, PULDIR_R_MODE, PULDIR_R_ARG, PULDIR_R_RATE,
     PULDIR_R_WINDOW, PULDIR_R_TAPS, PULDIR_R_NOT_IDLE, PULDIR_R_NO_PIN,
-    PULDIR_R_NO_HOMING, PULDIR_R_DROPPED, PULDIR_R_BUSY, PULDIR_R_FULL, PULDIR_R_UNREGISTERED
+    PULDIR_R_NO_HOMING, PULDIR_R_DROPPED, PULDIR_R_BUSY, PULDIR_R_FULL, PULDIR_R_UNREGISTERED,
+    PULDIR_R_NOT_HOMED
 } PulDirRefusal;
 
 struct PulDirGroup;
@@ -112,6 +113,9 @@ void  PulDir_setAutoRelease(PulDir*, bool);
  * each moving phase, up to half the counter; the delays between phases are fixed. */
 bool  PulDir_setHoming(PulDir*, int direction, float speed, float adjust,
                        const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms);
+bool  PulDir_setHomingOffset(PulDir*, float adjust);   /* any mode; a run takes it at its adjust */
+float PulDir_homingOffset(PulDir*);
+bool  PulDir_setHomeHere(PulDir*);   /* this spot becomes home: offset and datum both follow */
 bool  PulDir_setStreamCatchup(PulDir*, uint32_t ms);
 bool  PulDir_register(PulDir*);
 

@@ -42,6 +42,12 @@ CASES = [
     ("console", ["[%s] %s%.4f", "jerk "], "[%s] %s%.4f" % ("m1", "jerk ", 0.0), Readback("jerk", 0.0)),
     (
         "console",
+        ["[%s] %s%.4f", "homing offset "],
+        "[%s] %s%.4f" % ("m1", "homing offset ", -2.25),
+        Readback("homing offset", -2.25),
+    ),
+    (
+        "console",
         [STATUS_FMT],
         STATUS_FMT % ("m1", "MOVING", "PROFILE", 1, "IDLE", "", 2, 99),
         Status("MOVING", "PROFILE", True, "IDLE", "", 2),
@@ -99,14 +105,21 @@ def test_status_and_mode_names_match_the_console():
     assert _c_array(MODES) in SOURCES["console"]
 
 
-@pytest.mark.parametrize("verb", list("EPpVvAaDdZzJRTFkKsCH"))
+@pytest.mark.parametrize("verb", list("EPpVvAaDdZzJRTFkKsCHOoh"))
 def test_every_verb_the_panel_sends_is_a_console_case(verb):
     assert f"case '{verb}'" in SOURCES["console"]
 
 
 @pytest.mark.parametrize(
     "verb, field",
-    [("p", "position"), ("v", "velocity"), ("a", "acceleration"), ("d", "deceleration"), ("z", "jerk")],
+    [
+        ("p", "position"),
+        ("v", "velocity"),
+        ("a", "acceleration"),
+        ("d", "deceleration"),
+        ("z", "jerk"),
+        ("o", "homing offset"),
+    ],
 )
 def test_each_getter_replies_with_its_own_field(verb, field):
     # The literal checks above would pass with two labels swapped between

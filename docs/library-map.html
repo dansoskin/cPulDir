@@ -799,6 +799,7 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
           <dt>PULDIR_R_BUSY</dt><dd>already registered or started, a clear pulse running, homing running, a group busy</dd>
           <dt>PULDIR_R_FULL</dt><dd>axis or group table full</dd>
           <dt>PULDIR_R_UNREGISTERED</dt><dd>motion on an axis not registered (E29)</dd>
+          <dt>PULDIR_R_NOT_HOMED</dt><dd>setHomeHere on an axis without a datum</dd>
         </dl>
       </div>
       <div class="st">
@@ -1499,6 +1500,9 @@ footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
       <thead><tr><th>Call</th><th>What it does</th><th>Refuses with</th><th>Context</th></tr></thead>
       <tbody>
         <tr><td class="sig">bool PulDir_setHoming(PulDir*, int direction, float speed, float adjust, const uint8_t* switch_ptr, float zero_pos, uint32_t phase_timeout_ms)</td><td>Checks every value at the conversion it will run under, then stores them (D16).</td><td class="ref">ARG, RATE (logs the cap), BUSY (in HOMING)</td><td>main only</td></tr>
+        <tr><td class="sig">bool PulDir_setHomingOffset(PulDir*, float adjust)</td><td>The homing offset alone: the distance moved after the switch releases. Accepted in every mode; a run in progress takes it when it reaches its adjust, so a change after that applies from the next run. The same checks as <code>setHoming</code>'s adjust.</td><td class="ref">NO_HOMING before setHoming; ARG for a non-finite value or one whose pulses do not fit</td><td>main only</td></tr>
+        <tr><td class="sig">bool PulDir_setHomeHere(PulDir*)</td><td>Makes the current spot home: the offset grows by <code>position - zero_pos</code>, so the next run lands here, and the position is declared <code>zero_pos</code> now, keeping <code>homed</code>. Nothing changes on a refusal.</td><td class="ref">NO_HOMING before setHoming; NOT_HOMED without a datum; NOT_IDLE while moving; ARG for an offset whose pulses do not fit</td><td>main only</td></tr>
+        <tr><td class="sig">float PulDir_homingOffset(PulDir*)</td><td>The homing offset, user units.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">bool PulDir_homeStart(PulDir*)</td><td>Clears <code>homed</code>, saves <code>settings</code>, REQ_HOME, mode HOMING, <code>moving</code>, state MOVE_TOWARDS_LIMIT, wakes the drive.</td><td class="ref">NO_HOMING, UNREGISTERED, FAULT, MODE (not IDLE), NOT_IDLE (still moving)</td><td>main only</td></tr>
         <tr><td class="sig">void PulDir_homeStop(PulDir*)</td><td>Halts a run in progress; the state goes IDLE either way, which also clears ERROR.</td><td class="dim">none</td><td>main only</td></tr>
         <tr><td class="sig">PulDirHomeState PulDir_homeState(PulDir*)</td><td>Reads <code>state</code>.</td><td class="dim">none</td><td>main only</td></tr>
